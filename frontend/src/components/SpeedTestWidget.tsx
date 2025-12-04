@@ -143,4 +143,21 @@ const SpeedTestWidget: React.FC = () => {
             {['Ping', 'Descarga', 'Subida'].map((text, i) => (
               <div
                 key={text}
-                className="flex items-center space-x-1 text-sm text-gray
+                className="flex items-center space-x-1 text-sm text-gray-600"
+              >
+                <div
+                  className={`w-2 h-2 rounded-full ${
+                    progress > i * 30 ? 'bg-green-500' : 'bg-gray-300'
+                  }`}
+                ></div>
+                <span>{text}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+export default SpeedTestWidget
