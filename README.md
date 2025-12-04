@@ -1,7 +1,7 @@
 🚀 Cómo Ejecutar el Sistema
 Paso 1: Clonar y Configurar
 
-git clone https://github.com/tuusuario/ispmax.git
+git clone https://github.com/stevenx507/ISPFAST
 cd ispmax
 
 # Hacer ejecutable el script de instalación
