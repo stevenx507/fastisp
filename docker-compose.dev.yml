@@ -15,12 +15,15 @@ services:
       - SECRET_KEY=dev-secret-key
       - JWT_SECRET_KEY=dev-jwt-key
       - CORS_ORIGINS=http://localhost:3000
+    env_file:
+      - .env.influx
     volumes:
       - ./backend:/app
       - /app/__pycache__
     depends_on:
       - postgres
       - redis
+      - influxdb
     networks:
       - ispmax-dev
 
@@ -62,6 +65,33 @@ services:
       - "6379:6379"
     networks:
       - ispmax-dev
+  
+  # InfluxDB
+  influxdb:
+    image: influxdb:2.7
+    ports:
+      - "8086:8086"
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+    env_file:
+      - .env.influx
+    networks:
+      - ispmax-dev
+
+  # Grafana
+  grafana:
+    image: grafana/grafana-oss:latest
+    ports:
+      - "3001:3000" # Port changed to 3001 to avoid conflict with frontend
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards
+    depends_on:
+      - influxdb
+    env_file:
+      - .env.influx
+    networks:
+      - ispmax-dev
 
   # PGAdmin (Optional)
   pgadmin:
@@ -82,3 +112,5 @@ networks:
 
 volumes:
   postgres_data:
+  influxdb_data:
+  grafana_data:

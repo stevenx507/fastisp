@@ -2,9 +2,12 @@
 ISPMAX Backend Application
 Main application factory
 """
-import os
+import json
 import logging
-from flask import Flask, jsonify
+import time
+import uuid
+
+from flask import Flask, g, jsonify, request
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager
 from flask_sqlalchemy import SQLAlchemy
@@ -12,7 +15,12 @@ from flask_migrate import Migrate
 from flask_mail import Mail
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from flask_caching import Cache
 from prometheus_flask_exporter import PrometheusMetrics
+from celery import Celery
+from celery.schedules import crontab
+
+from app.config import config as config_map, Config
 
 # Initialize extensions
 db = SQLAlchemy()
@@ -21,14 +29,47 @@ jwt = JWTManager()
 mail = Mail()
 limiter = Limiter(key_func=get_remote_address)
 metrics = PrometheusMetrics.for_app_factory()
+cache = Cache()
+celery = Celery(__name__, broker=Config.CELERY_BROKER_URL, backend=Config.CELERY_RESULT_BACKEND)
 
-def create_app(config_class='config.Config'):
+def create_app(config_name_or_class='development'):
     """Application factory"""
     app = Flask(__name__)
+    from app.tenancy import TenantResolutionError, resolve_tenant_id
     
-    # Load configuration
-    app.config.from_object(config_class)
+    # Load configuration (accepts a config class or a key name)
+    if isinstance(config_name_or_class, str):
+        config_cls = config_map.get(config_name_or_class, config_map['default'])
+    else:
+        config_cls = config_name_or_class
+    app.config.from_object(config_cls)
+    if hasattr(config_cls, 'validate'):
+        config_cls.validate()
     
+    # Update Celery config
+    celery.conf.update(app.config)
+    celery.conf.beat_schedule = {
+        'poll-metrics-every-minute': {
+            'task': 'app.tasks.poll_mikrotik_metrics',
+            'schedule': 60.0,  # Run every 60 seconds
+        },
+        'evaluate-noc-alerts-every-5-minutes': {
+            'task': 'app.tasks.evaluate_noc_alerts',
+            'schedule': 300.0,
+        },
+        'daily-network-kpis': {
+            'task': 'app.tasks.compute_daily_network_kpis',
+            'schedule': crontab(minute=5, hour=0),
+        },
+    }
+
+    # Define the Celery task context
+    class ContextTask(celery.Task):
+        def __call__(self, *args, **kwargs):
+            with app.app_context():
+                return self.run(*args, **kwargs)
+    celery.Task = ContextTask
+
     # Initialize extensions
     db.init_app(app)
     migrate.init_app(app, db)
@@ -36,30 +77,58 @@ def create_app(config_class='config.Config'):
     mail.init_app(app)
     limiter.init_app(app)
     metrics.init_app(app)
+    cache.init_app(app)
     CORS(app, resources={r"/api/*": {"origins": app.config['CORS_ORIGINS']}})
+
+    @app.before_request
+    def setup_request_context():
+        g.request_id = request.headers.get('X-Request-ID') or str(uuid.uuid4())
+        g.request_started_at = time.perf_counter()
+        try:
+            g.tenant_id = resolve_tenant_id()
+        except TenantResolutionError as exc:
+            return jsonify({'error': str(exc)}), 400
+
+    @app.after_request
+    def enrich_response(response):
+        response.headers['X-Request-ID'] = getattr(g, 'request_id', '')
+        started = getattr(g, 'request_started_at', None)
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 2) if started else 0
+        response.headers['X-Response-Time-Ms'] = str(elapsed_ms)
+
+        log_payload = {
+            'request_id': getattr(g, 'request_id', None),
+            'tenant_id': getattr(g, 'tenant_id', None),
+            'method': request.method,
+            'path': request.path,
+            'status_code': response.status_code,
+            'duration_ms': elapsed_ms,
+            'remote_addr': request.headers.get('X-Forwarded-For', request.remote_addr),
+        }
+        app.logger.info(json.dumps(log_payload, ensure_ascii=True))
+        return response
     
     # Configure logging
+    log_level = app.config.get('LOG_LEVEL', 'INFO')
     if not app.debug:
         gunicorn_logger = logging.getLogger('gunicorn.error')
         app.logger.handlers = gunicorn_logger.handlers
         app.logger.setLevel(gunicorn_logger.level)
+    # Ensure desired log level is set
+    app.logger.setLevel(getattr(logging, log_level, logging.INFO))
     
     # Register blueprints
-    from app.routes.auth import auth_bp
-    from app.routes.clients import clients_bp
+    from app.routes.main_routes import main_bp
     from app.routes.mikrotik import mikrotik_bp
-    from app.routes.billing import billing_bp
-    from app.routes.admin import admin_bp
-    from app.routes.provisioning import provisioning_bp
-    from app.routes.monitoring import monitoring_bp
-    
-    app.register_blueprint(auth_bp, url_prefix='/api/auth')
-    app.register_blueprint(clients_bp, url_prefix='/api/clients')
+    from app.routes.olt import olt_bp
+    app.register_blueprint(main_bp, url_prefix='/api')
     app.register_blueprint(mikrotik_bp, url_prefix='/api/mikrotik')
-    app.register_blueprint(billing_bp, url_prefix='/api/billing')
-    app.register_blueprint(admin_bp, url_prefix='/api/admin')
-    app.register_blueprint(provisioning_bp, url_prefix='/api/provisioning')
-    app.register_blueprint(monitoring_bp, url_prefix='/api/monitoring')
+    app.register_blueprint(olt_bp, url_prefix='/api/olt')
+    app.register_blueprint(main_bp, url_prefix='/api/v1', name='main_v1')
+    app.register_blueprint(
+        mikrotik_bp, url_prefix='/api/v1/mikrotik', name='mikrotik_v1'
+    )
+    app.register_blueprint(olt_bp, url_prefix='/api/v1/olt', name='olt_v1')
     
     # Health check endpoint
     @app.route('/health')

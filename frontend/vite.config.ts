@@ -6,7 +6,7 @@ export default defineConfig({
   plugins: [
     react(),
     VitePWA({
-      registerType: 'autoUpdate',
+      registerType: 'prompt',
       workbox: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}']
       },
@@ -39,11 +39,13 @@ export default defineConfig({
     })
   ],
   server: {
-    port: 3000,
+    port: Number(process.env.VITE_DEV_PORT) || 5173,
+    host: process.env.VITE_DEV_HOST || '0.0.0.0',
     proxy: {
       '/api': {
-        target: 'http://localhost:5000',
-        changeOrigin: true
+        target: process.env.VITE_BACKEND_URL || 'http://localhost:5000',
+        changeOrigin: true,
+        rewrite: (path) => path // Mantén /api en la ruta
       }
     }
   },

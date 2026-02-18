@@ -11,6 +11,12 @@ services:
       - REDIS_URL=${REDIS_URL}
       - SECRET_KEY=${SECRET_KEY}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - CORS_ORIGINS=${CORS_ORIGINS}
+      - MIKROTIK_DEFAULT_USERNAME=${MIKROTIK_DEFAULT_USERNAME}
+      - MIKROTIK_DEFAULT_PASSWORD=${MIKROTIK_DEFAULT_PASSWORD}
+      - LOG_LEVEL=${LOG_LEVEL}
+      - GUNICORN_WORKERS=${GUNICORN_WORKERS}
       - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
       - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID}
       - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN}
@@ -42,12 +48,17 @@ services:
       update_config:
         parallelism: 1
         delay: 10s
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.frontend.rule=Host(`${FRONTEND_HOST}`)"
+        - "traefik.http.routers.frontend.entrypoints=websecure"
+        - "traefik.http.routers.frontend.tls.certresolver=myresolver"
+        - "traefik.http.services.frontend.loadbalancer.server.port=80" # Nginx serves on port 80 inside the container
 
   # Add load balancer for production
   traefik:
     image: traefik:v2.10
     command:
-      - "--api.insecure=true"
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
       - "--entrypoints.web.address=:80"
@@ -55,10 +66,12 @@ services:
       - "--certificatesresolvers.myresolver.acme.tlschallenge=true"
       - "--certificatesresolvers.myresolver.acme.email=${TRAEFIK_ACME_EMAIL}"
       - "--certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json"
+    environment: # New environment section
+      - TRAEFIK_ACME_EMAIL=${TRAEFIK_ACME_EMAIL}
+      - FRONTEND_HOST=${FRONTEND_HOST}
     ports:
       - "80:80"
       - "443:443"
-      - "8080:8080"
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock:ro"
       - "./letsencrypt:/letsencrypt"

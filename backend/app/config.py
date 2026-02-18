@@ -4,11 +4,20 @@ Configuration settings for different environments
 import os
 from datetime import timedelta
 
+DEV_ENCRYPTION_KEY = "itTQ-n1WYoDTC_iw8glZpwkfxAknjNtz85t-6xeUkso="
+
+
+def _split_csv(raw_value: str) -> list[str]:
+    return [value.strip() for value in raw_value.split(',') if value.strip()]
+
+
 class Config:
     """Base configuration"""
     # Security
-    SECRET_KEY = os.environ.get('SECRET_KEY') or 'dev-secret-key-change-in-production'
-    JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY') or 'jwt-secret-key-change-in-production'
+    SECRET_KEY = os.environ.get('SECRET_KEY') or 'dev-secret-key-change-me'
+    JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY') or SECRET_KEY
+    # Stable fallback for local development to avoid boot-time crashes.
+    ENCRYPTION_KEY = os.environ.get('ENCRYPTION_KEY') or DEV_ENCRYPTION_KEY
     JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=1)
     JWT_REFRESH_TOKEN_EXPIRES = timedelta(days=30)
     
@@ -19,18 +28,30 @@ class Config:
     
     # Redis
     REDIS_URL = os.environ.get('REDIS_URL') or 'redis://localhost:6379/0'
+
+    # InfluxDB
+    INFLUXDB_URL = os.environ.get('INFLUXDB_URL', 'http://localhost:8086')
+    INFLUXDB_TOKEN = os.environ.get('DOCKER_INFLUXDB_INIT_ADMIN_TOKEN', 'my-super-secret-token')
+    INFLUXDB_ORG = os.environ.get('DOCKER_INFLUXDB_INIT_ORG', 'ispfast')
+    INFLUXDB_BUCKET = os.environ.get('DOCKER_INFLUXDB_INIT_BUCKET', 'metrics')
     
     # CORS
-    CORS_ORIGINS = os.environ.get('CORS_ORIGINS', 'http://localhost:3000').split(',')
+    CORS_ORIGINS = _split_csv(os.environ.get('CORS_ORIGINS', 'http://localhost:3000'))
     
     # Rate limiting
     RATELIMIT_DEFAULT = "200 per minute"
-    RATELIMIT_STORAGE_URL = REDIS_URL
+    RATELIMIT_STORAGE_URI = REDIS_URL
+    RATELIMIT_STORAGE_URL = REDIS_URL  # Backward compatibility with existing config
+
+    # Cache
+    CACHE_TYPE = os.environ.get('CACHE_TYPE', 'SimpleCache')
+    CACHE_DEFAULT_TIMEOUT = int(os.environ.get('CACHE_DEFAULT_TIMEOUT', 300))
+    CACHE_REDIS_URL = REDIS_URL
     
     # Email
     MAIL_SERVER = os.environ.get('MAIL_SERVER', 'smtp.gmail.com')
     MAIL_PORT = int(os.environ.get('MAIL_PORT', 587))
-    MAIL_USE_TLS = os.environ.get('MAIL_USE_TLS', 'true').lower() == 'true'
+    MAIL_USE_TLS = os.environ.get('MAIL_USE_TLS', 'true').lower() in ('true', '1', 't')
     MAIL_USERNAME = os.environ.get('MAIL_USERNAME')
     MAIL_PASSWORD = os.environ.get('MAIL_PASSWORD')
     MAIL_DEFAULT_SENDER = os.environ.get('MAIL_DEFAULT_SENDER', 'noreply@ispmax.com')
@@ -59,11 +80,16 @@ class Config:
     # Logging
     LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO')
 
+    @classmethod
+    def validate(cls) -> None:
+        """Hook for environment validation in specific config classes."""
+        return None
+
 
 class DevelopmentConfig(Config):
     """Development configuration"""
     DEBUG = True
-    SQLALCHEMY_DATABASE_URI = 'postgresql://ispmax:password@localhost/ispmax_dev'
+    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or 'sqlite:///dev.db'
 
 
 class TestingConfig(Config):
@@ -80,6 +106,53 @@ class ProductionConfig(Config):
     # Use environment variables in production
     JWT_ACCESS_TOKEN_EXPIRES = timedelta(minutes=15)
     JWT_REFRESH_TOKEN_EXPIRES = timedelta(days=7)
+
+    # Environment-provided production values (validated at runtime)
+    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL')
+    REDIS_URL = os.environ.get('REDIS_URL')
+    CORS_ORIGINS = _split_csv(os.environ.get('CORS_ORIGINS', ''))
+    RATELIMIT_STORAGE_URI = REDIS_URL
+    RATELIMIT_STORAGE_URL = REDIS_URL
+    CACHE_TYPE = os.environ.get('CACHE_TYPE', 'RedisCache')
+    CACHE_REDIS_URL = REDIS_URL
+
+    MIKROTIK_DEFAULT_USERNAME = os.environ.get('MIKROTIK_DEFAULT_USERNAME')
+    MIKROTIK_DEFAULT_PASSWORD = os.environ.get('MIKROTIK_DEFAULT_PASSWORD')
+
+    @classmethod
+    def validate(cls) -> None:
+        required_env = [
+            'SECRET_KEY',
+            'JWT_SECRET_KEY',
+            'DATABASE_URL',
+            'REDIS_URL',
+            'ENCRYPTION_KEY',
+            'MIKROTIK_DEFAULT_USERNAME',
+            'MIKROTIK_DEFAULT_PASSWORD',
+        ]
+        missing = [key for key in required_env if not os.environ.get(key)]
+        if missing:
+            missing_keys = ', '.join(missing)
+            raise ValueError(
+                f"Missing required production environment variables: {missing_keys}"
+            )
+
+        cors_origins = _split_csv(os.environ.get('CORS_ORIGINS', ''))
+        if not cors_origins:
+            raise ValueError(
+                "CORS_ORIGINS must be set in production and contain at least one origin."
+            )
+
+        weak_keys = [
+            key
+            for key in ('SECRET_KEY', 'JWT_SECRET_KEY')
+            if len(os.environ.get(key, '')) < 32
+        ]
+        if weak_keys:
+            weak = ', '.join(weak_keys)
+            raise ValueError(
+                f"Production keys must be at least 32 characters long: {weak}"
+            )
 
 
 config = {

@@ -14,7 +14,9 @@ psycopg2-binary==2.9.7
 redis==5.0.1
 
 # MikroTik
-routeros-api==1.7.1
+routeros-api  # use latest available on PyPI; pin to a specific repo/version if needed
+paramiko==3.5.0
+pyotp==2.9.0
 
 # Payments
 stripe==7.14.0
@@ -26,6 +28,9 @@ eventlet==0.33.3
 # Monitoring
 prometheus-client==0.18.0
 prometheus-flask-exporter==0.22.4
+
+# Time Series
+influxdb-client[ciso]==1.40.0
 
 # AI & Chat
 openai==0.28.0
@@ -51,3 +56,9 @@ python-dateutil==2.8.2
 # Production
 gunicorn==21.2.0
 gevent==23.9.1
+
+Flask-Caching==1.11.1
+
+# Development & Linting
+ruff==0.1.9
+pytest==8.3.5

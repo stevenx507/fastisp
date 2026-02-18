@@ -15,18 +15,17 @@ const SpeedTestWidget: React.FC = () => {
     setIsTesting(true)
     setProgress(0)
 
-    // Simular prueba de velocidad
     const phases = [
-      { name: 'ping', duration: 2000, progress: 25 },
-      { name: 'download', duration: 4000, progress: 60 },
-      { name: 'upload', duration: 3000, progress: 90 },
-      { name: 'complete', duration: 1000, progress: 100 }
+      { progress: 25 },
+      { progress: 60 },
+      { progress: 90 },
+      { progress: 100 }
     ]
 
     for (const phase of phases) {
-      await new Promise(resolve => {
+      await new Promise((resolve) => {
         const interval = setInterval(() => {
-          setProgress(prev => {
+          setProgress((prev) => {
             if (prev >= phase.progress) {
               clearInterval(interval)
               resolve(null)
@@ -38,7 +37,6 @@ const SpeedTestWidget: React.FC = () => {
       })
     }
 
-    // Resultados simulados
     setResults({
       download: Math.floor(Math.random() * 80) + 20,
       upload: Math.floor(Math.random() * 40) + 10,
@@ -51,19 +49,10 @@ const SpeedTestWidget: React.FC = () => {
 
   return (
     <div className="text-center">
-      {/* Progress Circle */}
-      <div className="relative inline-block mb-6">
-        <div className="w-32 h-32 relative">
-          <svg className="w-full h-full transform -rotate-90">
-            <circle
-              cx="64"
-              cy="64"
-              r="56"
-              stroke="currentColor"
-              strokeWidth="8"
-              fill="transparent"
-              className="text-gray-200"
-            />
+      <div className="relative mb-6 inline-block">
+        <div className="relative h-32 w-32">
+          <svg className="h-full w-full -rotate-90 transform">
+            <circle cx="64" cy="64" r="56" stroke="currentColor" strokeWidth="8" fill="transparent" className="text-slate-700" />
             <circle
               cx="64"
               cy="64"
@@ -73,89 +62,70 @@ const SpeedTestWidget: React.FC = () => {
               fill="transparent"
               strokeDasharray="352"
               strokeDashoffset={352 - (352 * progress) / 100}
-              className="text-blue-600 transition-all duration-300"
+              className="text-cyan-400 transition-all duration-300"
               strokeLinecap="round"
             />
           </svg>
           <div className="absolute inset-0 flex items-center justify-center">
-            <div className="text-center">
-              <div className="text-2xl font-bold text-gray-900">{progress}%</div>
-              <div className="text-sm text-gray-600">
-                {isTesting ? 'Probando...' : 'Listo'}
-              </div>
+            <div>
+              <div className="text-2xl font-bold text-white">{progress}%</div>
+              <div className="text-sm text-slate-300">{isTesting ? 'Probando...' : 'Listo'}</div>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Start Button */}
-      {!isTesting && progress === 0 && (
+      {!isTesting && progress === 0 ? (
         <motion.button
           whileHover={{ scale: 1.05 }}
           whileTap={{ scale: 0.95 }}
           onClick={startTest}
-          className="bg-gradient-to-r from-blue-600 to-purple-600 text-white font-semibold py-3 px-8 rounded-xl shadow-lg hover:shadow-xl transition-all"
+          className="rounded-xl bg-gradient-to-r from-cyan-400 to-blue-500 px-8 py-3 font-semibold text-slate-950 transition hover:brightness-110"
         >
-          🚀 Iniciar Prueba 4K
+          Iniciar prueba
         </motion.button>
-      )}
+      ) : null}
 
-      {/* Results */}
-      {!isTesting && progress === 100 && (
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="mt-6"
-        >
-          <div className="grid grid-cols-2 gap-4 mb-4">
-            <div className="bg-blue-50 p-4 rounded-lg">
-              <div className="text-2xl font-bold text-blue-900">{results.download} Mbps</div>
-              <div className="text-sm text-blue-700">Descarga</div>
+      {!isTesting && progress === 100 ? (
+        <motion.div initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="mt-6">
+          <div className="mb-4 grid grid-cols-2 gap-4">
+            <div className="rounded-lg border border-cyan-300/25 bg-cyan-400/10 p-4">
+              <div className="text-2xl font-bold text-cyan-100">{results.download} Mbps</div>
+              <div className="text-sm text-cyan-200">Descarga</div>
             </div>
-            <div className="bg-purple-50 p-4 rounded-lg">
-              <div className="text-2xl font-bold text-purple-900">{results.upload} Mbps</div>
-              <div className="text-sm text-purple-700">Subida</div>
+            <div className="rounded-lg border border-violet-300/25 bg-violet-400/10 p-4">
+              <div className="text-2xl font-bold text-violet-100">{results.upload} Mbps</div>
+              <div className="text-sm text-violet-200">Subida</div>
             </div>
           </div>
           <div className="grid grid-cols-2 gap-2 text-sm">
             <div>
-              <span className="text-gray-600">Ping:</span>
-              <span className="font-semibold ml-2">{results.ping} ms</span>
+              <span className="text-slate-300">Ping:</span>
+              <span className="ml-2 font-semibold text-white">{results.ping} ms</span>
             </div>
             <div>
-              <span className="text-gray-600">Jitter:</span>
-              <span className="font-semibold ml-2">{results.jitter.toFixed(1)} ms</span>
+              <span className="text-slate-300">Jitter:</span>
+              <span className="ml-2 font-semibold text-white">{results.jitter.toFixed(1)} ms</span>
             </div>
           </div>
-          <button
-            onClick={startTest}
-            className="mt-4 text-blue-600 hover:text-blue-700 font-medium"
-          >
+          <button onClick={startTest} className="mt-4 text-sm font-medium text-cyan-300 hover:text-cyan-200">
             Realizar otra prueba
           </button>
         </motion.div>
-      )}
+      ) : null}
 
-      {/* Testing Indicator */}
-      {isTesting && (
+      {isTesting ? (
         <div className="mt-4">
-          <div className="flex justify-center space-x-2">
+          <div className="flex justify-center space-x-3">
             {['Ping', 'Descarga', 'Subida'].map((text, i) => (
-              <div
-                key={text}
-                className="flex items-center space-x-1 text-sm text-gray-600"
-              >
-                <div
-                  className={`w-2 h-2 rounded-full ${
-                    progress > i * 30 ? 'bg-green-500' : 'bg-gray-300'
-                  }`}
-                ></div>
+              <div key={text} className="flex items-center space-x-1 text-sm text-slate-300">
+                <span className={`h-2 w-2 rounded-full ${progress > i * 30 ? 'bg-green-500' : 'bg-gray-300'}`} />
                 <span>{text}</span>
               </div>
             ))}
           </div>
         </div>
-      )}
+      ) : null}
     </div>
   )
 }

@@ -7,7 +7,7 @@ services:
     environment:
       POSTGRES_DB: ispmax
       POSTGRES_USER: ispmax
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-ChangeMe123!}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./backups:/backups
@@ -24,7 +24,7 @@ services:
   # Redis for Cache and Sessions
   redis:
     image: redis:7-alpine
-    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-RedisPass123!}
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
     volumes:
       - redis_data:/data
     ports:
@@ -42,10 +42,10 @@ services:
     build: ./backend
     environment:
       - FLASK_ENV=development
-      - DATABASE_URL=postgresql://ispmax:${DB_PASSWORD:-ChangeMe123!}@postgres:5432/ispmax
-      - REDIS_URL=redis://:${REDIS_PASSWORD:-RedisPass123!}@redis:6379/0
-      - SECRET_KEY=${SECRET_KEY:-DevSecretKeyChangeInProduction!}
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-JwtSecretKeyChangeInProduction!}
+      - DATABASE_URL=postgresql://ispmax:${DB_PASSWORD}@postgres:5432/ispmax
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
+      - SECRET_KEY=${SECRET_KEY}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
       - CORS_ORIGINS=http://localhost:3000,http://frontend:3000
     volumes:
       - ./backend:/app
@@ -84,8 +84,8 @@ services:
     command: celery -A app.celery worker --loglevel=info
     environment:
       - FLASK_ENV=development
-      - DATABASE_URL=postgresql://ispmax:${DB_PASSWORD:-ChangeMe123!}@postgres:5432/ispmax
-      - REDIS_URL=redis://:${REDIS_PASSWORD:-RedisPass123!}@redis:6379/0
+      - DATABASE_URL=postgresql://ispmax:${DB_PASSWORD}@postgres:5432/ispmax
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
     depends_on:
       - backend
       - redis
@@ -99,8 +99,8 @@ services:
     command: celery -A app.celery beat --loglevel=info
     environment:
       - FLASK_ENV=development
-      - DATABASE_URL=postgresql://ispmax:${DB_PASSWORD:-ChangeMe123!}@postgres:5432/ispmax
-      - REDIS_URL=redis://:${REDIS_PASSWORD:-RedisPass123!}@redis:6379/0
+      - DATABASE_URL=postgresql://ispmax:${DB_PASSWORD}@postgres:5432/ispmax
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
     depends_on:
       - backend
       - redis
@@ -130,7 +130,7 @@ services:
   grafana:
     image: grafana/grafana:10.0.3
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
       - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-piechart-panel
     volumes:
       - grafana_data:/var/lib/grafana

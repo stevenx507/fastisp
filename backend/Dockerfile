@@ -1,18 +1,37 @@
-FROM python:3.11-slim
+# Stage 1: Builder
+FROM python:3.11-slim-buster as builder
+
+# Install system dependencies for building Python packages
+RUN apt-get update && apt-get install -y \
+    gcc \
+    libpq-dev \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install system dependencies
+# Copy requirements
+COPY requirements.txt .
+
+# Install Python dependencies
+RUN pip wheel --no-cache-dir --wheel-dir=/wheels -r requirements.txt
+
+# Stage 2: Production
+FROM python:3.11-slim-buster as production
+
+# Install only runtime system dependencies
 RUN apt-get update && apt-get install -y \
-    gcc \
     postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+WORKDIR /app
 
-# Copy application
+# Copy built wheels from builder stage
+COPY --from=builder /wheels /wheels
+# Install Python dependencies from wheels
+RUN pip install --no-cache-dir --find-links=/wheels /wheels/*
+
+# Copy application code
 COPY . .
 
 # Create non-root user
@@ -22,5 +41,8 @@ USER ispmax
 # Expose port
 EXPOSE 5000
 
+# Set default number of Gunicorn workers, configurable via environment variable
+ENV GUNICORN_WORKERS=4
+
 # Run application
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "4", "--worker-class", "gevent", "wsgi:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "${GUNICORN_WORKERS}", "--worker-class", "gevent", "wsgi:app"]
