@@ -1,48 +1,38 @@
 version: '3.8'
 
 services:
+  postgres:
+    image: postgres:15
+    environment:
+      - POSTGRES_DB=ispmax
+      - POSTGRES_USER=ispmax
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-FjGaVL3VVbTpRYvAAN4tFA}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - ispmax-network
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-FjGaVL3VVbTpRYvAAN4tFA}"]
+    networks:
+      - ispmax-network
+
   backend:
     build:
       context: ./backend
       target: production
+    env_file:
+      - .env.prod
     environment:
-      - FLASK_ENV=production
-      - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=${REDIS_URL}
-      - SECRET_KEY=${SECRET_KEY}
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
-      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
-      - CORS_ORIGINS=${CORS_ORIGINS}
-      - FRONTEND_URL=${FRONTEND_URL}
-      - ALLOW_SELF_SIGNUP=${ALLOW_SELF_SIGNUP}
-      - ALLOW_DEMO_LOGIN=${ALLOW_DEMO_LOGIN}
-      - ALLOW_PAYMENT_DEMO=${ALLOW_PAYMENT_DEMO}
-      - ALLOW_GOOGLE_LOGIN=${ALLOW_GOOGLE_LOGIN}
-      - MIKROTIK_DEFAULT_USERNAME=${MIKROTIK_DEFAULT_USERNAME}
-      - MIKROTIK_DEFAULT_PASSWORD=${MIKROTIK_DEFAULT_PASSWORD}
-      - LOG_LEVEL=${LOG_LEVEL}
-      - GUNICORN_WORKERS=${GUNICORN_WORKERS}
-      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID}
-      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - MAIL_USERNAME=${MAIL_USERNAME}
-      - MAIL_PASSWORD=${MAIL_PASSWORD}
-    deploy:
-      replicas: 3
-      update_config:
-        parallelism: 1
-        delay: 10s
-      restart_policy:
-        condition: on-failure
-      labels:
-        - "traefik.enable=true"
-        - "traefik.http.routers.api.rule=Host(`${API_HOST}`)"
-        - "traefik.http.routers.api.entrypoints=websecure"
-        - "traefik.http.routers.api.tls.certresolver=myresolver"
-        - "traefik.http.routers.api.middlewares=secure-headers@docker,ipwhitelist@docker,geoip2@file"
-        - "traefik.http.services.api.loadbalancer.server.port=5000"
+      - CACHE_TYPE=SimpleCache
+      - CACHE_REDIS_URL=
+    command: ["/bin/sh","-c","CACHE_TYPE=SimpleCache CACHE_REDIS_URL= gunicorn --bind 0.0.0.0:5000 --workers 2 wsgi:app"]
+    depends_on:
+      - postgres
+      - redis
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -50,59 +40,47 @@ services:
       - backups:/app/backups
     networks:
       - ispmax-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.api.rule=Host(`${API_HOST}`)"
+      - "traefik.http.routers.api.entrypoints=websecure"
+      - "traefik.http.routers.api.tls.certresolver=myresolver"
+      - "traefik.http.routers.api.middlewares=secure-headers@docker,ipwhitelist@docker,geoip2@file"
+      - "traefik.http.services.api.loadbalancer.server.port=5000"
 
   frontend:
     build:
       context: ./frontend
       target: production
+    env_file:
+      - .env.prod
     environment:
       - VITE_API_URL=${API_URL}
       - VITE_GOOGLE_CLIENT_ID=${VITE_GOOGLE_CLIENT_ID}
-    deploy:
-      replicas: 2
-      update_config:
-        parallelism: 1
-        delay: 10s
-      labels:
-        - "traefik.enable=true"
-        - "traefik.http.routers.frontend.rule=Host(`${FRONTEND_HOST}`)"
-        - "traefik.http.routers.frontend.entrypoints=websecure"
-        - "traefik.http.routers.frontend.tls.certresolver=myresolver"
-        - "traefik.http.routers.frontend.middlewares=secure-headers@docker,ipwhitelist@docker,geoip2@file"
-        - "traefik.http.services.frontend.loadbalancer.server.port=80" # Nginx serves on port 80 inside the container
     networks:
       - ispmax-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.frontend.rule=Host(`${FRONTEND_HOST}`)"
+      - "traefik.http.routers.frontend.entrypoints=websecure"
+      - "traefik.http.routers.frontend.tls.certresolver=myresolver"
+      - "traefik.http.routers.frontend.middlewares=secure-headers@docker,ipwhitelist@docker,geoip2@file"
+      - "traefik.http.services.frontend.loadbalancer.server.port=80"
 
   celery-worker:
     build:
       context: ./backend
       target: production
+    env_file:
+      - .env.prod
     environment:
-      - FLASK_ENV=production
-      - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=${REDIS_URL}
-      - SECRET_KEY=${SECRET_KEY}
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
-      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
-      - CORS_ORIGINS=${CORS_ORIGINS}
-      - FRONTEND_URL=${FRONTEND_URL}
-      - ALLOW_SELF_SIGNUP=${ALLOW_SELF_SIGNUP}
-      - ALLOW_DEMO_LOGIN=${ALLOW_DEMO_LOGIN}
-      - ALLOW_PAYMENT_DEMO=${ALLOW_PAYMENT_DEMO}
-      - ALLOW_GOOGLE_LOGIN=${ALLOW_GOOGLE_LOGIN}
-      - MIKROTIK_DEFAULT_USERNAME=${MIKROTIK_DEFAULT_USERNAME}
-      - MIKROTIK_DEFAULT_PASSWORD=${MIKROTIK_DEFAULT_PASSWORD}
-      - LOG_LEVEL=${LOG_LEVEL}
-      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID}
-      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - MAIL_USERNAME=${MAIL_USERNAME}
-      - MAIL_PASSWORD=${MAIL_PASSWORD}
+      - CACHE_TYPE=SimpleCache
+      - CACHE_REDIS_URL=
     command: ["celery", "-A", "app.tasks", "worker", "--loglevel=info", "--concurrency=2"]
     depends_on:
       - backend
-    volumes:
-      - backups:/app/backups
+      - redis
+      - postgres
     networks:
       - ispmax-network
 
@@ -110,62 +88,43 @@ services:
     build:
       context: ./backend
       target: production
+    env_file:
+      - .env.prod
     environment:
-      - FLASK_ENV=production
-      - DATABASE_URL=${DATABASE_URL}
-      - REDIS_URL=${REDIS_URL}
-      - SECRET_KEY=${SECRET_KEY}
-      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
-      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
-      - CORS_ORIGINS=${CORS_ORIGINS}
-      - FRONTEND_URL=${FRONTEND_URL}
-      - ALLOW_SELF_SIGNUP=${ALLOW_SELF_SIGNUP}
-      - ALLOW_DEMO_LOGIN=${ALLOW_DEMO_LOGIN}
-      - ALLOW_PAYMENT_DEMO=${ALLOW_PAYMENT_DEMO}
-      - ALLOW_GOOGLE_LOGIN=${ALLOW_GOOGLE_LOGIN}
-      - MIKROTIK_DEFAULT_USERNAME=${MIKROTIK_DEFAULT_USERNAME}
-      - MIKROTIK_DEFAULT_PASSWORD=${MIKROTIK_DEFAULT_PASSWORD}
-      - LOG_LEVEL=${LOG_LEVEL}
-      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID}
-      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - MAIL_USERNAME=${MAIL_USERNAME}
-      - MAIL_PASSWORD=${MAIL_PASSWORD}
-    command: ["celery", "-A", "app.tasks", "beat", "--loglevel=info", "--scheduler", "celery.beat:PersistentScheduler"]
+      - CACHE_TYPE=SimpleCache
+      - CACHE_REDIS_URL=
+    command: ["celery", "-A", "app.tasks", "beat", "--loglevel=info"]
     depends_on:
       - backend
-    volumes:
-      - backups:/app/backups
+      - redis
+      - postgres
     networks:
       - ispmax-network
 
-  # Add load balancer for production
   traefik:
     image: traefik:v2.10
     command:
-      - "--providers.docker=true"
-      - "--providers.docker.exposedbydefault=false"
-      - "--providers.file.filename=/dynamic/geoip.yml"
-      - "--entrypoints.web.address=:80"
-      - "--entrypoints.websecure.address=:443"
-      - "--certificatesresolvers.myresolver.acme.tlschallenge=true"
-      - "--certificatesresolvers.myresolver.acme.email=${TRAEFIK_ACME_EMAIL}"
-      - "--certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json"
-      - "--entrypoints.websecure.forwardedheaders.insecure=true"
-      - "--serverstransport.insecureskipverify=true"
-      - "--experimental.plugins.geoip2.modulename=github.com/traefik/plugin-geoip2"
-      - "--experimental.plugins.geoip2.version=v0.6.0"
-    environment: # New environment section
-      - TRAEFIK_ACME_EMAIL=${TRAEFIK_ACME_EMAIL}
-      - FRONTEND_HOST=${FRONTEND_HOST}
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --certificatesresolvers.myresolver.acme.httpchallenge=true
+      - --certificatesresolvers.myresolver.acme.httpchallenge.entrypoint=web
+      - --certificatesresolvers.myresolver.acme.email=${TRAEFIK_ACME_EMAIL}
+      - --certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json
+      - --entrypoints.websecure.forwardedheaders.insecure=true
+      - --serverstransport.insecureskipverify=true
+      - --experimental.plugins.geoip2.modulename=github.com/traefik/plugin-geoip2
+      - --experimental.plugins.geoip2.version=v0.6.0
     ports:
       - "80:80"
       - "443:443"
     volumes:
-      - "/var/run/docker.sock:/var/run/docker.sock:ro"
-      - "./letsencrypt:/letsencrypt"
-      - "./deploy/traefik:/dynamic:ro"
-      - "./deploy/geoip:/geoip:ro"
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./letsencrypt:/letsencrypt
+      - ./deploy/traefik:/etc/traefik/dynamic:ro
+      - ./deploy/geoip:/geoip:ro
     networks:
       - ispmax-network
     labels:
@@ -179,9 +138,12 @@ services:
       - "traefik.http.middlewares.geoip2.plugin.geoip2.databasePath=/geoip/GeoLite2-Country.mmdb"
       - "traefik.http.middlewares.geoip2.plugin.geoip2.header=X-Country-Code"
 
+volumes:
+  pgdata:
+  backups:
+  letsencrypt:
+
 networks:
   ispmax-network:
     driver: bridge
-
-volumes:
-  backups:
+EOF

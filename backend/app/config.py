@@ -133,8 +133,8 @@ class ProductionConfig(Config):
     CORS_ORIGINS = _split_csv(os.environ.get('CORS_ORIGINS', ''))
     RATELIMIT_STORAGE_URI = REDIS_URL
     RATELIMIT_STORAGE_URL = REDIS_URL
-    CACHE_TYPE = os.environ.get('CACHE_TYPE', 'RedisCache')
-    CACHE_REDIS_URL = REDIS_URL
+    CACHE_TYPE = os.environ.get('CACHE_TYPE', 'SimpleCache')
+    CACHE_REDIS_URL = os.environ.get('CACHE_REDIS_URL', REDIS_URL)
 
     FRONTEND_URL = os.environ.get('FRONTEND_URL')
     ALLOW_SELF_SIGNUP = _as_bool(os.environ.get('ALLOW_SELF_SIGNUP'), default=True)
