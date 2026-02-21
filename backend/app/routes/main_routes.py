@@ -1683,5 +1683,35 @@ def backup_router(router_id):
     return jsonify({"success": True, "filename": filename}), 200
 
 
+@main_bp.route('/admin/routers/<int:router_id>/remote-script', methods=['GET'])
+@admin_required()
+def router_remote_script(router_id):
+    """Devuelve un script rápido para habilitar acceso remoto seguro (API/SSH) en MikroTik."""
+    router = MikroTikRouter.query.get_or_404(router_id)
+    api_user = f"fastisp-{router_id}"
+    api_pass = f"{router.password or 'CambiarEstaClave'}"
+    api_port = 8728
+    ssh_port = 22
+    script = f"""/ip service set api disabled=no port={api_port}
+/ip service set ssh disabled=no port={ssh_port}
+/user add name="{api_user}" password="{api_pass}" group=full comment="Acceso remoto FastISP" disabled=no
+/ip firewall address-list add list=fastisp-remote address=YOUR_PUBLIC_IP/32 comment="Autorizar IP de gestión"
+/ip firewall filter add chain=input action=accept protocol=tcp dst-port={api_port} src-address-list=fastisp-remote comment="API FastISP"
+/ip firewall filter add chain=input action=accept protocol=tcp dst-port={ssh_port} src-address-list=fastisp-remote comment="SSH FastISP"
+"""
+    return jsonify({
+        "router": {
+            "id": router.id,
+            "name": router.name,
+            "ip": router.ip_address,
+            "api_user": api_user,
+            "api_port": api_port,
+            "ssh_port": ssh_port,
+        },
+        "script": script,
+        "note": "Reemplaza YOUR_PUBLIC_IP/32 por la IP de gestión permitida antes de ejecutar en MikroTik."
+    }), 200
+
+
 
 
