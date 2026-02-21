@@ -166,7 +166,7 @@ const AdminPanel: React.FC = () => {
   }
 
   return (
-    <div className="enterprise-shell min-h-screen text-slate-100">
+    <div className="min-h-screen bg-slate-900 text-slate-100">
       {/* Sidebar for Mobile */}
       <Transition.Root show={sidebarOpen} as={Fragment}>
         <Dialog as="div" className="relative z-40 lg:hidden" onClose={setSidebarOpen}>
