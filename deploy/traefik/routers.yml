@@ -9,7 +9,6 @@ http:
       middlewares:
         - secure-headers
         - ipwhitelist
-        - geoip2
       tls:
         certResolver: myresolver
 
@@ -22,7 +21,6 @@ http:
       middlewares:
         - secure-headers
         - ipwhitelist
-        - geoip2
       tls:
         certResolver: myresolver
 
