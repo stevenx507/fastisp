@@ -13,6 +13,7 @@ from app.services.mikrotik_service import MikroTikService
 from app.services.monitoring_service import MonitoringService
 from app.tenancy import current_tenant_id, tenant_access_allowed
 from datetime import date
+from werkzeug.exceptions import BadRequest
 from io import BytesIO
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
@@ -1591,6 +1592,95 @@ def admin_router_usage():
 
     result = list(router_map.values())
     return jsonify({"items": result, "count": len(result)}), 200
+
+
+# ==================== RED: SUSPENDER / ACTIVAR / CAMBIAR VELOCIDAD ====================
+
+@main_bp.route('/admin/clients/<int:client_id>/suspend', methods=['POST'])
+@admin_required()
+def suspend_client(client_id):
+    client = Client.query.get_or_404(client_id)
+    tenant_id = current_tenant_id()
+    if tenant_id and client.tenant_id not in (None, tenant_id):
+        return jsonify({"error": "Cliente fuera del tenant"}), 403
+    if not client.router_id:
+        return jsonify({"error": "Cliente sin router asociado"}), 400
+    plan = client.plan or Plan.query.get(client.plan_id) if client.plan_id else None
+    with MikroTikService(client.router_id) as mikrotik:
+        ok = mikrotik.suspend_client(client)
+    if ok and client.subscriptions:
+        client.subscriptions[0].status = 'suspended'
+        db.session.commit()
+    return (jsonify({"success": True}), 200) if ok else (jsonify({"error": "No se pudo suspender en MikroTik"}), 500)
+
+
+@main_bp.route('/admin/clients/<int:client_id>/activate', methods=['POST'])
+@admin_required()
+def activate_client(client_id):
+    client = Client.query.get_or_404(client_id)
+    tenant_id = current_tenant_id()
+    if tenant_id and client.tenant_id not in (None, tenant_id):
+        return jsonify({"error": "Cliente fuera del tenant"}), 403
+    plan = client.plan or Plan.query.get(client.plan_id) if client.plan_id else None
+    if not client.router_id:
+        return jsonify({"error": "Cliente sin router asociado"}), 400
+    with MikroTikService(client.router_id) as mikrotik:
+        ok = mikrotik.activate_client(client, plan)
+    if ok and client.subscriptions:
+        client.subscriptions[0].status = 'active'
+        db.session.commit()
+    return (jsonify({"success": True}), 200) if ok else (jsonify({"error": "No se pudo activar en MikroTik"}), 500)
+
+
+@main_bp.route('/admin/clients/<int:client_id>/speed', methods=['POST'])
+@admin_required()
+def change_client_speed(client_id):
+    data = request.get_json() or {}
+    plan_id = data.get('plan_id')
+    if not plan_id:
+        raise BadRequest("plan_id es requerido")
+    client = Client.query.get_or_404(client_id)
+    tenant_id = current_tenant_id()
+    if tenant_id and client.tenant_id not in (None, tenant_id):
+        return jsonify({"error": "Cliente fuera del tenant"}), 403
+    plan = Plan.query.get_or_404(plan_id)
+    if not client.router_id:
+        return jsonify({"error": "Cliente sin router asociado"}), 400
+    with MikroTikService(client.router_id) as mikrotik:
+        ok = mikrotik.change_speed(client, plan)
+    return (jsonify({"success": True}), 200) if ok else (jsonify({"error": "No se pudo cambiar velocidad"}), 500)
+
+
+@main_bp.route('/admin/clients/<int:client_id>/scripts', methods=['GET'])
+@admin_required()
+def get_client_scripts(client_id):
+    client = Client.query.get_or_404(client_id)
+    plan = client.plan or (Plan.query.get(client.plan_id) if client.plan_id else None)
+    if not plan:
+        return jsonify({"error": "Plan no encontrado"}), 400
+    ppp_profile = f"profile_{plan.name.lower().replace(' ','_')}"
+    scripts = {
+        "provision_pppoe": f"""/ppp/profile/add name={ppp_profile} rate-limit={plan.download_speed}M/{plan.upload_speed}M
+/ppp/secret/add name={client.pppoe_username or f'user{client.id}'} password={client.pppoe_password or 'changeme'} service=pppoe profile={ppp_profile} comment=\"{client.full_name}\"
+""",
+        "suspend": f"""/ppp/secret/set [find name={client.pppoe_username or f'user{client.id}'}] disabled=yes comment=\"suspended\"
+/ip/firewall/address-list/add list=suspended address={client.ip_address or '0.0.0.0'} comment=\"{client.full_name}\"
+""",
+        "activate": f"""/ppp/secret/set [find name={client.pppoe_username or f'user{client.id}'}] disabled=no comment=\"{client.full_name}\"
+/ip/firewall/address-list/remove [find list=suspended address={client.ip_address or '0.0.0.0'}]
+""",
+    }
+    return jsonify({"client": client.to_dict(), "scripts": scripts}), 200
+
+
+@main_bp.route('/admin/routers/<int:router_id>/backup', methods=['POST'])
+@admin_required()
+def backup_router(router_id):
+    with MikroTikService(router_id) as mikrotik:
+        filename = mikrotik.export_backup()
+    if not filename:
+        return jsonify({"error": "No se pudo generar backup"}), 500
+    return jsonify({"success": True, "filename": filename}), 200
 
 
 

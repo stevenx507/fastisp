@@ -1212,3 +1212,93 @@ class MikroTikService:
             mikrotik_connection_pool.release_connection(self.router_id, self.api, self.pool_obj)
         self.api = None
         self.pool_obj = None
+
+    # ==== Operational helpers ====
+
+    def suspend_client(self, client: Client) -> bool:
+        """Suspend a client by disabling PPP secret or throttling queue + address-list."""
+        if not self.api:
+            return False
+        try:
+            if client.connection_type == 'pppoe' and client.pppoe_username:
+                secret_api = self.api.get_resource('/ppp/secret')
+                secrets = secret_api.get(name=client.pppoe_username)
+                if secrets:
+                    secret_api.set(id=secrets[0]['.id'], disabled='yes', comment='suspended')
+            else:
+                # add to address-list "suspended" and set queue to 0
+                if client.ip_address:
+                    addr_api = self.api.get_resource('/ip/firewall/address-list')
+                    addr_api.add(list='suspended', address=client.ip_address, comment=f"Cliente {client.full_name}")
+                queue_api = self.api.get_resource('/queue/simple')
+                q = queue_api.get(name=f"client_{client.id}")
+                if q:
+                    queue_api.set(id=q[0]['.id'], max_limit="0/0", comment="suspended")
+            return True
+        except Exception as e:
+            logger.error(f"Suspend client failed: {e}")
+            return False
+
+    def activate_client(self, client: Client, plan: Optional[Plan] = None) -> bool:
+        """Reactivar cliente (habilitar PPP o restaurar queue)."""
+        if not self.api:
+            return False
+        try:
+            if client.connection_type == 'pppoe' and client.pppoe_username:
+                secret_api = self.api.get_resource('/ppp/secret')
+                secrets = secret_api.get(name=client.pppoe_username)
+                if secrets:
+                    secret_api.set(id=secrets[0]['.id'], disabled='no', comment=f"Cliente {client.full_name}")
+                    if plan:
+                        secret_api.set(id=secrets[0]['.id'], profile=f"profile_{plan.name.lower().replace(' ','_')}")
+            else:
+                if client.ip_address:
+                    addr_api = self.api.get_resource('/ip/firewall/address-list')
+                    suspended = addr_api.get(list='suspended', address=client.ip_address)
+                    for item in suspended:
+                        addr_api.remove(id=item['.id'])
+                queue_api = self.api.get_resource('/queue/simple')
+                q = queue_api.get(name=f"client_{client.id}")
+                if q and plan:
+                    queue_api.set(id=q[0]['.id'], max_limit=f"{plan.download_speed}M/{plan.upload_speed}M",
+                                  comment=f"Cliente {client.full_name} Plan {plan.name}")
+            return True
+        except Exception as e:
+            logger.error(f"Activate client failed: {e}")
+            return False
+
+    def change_speed(self, client: Client, plan: Plan) -> bool:
+        """Ajustar velocidad según plan."""
+        if not self.api:
+            return False
+        try:
+            if client.connection_type == 'pppoe' and client.pppoe_username:
+                secret_api = self.api.get_resource('/ppp/secret')
+                secrets = secret_api.get(name=client.pppoe_username)
+                if secrets:
+                    secret_api.set(id=secrets[0]['.id'], profile=f"profile_{plan.name.lower().replace(' ','_')}",
+                                   comment=f"Plan {plan.name}")
+            else:
+                queue_api = self.api.get_resource('/queue/simple')
+                q = queue_api.get(name=f"client_{client.id}")
+                if q:
+                    queue_api.set(id=q[0]['.id'], max_limit=f"{plan.download_speed}M/{plan.upload_speed}M",
+                                  comment=f"Plan {plan.name}")
+            return True
+        except Exception as e:
+            logger.error(f"Change speed failed: {e}")
+            return False
+
+    def export_backup(self, name: str = None) -> Optional[str]:
+        """Solicita backup en el router (archivo .rsc)."""
+        if not self.api:
+            return None
+        try:
+            if not name:
+                name = f"ispmax-backup-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}"
+            system = self.api.get_resource('/system/backup')
+            system.call('save', {'name': name, 'dont-encrypt': 'yes'})
+            return f"{name}.backup"
+        except Exception as e:
+            logger.error(f"Backup failed: {e}")
+            return None
