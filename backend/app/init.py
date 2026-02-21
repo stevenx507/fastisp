@@ -65,6 +65,10 @@ def create_app(config_name_or_class='development'):
             'task': 'app.tasks.enforce_billing_status',
             'schedule': 900.0,
         },
+        'daily-backups': {
+            'task': 'app.tasks.run_backups',
+            'schedule': crontab(minute=0, hour=2),
+        },
     }
 
     # Define the Celery task context
@@ -88,6 +92,12 @@ def create_app(config_name_or_class='development'):
     def setup_request_context():
         g.request_id = request.headers.get('X-Request-ID') or str(uuid.uuid4())
         g.request_started_at = time.perf_counter()
+        # GeoIP allowlist based on upstream header (e.g., from Traefik/Cloudflare)
+        allowed_countries = app.config.get('GEOIP_ALLOWLIST') or []
+        if allowed_countries:
+            country = request.headers.get('X-Country-Code') or request.headers.get('CF-IPCountry')
+            if country and country.upper() not in [c.upper() for c in allowed_countries]:
+                return jsonify({'error': 'GeoIP blocked'}), 451
         try:
             g.tenant_id = resolve_tenant_id()
         except TenantResolutionError as exc:

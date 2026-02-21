@@ -126,6 +126,13 @@ export const apiClient = {
     })
   },
 
+  patch(endpoint: string, data?: unknown) {
+    return this.request(endpoint, {
+      method: 'PATCH',
+      body: data ? JSON.stringify(data) : undefined,
+    })
+  },
+
   put(endpoint: string, data?: unknown) {
     return this.request(endpoint, {
       method: 'PUT',

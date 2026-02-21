@@ -6,6 +6,8 @@ export const config = {
   APP_NAME: 'ISPMAX',
   APP_VERSION: '1.0.0',
   GOOGLE_CLIENT_ID: import.meta.env.VITE_GOOGLE_CLIENT_ID || '',
+  GRAFANA_URL: import.meta.env.VITE_GRAFANA_URL || '',
+  WONDERPUSH_WEBKEY: import.meta.env.VITE_WONDERPUSH_WEBKEY || '',
   
   // Feature flags
   FEATURES: {

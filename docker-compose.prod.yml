@@ -39,12 +39,15 @@ services:
         - "traefik.http.routers.api.rule=Host(`${API_HOST}`)"
         - "traefik.http.routers.api.entrypoints=websecure"
         - "traefik.http.routers.api.tls.certresolver=myresolver"
+        - "traefik.http.routers.api.middlewares=secure-headers@docker,ipwhitelist@docker,geoip2@file"
         - "traefik.http.services.api.loadbalancer.server.port=5000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+    volumes:
+      - backups:/app/backups
     networks:
       - ispmax-network
 
@@ -65,6 +68,7 @@ services:
         - "traefik.http.routers.frontend.rule=Host(`${FRONTEND_HOST}`)"
         - "traefik.http.routers.frontend.entrypoints=websecure"
         - "traefik.http.routers.frontend.tls.certresolver=myresolver"
+        - "traefik.http.routers.frontend.middlewares=secure-headers@docker,ipwhitelist@docker,geoip2@file"
         - "traefik.http.services.frontend.loadbalancer.server.port=80" # Nginx serves on port 80 inside the container
     networks:
       - ispmax-network
@@ -97,6 +101,8 @@ services:
     command: ["celery", "-A", "app.tasks", "worker", "--loglevel=info", "--concurrency=2"]
     depends_on:
       - backend
+    volumes:
+      - backups:/app/backups
     networks:
       - ispmax-network
 
@@ -128,6 +134,8 @@ services:
     command: ["celery", "-A", "app.tasks", "beat", "--loglevel=info", "--scheduler", "celery.beat:PersistentScheduler"]
     depends_on:
       - backend
+    volumes:
+      - backups:/app/backups
     networks:
       - ispmax-network
 
@@ -137,11 +145,16 @@ services:
     command:
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
+      - "--providers.file.filename=/dynamic/geoip.yml"
       - "--entrypoints.web.address=:80"
       - "--entrypoints.websecure.address=:443"
       - "--certificatesresolvers.myresolver.acme.tlschallenge=true"
       - "--certificatesresolvers.myresolver.acme.email=${TRAEFIK_ACME_EMAIL}"
       - "--certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json"
+      - "--entrypoints.websecure.forwardedheaders.insecure=true"
+      - "--serverstransport.insecureskipverify=true"
+      - "--experimental.plugins.geoip2.modulename=github.com/traefik/plugin-geoip2"
+      - "--experimental.plugins.geoip2.version=v0.6.0"
     environment: # New environment section
       - TRAEFIK_ACME_EMAIL=${TRAEFIK_ACME_EMAIL}
       - FRONTEND_HOST=${FRONTEND_HOST}
@@ -151,9 +164,24 @@ services:
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock:ro"
       - "./letsencrypt:/letsencrypt"
+      - "./deploy/traefik:/dynamic:ro"
+      - "./deploy/geoip:/geoip:ro"
     networks:
       - ispmax-network
+    labels:
+      - "traefik.http.middlewares.secure-headers.headers.framedeny=true"
+      - "traefik.http.middlewares.secure-headers.headers.contenttypeNosniff=true"
+      - "traefik.http.middlewares.secure-headers.headers.referrerPolicy=no-referrer-when-downgrade"
+      - "traefik.http.middlewares.secure-headers.headers.stsSeconds=63072000"
+      - "traefik.http.middlewares.secure-headers.headers.stsIncludeSubdomains=true"
+      - "traefik.http.middlewares.secure-headers.headers.stsPreload=true"
+      - "traefik.http.middlewares.ipwhitelist.ipwhitelist.sourcerange=${WAF_IP_ALLOWLIST:-0.0.0.0/0}"
+      - "traefik.http.middlewares.geoip2.plugin.geoip2.databasePath=/geoip/GeoLite2-Country.mmdb"
+      - "traefik.http.middlewares.geoip2.plugin.geoip2.header=X-Country-Code"
 
 networks:
   ispmax-network:
     driver: bridge
+
+volumes:
+  backups:

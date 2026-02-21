@@ -60,11 +60,14 @@ class Config:
     ALLOW_DEMO_LOGIN = _as_bool(os.environ.get('ALLOW_DEMO_LOGIN'), default=False)
     ALLOW_PAYMENT_DEMO = _as_bool(os.environ.get('ALLOW_PAYMENT_DEMO'), default=True)
     ALLOW_GOOGLE_LOGIN = _as_bool(os.environ.get('ALLOW_GOOGLE_LOGIN'), default=True)
+    GEOIP_ALLOWLIST = _split_csv(os.environ.get('GEOIP_ALLOWLIST', ''))
 
     # Observability & Alerts
     PAGERDUTY_ROUTING_KEY = os.environ.get('PAGERDUTY_ROUTING_KEY')
     TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
     TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+    WONDERPUSH_ACCESS_TOKEN = os.environ.get('WONDERPUSH_ACCESS_TOKEN')
+    WONDERPUSH_APPLICATION_ID = os.environ.get('WONDERPUSH_APPLICATION_ID')
 
     # Backups
     PG_DUMP_PATH = os.environ.get('PG_DUMP_PATH', 'pg_dump')

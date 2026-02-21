@@ -25,6 +25,8 @@ import BillingManagement from '../components/BillingManagement'
 import MonitoringView from '../components/MonitoringView'
 import AlertsView from '../components/AlertsView'
 import SettingsView from '../components/SettingsView'
+import NocDashboard from './NocDashboard'
+import TicketsAdmin from './TicketsAdmin'
 
 const AdminPanel: React.FC = () => {
   const [activeView, setActiveView] = useState('dashboard')
@@ -57,12 +59,14 @@ const AdminPanel: React.FC = () => {
   const menuItems = [
     { id: 'dashboard', name: 'Dashboard', icon: ChartBarIcon },
     { id: 'clients', name: 'Clientes', icon: UserGroupIcon },
-    { id: 'network', name: 'GestiÃ³n MikroTik', icon: WifiIcon },
+    { id: 'network', name: 'Gestión MikroTik', icon: WifiIcon },
     { id: 'maps', name: 'Mapa de Red', icon: MapIcon },
-    { id: 'billing', name: 'FacturaciÃ³n', icon: CreditCardIcon },
+    { id: 'billing', name: 'Facturación', icon: CreditCardIcon },
     { id: 'monitoring', name: 'Monitoreo', icon: ServerIcon },
+    { id: 'noc', name: 'NOC', icon: ServerIcon },
     { id: 'alerts', name: 'Alertas', icon: BellAlertIcon },
-    { id: 'settings', name: 'ConfiguraciÃ³n', icon: CogIcon }
+    { id: 'tickets', name: 'Tickets', icon: BellAlertIcon },
+    { id: 'settings', name: 'Configuración', icon: CogIcon }
   ]
 
   const handleMarkAsRead = (id: number) => {
@@ -122,7 +126,9 @@ const AdminPanel: React.FC = () => {
     maps: <NetworkMap />,
     billing: <BillingManagement />,
     monitoring: <MonitoringView />,
+    noc: <NocDashboard />,
     alerts: <AlertsView />,
+    tickets: <TicketsAdmin />,
     settings: <SettingsView />,
   }
 
@@ -283,3 +289,16 @@ const AdminPanel: React.FC = () => {
 }
 
 export default AdminPanel
+
+
+
+
+
+
+
+
+
+
+
+
+

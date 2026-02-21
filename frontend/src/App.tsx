@@ -3,7 +3,9 @@ import { Toaster } from 'react-hot-toast'
 import { ThemeProvider } from './contexts/ThemeContext'
 import Login from './pages/Login'
 import ClientDashboard from './pages/ClientDashboard'
+import BillingPortal from './pages/BillingPortal'
 import AdminPanel from './pages/AdminPanel'
+import TechApp from './pages/TechApp'
 import { useAuthStore } from './store/authStore'
 import ProtectedRoute from './components/ProtectedRoute'
 
@@ -19,6 +21,8 @@ function App() {
             <Route path="/" element={<Navigate to={isAuthenticated ? "/dashboard" : "/login"} />} />
             <Route path="/login" element={<Login />} />
             <Route path="/dashboard" element={<ProtectedRoute><ClientDashboard /></ProtectedRoute>} />
+            <Route path="/dashboard/billing" element={<ProtectedRoute><BillingPortal /></ProtectedRoute>} />
+            <Route path="/tech" element={<ProtectedRoute><TechApp /></ProtectedRoute>} />
             <Route path="/admin" element={<ProtectedRoute adminOnly><AdminPanel /></ProtectedRoute>} />
             <Route path="*" element={<Navigate to={isAuthenticated ? "/dashboard" : "/login"} />} />
           </Routes>

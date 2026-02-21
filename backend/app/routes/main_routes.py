@@ -6,7 +6,7 @@ import secrets
 from flask import Blueprint, jsonify, request, Response, current_app, send_file
 from flask_jwt_extended import create_access_token, get_jwt_identity, jwt_required
 
-from app.models import Client, User, Subscription, MikroTikRouter, Plan, AuditLog, Ticket, Invoice, PaymentRecord
+from app.models import Client, User, Subscription, MikroTikRouter, Plan, AuditLog, Ticket, Invoice, PaymentRecord, TicketComment
 from app import limiter, cache
 import pyotp
 from app.services.mikrotik_service import MikroTikService
@@ -72,6 +72,53 @@ def _audit(action: str, entity_type: str = None, entity_id: str = None, metadata
         db.session.commit()
     except Exception:
         pass
+
+
+def _notify_incident(message: str, severity: str = "info"):
+    """Send push notification to PagerDuty/Telegram if configured."""
+    pd_key = current_app.config.get('PAGERDUTY_ROUTING_KEY')
+    tg_token = current_app.config.get('TELEGRAM_BOT_TOKEN')
+    tg_chat = current_app.config.get('TELEGRAM_CHAT_ID')
+    wp_token = current_app.config.get('WONDERPUSH_ACCESS_TOKEN')
+    wp_app = current_app.config.get('WONDERPUSH_APPLICATION_ID')
+    if pd_key:
+        try:
+            import requests
+            payload = {
+                "routing_key": pd_key,
+                "event_action": "trigger",
+                "payload": {
+                    "summary": message,
+                    "severity": "critical" if severity == "critical" else "warning" if severity == "warning" else "info",
+                    "source": "ispfast-api",
+                },
+            }
+            requests.post("https://events.pagerduty.com/v2/enqueue", json=payload, timeout=5)
+        except Exception:
+            current_app.logger.warning("PagerDuty notify failed")
+    if tg_token and tg_chat:
+        try:
+            import requests
+            requests.post(f"https://api.telegram.org/bot{tg_token}/sendMessage",
+                          data={"chat_id": tg_chat, "text": message[:4000]}, timeout=5)
+        except Exception:
+            current_app.logger.warning("Telegram notify failed")
+    if wp_token and wp_app:
+        try:
+            import requests
+            payload = {
+                "targetSegmentIds": ["all"],
+                "notification": {"alert": message, "url": current_app.config.get('FRONTEND_URL')}
+            }
+            requests.post(
+                "https://api.wonderpush.com/v1/deliveries",
+                params={"applicationId": wp_app},
+                headers={"Authorization": f"Bearer {wp_token}"},
+                json=payload,
+                timeout=5
+            )
+        except Exception:
+            current_app.logger.warning("WonderPush notify failed")
 
 # Helper para verificar rol de admin
 def admin_required():
@@ -802,6 +849,35 @@ def network_alerts():
     return jsonify({"alerts": alerts, "count": len(alerts)}), 200
 
 
+@main_bp.route('/network/noc-summary', methods=['GET'])
+@jwt_required(optional=True)
+def network_noc_summary():
+    tenant_id = current_tenant_id()
+    routers_q = MikroTikRouter.query
+    subs_q = Subscription.query
+    tickets_q = Ticket.query
+    if tenant_id is not None:
+        routers_q = routers_q.filter_by(tenant_id=tenant_id)
+        subs_q = subs_q.filter_by(tenant_id=tenant_id)
+        tickets_q = tickets_q.filter_by(tenant_id=tenant_id)
+
+    ok = routers_q.filter_by(is_active=True).count()
+    down = routers_q.filter_by(is_active=False).count()
+    suspended = subs_q.filter(Subscription.status.in_(('suspended', 'past_due'))).count()
+    tickets_open = tickets_q.filter(Ticket.status.in_(('open', 'in_progress'))).count()
+
+    active_alerts = down + suspended
+    uptime = max(95.0, 99.9 - down * 0.5)
+
+    return jsonify({
+        "uptime": f"{uptime:.2f}%",
+        "routers": {"ok": ok, "down": down},
+        "suspended_clients": suspended,
+        "active_alerts": active_alerts,
+        "tickets_open": tickets_open,
+    }), 200
+
+
 @main_bp.route('/client/portal', methods=['GET'])
 @jwt_required()
 def client_portal_overview():
@@ -904,11 +980,13 @@ def client_tickets_create():
         description=description,
         priority=priority if priority in {'low', 'medium', 'high', 'urgent'} else 'medium',
         status='open',
+        sla_due_at=datetime.utcnow() + timedelta(hours=24 if priority != 'urgent' else 4),
     )
     from app import db
 
     db.session.add(ticket)
     db.session.commit()
+    _notify_incident(f"Nuevo ticket #{ticket.id}: {subject}", severity="warning")
     return jsonify({"ticket": ticket.to_dict(), "success": True}), 201
 
 
@@ -976,12 +1054,37 @@ def tickets_admin_update(ticket_id):
     ticket.status = status
     ticket.priority = priority
     ticket.assigned_to = assigned_to
+    if 'sla_due_at' in data:
+        try:
+            ticket.sla_due_at = datetime.fromisoformat(data['sla_due_at'])
+        except Exception:
+            pass
 
     from app import db
 
     db.session.add(ticket)
     db.session.commit()
+    _notify_incident(f"Ticket #{ticket.id} actualizado: status={status}, assigned={assigned_to}", severity="info")
     return jsonify({"ticket": ticket.to_dict(), "success": True}), 200
+
+
+@main_bp.route('/tickets/<int:ticket_id>/comments', methods=['POST'])
+@jwt_required()
+def ticket_add_comment(ticket_id):
+    ticket = Ticket.query.get_or_404(ticket_id)
+    tenant_id = current_tenant_id()
+    if tenant_id is not None and ticket.tenant_id not in (None, tenant_id):
+        return jsonify({"error": "Acceso denegado para este tenant."}), 403
+    data = request.get_json() or {}
+    text = (data.get('comment') or '').strip()
+    if not text:
+        return jsonify({"error": "El comentario es requerido."}), 400
+    comment = TicketComment(ticket_id=ticket_id, user_id=_current_user_id(), comment=text)
+    from app import db
+    db.session.add(comment)
+    db.session.commit()
+    _notify_incident(f"Nuevo comentario en ticket #{ticket.id}", severity="info")
+    return jsonify({"comment": comment.to_dict(), "success": True}), 201
 
 
 @main_bp.route('/client/notifications/preferences', methods=['GET', 'POST'])
@@ -1256,12 +1359,36 @@ def get_usage_history():
         days = 90
 
     today = datetime.utcnow().date()
+    labels = [(today - timedelta(days=i)).strftime('%b %d') for i in range(days - 1, -1, -1)]
+
+    data_points = [0.0] * days
+    try:
+        client = query.first()
+        tags = {}
+        if client and client.router_id:
+            tags['router_id'] = str(client.router_id)
+        monitoring = MonitoringService()
+        series = monitoring.query_metrics('interface_traffic', time_range=f'-{days}d', tags=tags or None)
+        # Aggregate bytes to GB per day if available
+        for point in series:
+            ts = point.get('_time') or point.get('time')
+            rx = float(point.get('rx_bytes', 0) or 0)
+            tx = float(point.get('tx_bytes', 0) or 0)
+            total_gb = (rx + tx) / (1024**3)
+            if ts:
+                day_idx = (today - datetime.fromisoformat(str(ts)).date()).days
+                if 0 <= day_idx < days:
+                    data_points[days - 1 - day_idx] += total_gb
+    except Exception as exc:
+        current_app.logger.info("Uso histórico usando fallback: %s", exc)
+        data_points = [random.uniform(5, 25) for _ in range(days)]
+
     usage_data = {
-        "labels": [(today - timedelta(days=i)).strftime('%b %d') for i in range(days - 1, -1, -1)],
+        "labels": labels,
         "datasets": [
             {
                 "label": "Uso de Datos (GB)",
-                "data": [random.uniform(5, 25) for _ in range(days)],
+                "data": [round(v, 2) for v in data_points],
                 "borderColor": 'rgb(54, 162, 235)',
                 "backgroundColor": 'rgba(54, 162, 235, 0.2)',
                 "fill": True,
