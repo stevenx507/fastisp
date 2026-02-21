@@ -18,6 +18,8 @@ from sqlalchemy.orm import joinedload
 import subprocess
 import os
 from flask_mail import Message
+from flask import send_from_directory
+from pathlib import Path
 from io import BytesIO
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
@@ -1740,6 +1742,19 @@ def list_backups():
         for f in sorted(base.glob('*'), reverse=True):
             files.append({"name": f.name, "size": f.stat().st_size, "modified": datetime.utcfromtimestamp(f.stat().st_mtime).isoformat()})
     return jsonify({"items": files, "count": len(files)}), 200
+
+
+@main_bp.route('/admin/backups/download', methods=['GET'])
+@admin_required()
+def download_backup():
+    name = request.args.get('name')
+    if not name:
+        return jsonify({"error": "name requerido"}), 400
+    base = Path('/app/backups')
+    file_path = base / name
+    if not file_path.exists():
+        return jsonify({"error": "backup no encontrado"}), 404
+    return send_from_directory(directory=str(base), path=name, as_attachment=True)
 
 
 def _notify_client(client: Client, subject: str, body: str):

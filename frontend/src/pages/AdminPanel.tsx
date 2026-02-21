@@ -27,6 +27,7 @@ import AlertsView from '../components/AlertsView'
 import SettingsView from '../components/SettingsView'
 import NocDashboard from './NocDashboard'
 import TicketsAdmin from './TicketsAdmin'
+import BackupsView from '../components/BackupsView'
 import PlanChangeModal from '../components/admin/PlanChangeModal'
 import ManualPaymentModal from '../components/admin/ManualPaymentModal'
 
@@ -72,6 +73,7 @@ const AdminPanel: React.FC = () => {
     { id: 'noc', name: 'NOC', icon: ServerIcon },
     { id: 'alerts', name: 'Alertas', icon: BellAlertIcon },
     { id: 'tickets', name: 'Tickets', icon: BellAlertIcon },
+    { id: 'backups', name: 'Backups', icon: ServerIcon },
     { id: 'settings', name: 'Configuración', icon: CogIcon }
   ]
 
@@ -159,6 +161,7 @@ const AdminPanel: React.FC = () => {
     noc: <NocDashboard />,
     alerts: <AlertsView />,
     tickets: <TicketsAdmin />,
+    backups: <BackupsView />,
     settings: <SettingsView />,
   }
 
