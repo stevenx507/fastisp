@@ -1,4 +1,18 @@
 http:
+  middlewares:
+    secure-headers:
+      headers:
+        frameDeny: true
+        contentTypeNosniff: true
+        referrerPolicy: no-referrer-when-downgrade
+        stsSeconds: 63072000
+        stsIncludeSubdomains: true
+        stsPreload: true
+    ipwhitelist:
+      ipWhiteList:
+        sourceRange:
+          - 0.0.0.0/0
+
   routers:
     api:
       rule: Host(`api.fastisp.cloud`)
