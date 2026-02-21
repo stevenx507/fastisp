@@ -7,8 +7,9 @@ export interface InvoiceDTO {
   currency: string
   tax_percent: number
   total_amount: number
-  status: 'pending' | 'paid' | 'cancelled'
+  status: 'pending' | 'paid' | 'cancelled' | 'overdue'
   due_date: string | null
+  created_at?: string | null
   country?: string | null
 }
 

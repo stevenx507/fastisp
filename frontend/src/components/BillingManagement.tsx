@@ -45,7 +45,7 @@ const BillingManagement: React.FC<Props> = ({ onSelectInvoice, mode = 'client' }
   }, [])
 
   const filteredInvoices = useMemo(
-    () => invoices.filter((inv) => filterStatus === 'all' || inv.status === filterStatus),
+    () => invoices.filter((inv) => filterStatus === 'all' || (inv.status as InvoiceStatus) === filterStatus),
     [invoices, filterStatus]
   )
 
