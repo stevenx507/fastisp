@@ -12,6 +12,7 @@ import pyotp
 from app.services.mikrotik_service import MikroTikService
 from app.services.monitoring_service import MonitoringService
 from app.tenancy import current_tenant_id, tenant_access_allowed
+from datetime import date
 from io import BytesIO
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
@@ -326,6 +327,150 @@ def register():
 
     access_token = create_access_token(identity=str(user.id), additional_claims={'tenant_id': user.tenant_id})
     return jsonify({"token": access_token, "user": user.to_dict()}), 201
+
+
+@main_bp.route('/admin/clients/<int:client_id>/change_plan', methods=['POST'])
+@jwt_required()
+def change_plan(client_id):
+    """Cambio de plan con prorrateo opcional y nueva factura."""
+    user_id = _current_user_id()
+    user = User.query.get(user_id)
+    if not user or user.role != 'admin':
+        return jsonify({"error": "Solo administradores pueden cambiar planes"}), 403
+
+    client = Client.query.get(client_id)
+    if not client:
+        return jsonify({"error": "Cliente no encontrado"}), 404
+    tenant_id = current_tenant_id()
+    if tenant_id and client.tenant_id not in (None, tenant_id):
+        return jsonify({"error": "Cliente fuera del tenant"}), 403
+
+    data = request.get_json() or {}
+    plan_id = data.get('plan_id')
+    apply_proration = bool(data.get('prorate', True))
+    if not plan_id:
+        return jsonify({"error": "plan_id es requerido"}), 400
+
+    new_plan = Plan.query.get(plan_id)
+    if not new_plan:
+        return jsonify({"error": "Plan no encontrado"}), 404
+
+    # Buscar suscripción activa
+    subscription = Subscription.query.filter_by(client_id=client.id).order_by(Subscription.created_at.desc()).first()
+    today = date.today()
+    proration_amount = 0.0
+    tax_percent = float(subscription.tax_percent) if subscription else 0.0
+
+    if subscription:
+        # calcular prorrateo simple basado en días restantes del ciclo
+        days_in_cycle = max(subscription.cycle_months * 30, 1)
+        days_left = max((subscription.next_charge - today).days if subscription.next_charge else 0, 0)
+        delta = (new_plan.price or 0) - float(subscription.amount)
+        proration_amount = round(delta * days_left / days_in_cycle, 2) if apply_proration else 0.0
+
+        # actualizar suscripción al nuevo plan/precio
+        subscription.plan = new_plan.name
+        subscription.amount = new_plan.price or 0
+        subscription.currency = subscription.currency or 'USD'
+        subscription.updated_at = datetime.utcnow()
+    else:
+        # crear suscripción si no existe
+        subscription = Subscription(
+            customer=client.full_name,
+            email=user.email,
+            plan=new_plan.name,
+            cycle_months=1,
+            amount=new_plan.price or 0,
+            status='active',
+            currency='USD',
+            tax_percent=0,
+            next_charge=today,
+            method='manual',
+            client_id=client.id,
+            tenant_id=client.tenant_id,
+        )
+        db.session.add(subscription)
+
+    # Cambiar plan del cliente
+    client.plan_id = new_plan.id
+
+    invoice_total = (float(new_plan.price or 0) + (proration_amount if proration_amount > 0 else 0))
+    invoice = Invoice(
+        subscription=subscription,
+        amount=invoice_total,
+        currency=subscription.currency or 'USD',
+        tax_percent=tax_percent,
+        total_amount=invoice_total * (1 + tax_percent / 100),
+        status='pending' if invoice_total > 0 else 'paid',
+        due_date=today,
+        country=subscription.country,
+    )
+    db.session.add(invoice)
+    db.session.flush()
+
+    if proration_amount != 0:
+        payment = PaymentRecord(
+            invoice=invoice,
+            method='proration',
+            reference=f'proration-{client.id}-{invoice.id}',
+            amount=abs(proration_amount),
+            currency=invoice.currency,
+            status='pending' if proration_amount > 0 else 'paid',
+            meta={'delta': proration_amount},
+        )
+        db.session.add(payment)
+
+    db.session.commit()
+
+    return jsonify({
+        "client": client.to_dict(),
+        "subscription": subscription.to_dict(),
+        "invoice": invoice.to_dict(),
+        "proration_amount": proration_amount,
+    }), 200
+
+
+@main_bp.route('/admin/payments/manual', methods=['POST'])
+@jwt_required()
+def manual_payment():
+    """Registra un pago manual (Yape/Nequi/transferencia) contra una factura."""
+    user_id = _current_user_id()
+    user = User.query.get(user_id)
+    if not user or user.role != 'admin':
+        return jsonify({"error": "Solo administradores pueden registrar pagos"}), 403
+
+    data = request.get_json() or {}
+    invoice_id = data.get('invoice_id')
+    amount = data.get('amount')
+    method = data.get('method', 'manual')
+    reference = data.get('reference')
+    meta = data.get('metadata')
+
+    if not invoice_id or amount is None:
+        return jsonify({"error": "invoice_id y amount son requeridos"}), 400
+
+    invoice = Invoice.query.get(invoice_id)
+    if not invoice:
+        return jsonify({"error": "Factura no encontrada"}), 404
+
+    tenant_id = current_tenant_id()
+    if tenant_id and invoice.subscription and invoice.subscription.tenant_id not in (None, tenant_id):
+        return jsonify({"error": "Factura fuera del tenant"}), 403
+
+    payment = PaymentRecord(
+        invoice=invoice,
+        method=method,
+        reference=reference,
+        amount=amount,
+        currency=invoice.currency,
+        status='paid',
+        meta=meta,
+    )
+    invoice.status = 'paid'
+    db.session.add(payment)
+    db.session.commit()
+
+    return jsonify({"invoice": invoice.to_dict(), "payment": payment.to_dict()}), 201
 
 
 @main_bp.route('/auth/google', methods=['POST'])
