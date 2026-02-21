@@ -1,0 +1,38 @@
+http:
+  routers:
+    api:
+      rule: Host(`api.fastisp.cloud`)
+      entryPoints:
+        - web
+        - websecure
+      service: api
+      middlewares:
+        - secure-headers
+        - ipwhitelist
+        - geoip2
+      tls:
+        certResolver: myresolver
+
+    frontend:
+      rule: Host(`fastisp.cloud`)
+      entryPoints:
+        - web
+        - websecure
+      service: frontend
+      middlewares:
+        - secure-headers
+        - ipwhitelist
+        - geoip2
+      tls:
+        certResolver: myresolver
+
+  services:
+    api:
+      loadBalancer:
+        servers:
+          - url: http://backend:5000
+
+    frontend:
+      loadBalancer:
+        servers:
+          - url: http://frontend:80
