@@ -5,6 +5,7 @@ import {
   BellIcon,
   LockClosedIcon,
   UserIcon,
+  CogIcon,
   ArrowLeftOnRectangleIcon,
   EyeIcon,
   EyeSlashIcon
@@ -12,19 +13,12 @@ import {
 import toast from 'react-hot-toast'
 
 const SettingsView: React.FC = () => {
-  const { user, logout, updateProfile } = useAuthStore()
+  const { user, logout } = useAuthStore()
   const [activeTab, setActiveTab] = useState<'preferences' | 'security' | 'account'>('preferences')
   const [showPassword, setShowPassword] = useState(false)
   const [newPassword, setNewPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [isSaving, setIsSaving] = useState(false)
-
-  const [profileDraft, setProfileDraft] = useState({
-    name: user?.name || '',
-    email: user?.email || '',
-    phone: '',
-    role: user?.role || 'client'
-  })
 
   const [settings, setSettings] = useState({
     emailNotifications: true,
@@ -66,22 +60,6 @@ const SettingsView: React.FC = () => {
       toast.success('Contraseña actualizada correctamente')
     } catch (error) {
       toast.error('Error al cambiar contraseña')
-    } finally {
-      setIsSaving(false)
-    }
-  }
-
-  const handleSaveProfile = async () => {
-    if (!profileDraft.name.trim() || !profileDraft.email.trim()) {
-      toast.error('Nombre y correo son obligatorios.')
-      return
-    }
-    setIsSaving(true)
-    try {
-      await updateProfile({ name: profileDraft.name.trim(), email: profileDraft.email.trim() })
-      toast.success('Perfil actualizado.')
-    } catch (error) {
-      toast.error('No se pudo actualizar el perfil.')
     } finally {
       setIsSaving(false)
     }
@@ -237,69 +215,32 @@ const SettingsView: React.FC = () => {
         {/* Account Tab */}
         {activeTab === 'account' && (
           <div className="space-y-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <h3 className="text-lg font-semibold text-gray-900">Perfil</h3>
-                <p className="text-sm text-gray-600">Actualiza tus datos y cierra sesión segura.</p>
-              </div>
-              <button
-                onClick={handleLogout}
-                className="inline-flex items-center gap-2 rounded-lg border border-gray-200 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50"
-              >
-                <ArrowLeftOnRectangleIcon className="h-4 w-4" />
-                Cerrar sesión
-              </button>
-            </div>
-
-            <div className="grid gap-4 md:grid-cols-2">
-              <label className="space-y-1">
-                <span className="text-sm font-medium text-gray-700">Nombre</span>
-                <input
-                  value={profileDraft.name}
-                  onChange={(e) => setProfileDraft((prev) => ({ ...prev, name: e.target.value }))}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
-                  placeholder="Tu nombre"
-                />
-              </label>
-              <label className="space-y-1">
-                <span className="text-sm font-medium text-gray-700">Correo</span>
-                <input
-                  type="email"
-                  value={profileDraft.email}
-                  onChange={(e) => setProfileDraft((prev) => ({ ...prev, email: e.target.value }))}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
-                  placeholder="correo@ejemplo.com"
-                />
-              </label>
-              <label className="space-y-1">
-                <span className="text-sm font-medium text-gray-700">Teléfono (opcional)</span>
-                <input
-                  value={profileDraft.phone}
-                  onChange={(e) => setProfileDraft((prev) => ({ ...prev, phone: e.target.value }))}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:ring-2 focus:ring-blue-200"
-                  placeholder="+51 999 888 777"
-                />
-              </label>
-              <div className="space-y-1">
-                <span className="text-sm font-medium text-gray-700">Rol</span>
-                <p className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">{user?.role || 'N/D'}</p>
-                <p className="text-xs text-gray-500">ID: {user?.id || 'N/D'}</p>
+            <div>
+              <h3 className="text-lg font-semibold text-gray-900 mb-4">Información de Cuenta</h3>
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm text-gray-600 mb-1">Nombre Completo</label>
+                  <p className="text-lg font-medium text-gray-900">{user?.name || 'Nombre no disponible'}</p>
+                </div>
+                <div>
+                  <label className="block text-sm text-gray-600 mb-1">Email</label>
+                  <p className="text-lg font-medium text-gray-900">{user?.email || 'Email no disponible'}</p>
+                </div>
+                <div>
+                  <label className="block text-sm text-gray-600 mb-1">Rol</label>
+                  <p className="text-lg font-medium text-gray-900">{user?.role === 'admin' ? 'Administrador' : 'Cliente'}</p>
+                </div>
               </div>
             </div>
 
-            <div className="flex gap-3">
-              <button
-                onClick={handleSaveProfile}
-                disabled={isSaving}
-                className="px-5 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60"
-              >
-                {isSaving ? 'Guardando...' : 'Guardar perfil'}
-              </button>
+            <div className="pt-4 border-t border-gray-200">
+              <h4 className="font-semibold text-gray-900 mb-4">Zona de Peligro</h4>
               <button
                 onClick={handleLogout}
-                className="px-5 py-2 rounded-lg bg-red-50 text-red-700 hover:bg-red-100"
+                className="flex items-center gap-2 px-6 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition"
               >
-                Cerrar sesión
+                <ArrowLeftOnRectangleIcon className="w-5 h-5" />
+                Cerrar Sesión
               </button>
             </div>
           </div>

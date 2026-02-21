@@ -59,7 +59,7 @@ def _audit(action: str, entity_type: str = None, entity_id: str = None, metadata
             action=action,
             entity_type=entity_type,
             entity_id=entity_id,
-            metadata=metadata,
+            meta=metadata,
             ip_address=getattr(request, "remote_addr", None),
         )
         from app import db

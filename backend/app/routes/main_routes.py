@@ -1,17 +1,20 @@
-from datetime import datetime, timedelta
+﻿from datetime import datetime, timedelta
 from functools import wraps
 import random
 import secrets
 
-from flask import Blueprint, jsonify, request, Response, current_app
+from flask import Blueprint, jsonify, request, Response, current_app, send_file
 from flask_jwt_extended import create_access_token, get_jwt_identity, jwt_required
 
-from app.models import Client, User, Subscription, MikroTikRouter, Plan, AuditLog
+from app.models import Client, User, Subscription, MikroTikRouter, Plan, AuditLog, Ticket, Invoice, PaymentRecord
 from app import limiter, cache
 import pyotp
 from app.services.mikrotik_service import MikroTikService
 from app.services.monitoring_service import MonitoringService
 from app.tenancy import current_tenant_id, tenant_access_allowed
+from io import BytesIO
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
 
 
 def _current_user_id():
@@ -49,6 +52,8 @@ def _get_plan_for_request(data, tenant_id):
 # In-memory ticket store for demo; replace with DB model in production.
 CLIENT_TICKETS: list[dict] = []
 
+DEMO_USERS = {"demo1@ispmax.com", "demo2@ispmax.com"}
+
 def _audit(action: str, entity_type: str = None, entity_id: str = None, metadata=None):
     try:
         tenant_id = current_tenant_id()
@@ -59,7 +64,7 @@ def _audit(action: str, entity_type: str = None, entity_id: str = None, metadata
             action=action,
             entity_type=entity_type,
             entity_id=str(entity_id) if entity_id is not None else None,
-            metadata=metadata,
+            meta=metadata,
             ip_address=getattr(request, "remote_addr", None),
         )
         from app import db
@@ -143,11 +148,16 @@ def billing_summary():
 
     invoices = []
     for s in subs.all():
+        inv_total = float(s.amount) * (1 + float(s.tax_percent or 0) / 100)
         invoices.append({
             "id": f"SUB-{s.id}",
             "amount": float(s.amount),
+            "tax_percent": float(s.tax_percent or 0),
+            "total": round(inv_total, 2),
+            "currency": s.currency,
             "due": s.next_charge.isoformat() if s.next_charge else datetime.utcnow().date().isoformat(),
-            "status": "paid" if s.status == 'active' else ("overdue" if s.status == 'past_due' else "pending")
+            "status": "paid" if s.status == 'active' else ("overdue" if s.status == 'past_due' else "pending"),
+            "method": s.method,
         })
     return jsonify({"invoices": invoices, "count": len(invoices)}), 200
 
@@ -201,6 +211,11 @@ def login():
     if not data or not data.get('email') or not data.get('password'):
         return jsonify({"error": "Email y contrasena son requeridos."}), 400
 
+    if not current_app.config.get('ALLOW_DEMO_LOGIN', False):
+        email = str(data.get('email') or '').strip().lower()
+        if email in DEMO_USERS:
+            return jsonify({"error": "Las credenciales demo estÃ¡n deshabilitadas en este entorno."}), 403
+
     tenant_id = current_tenant_id()
     query = User.query.filter_by(email=data.get('email'))
     if tenant_id is not None:
@@ -208,7 +223,7 @@ def login():
 
     user = query.first()
     if user and user.check_password(data.get('password')):
-        # MFA: si está habilitado, validar código
+        # MFA: si estÃ¡ habilitado, validar cÃ³digo
         if user.mfa_enabled:
             mfa_code = str(data.get('mfa_code') or '').strip()
             if not mfa_code:
@@ -217,7 +232,7 @@ def login():
                 return jsonify({"error": "MFA no configurado correctamente"}), 500
             totp = pyotp.TOTP(user.mfa_secret)
             if not totp.verify(mfa_code, valid_window=1):
-                return jsonify({"error": "Código MFA inválido", "mfa_required": True}), 401
+                return jsonify({"error": "CÃ³digo MFA invÃ¡lido", "mfa_required": True}), 401
 
         access_token = create_access_token(
             identity=str(user.id),
@@ -234,18 +249,21 @@ def register():
     """
     Registro ligero para demo: crea un usuario cliente y devuelve token inmediato.
     """
+    if not current_app.config.get('ALLOW_SELF_SIGNUP', False):
+        return jsonify({"error": "El registro pÃºblico estÃ¡ deshabilitado. Solicite acceso al administrador."}), 403
+
     data = request.get_json() or {}
     name = (data.get('name') or '').strip()
     email = (data.get('email') or '').strip().lower()
     password = data.get('password') or ''
 
     if not name or not email or not password:
-        return jsonify({"error": "Nombre, email y contraseña son requeridos."}), 400
+        return jsonify({"error": "Nombre, email y contraseÃ±a son requeridos."}), 400
 
     tenant_id = current_tenant_id()
     existing = User.query.filter_by(email=email).first()
     if existing:
-        return jsonify({"error": "El correo ya está registrado."}), 400
+        return jsonify({"error": "El correo ya estÃ¡ registrado."}), 400
 
     user = User(
         name=name,
@@ -266,8 +284,11 @@ def register():
 @main_bp.route('/auth/google', methods=['POST'])
 def google_login():
     """
-    Endpoint de demostración para "login con Google": confía en el payload recibido.
+    Endpoint de demostraciÃ³n para "login con Google": confÃ­a en el payload recibido.
     """
+    if not current_app.config.get('ALLOW_GOOGLE_LOGIN', True):
+        return jsonify({"error": "El login con Google está deshabilitado en este entorno."}), 403
+
     data = request.get_json() or {}
     email = (data.get('email') or '').strip().lower()
     name = (data.get('name') or 'Usuario Google').strip()
@@ -317,10 +338,10 @@ def update_profile():
     if tenant_id is not None and user.tenant_id not in (None, tenant_id):
         return jsonify({"error": "Acceso denegado para este tenant."}), 403
 
-    # Verificar colisión de correo
+    # Verificar colisiÃ³n de correo
     existing = User.query.filter(User.email == email, User.id != user.id).first()
     if existing:
-        return jsonify({"error": "El correo ya está en uso."}), 400
+        return jsonify({"error": "El correo ya estÃ¡ en uso."}), 400
 
     user.name = name
     user.email = email
@@ -356,10 +377,10 @@ def mfa_enable():
     code = str(data.get('code') or '').strip()
     secret = str(data.get('secret') or '').strip()
     if not code or not secret:
-        return jsonify({"error": "Secret y código son requeridos."}), 400
+        return jsonify({"error": "Secret y cÃ³digo son requeridos."}), 400
     totp = pyotp.TOTP(secret)
     if not totp.verify(code, valid_window=1):
-        return jsonify({"error": "Código inválido."}), 400
+        return jsonify({"error": "CÃ³digo invÃ¡lido."}), 400
     user = User.query.get_or_404(current_user_id)
     tenant_id = current_tenant_id()
     if tenant_id is not None and user.tenant_id not in (None, tenant_id):
@@ -384,7 +405,7 @@ def mfa_disable():
     if user.mfa_enabled:
         totp = pyotp.TOTP(user.mfa_secret)
         if not code or not totp.verify(code, valid_window=1):
-            return jsonify({"error": "Código inválido o faltante."}), 400
+            return jsonify({"error": "CÃ³digo invÃ¡lido o faltante."}), 400
     user.mfa_enabled = False
     user.mfa_secret = None
     from app import db
@@ -457,7 +478,7 @@ def create_client():
 
     tenant_id = current_tenant_id()
     if User.query.filter_by(email=data['email']).first():
-        return jsonify({"error": "El correo ya está registrado."}), 400
+        return jsonify({"error": "El correo ya estÃ¡ registrado."}), 400
 
     plan = _get_plan_for_request(data, tenant_id)
 
@@ -535,6 +556,7 @@ def create_subscription():
         status=data.get('status', 'active'),
         next_charge=datetime.fromisoformat(data['next_charge']).date(),
         method=data['method'],
+        client_id=int(data['client_id']) if data.get('client_id') else None,
         tenant_id=tenant_id,
     )
     from app import db
@@ -552,6 +574,7 @@ def update_subscription(subscription_id):
     tenant_id = current_tenant_id()
     if tenant_id is not None and sub.tenant_id not in (None, tenant_id):
         return jsonify({"error": "Acceso denegado para este tenant."}), 403
+    prev_status = sub.status
     for field in ['customer', 'email', 'plan', 'method', 'status']:
         if field in data:
             setattr(sub, field, data[field])
@@ -566,6 +589,16 @@ def update_subscription(subscription_id):
 
     db.session.add(sub)
     db.session.commit()
+
+    # Sincronizar estado con router si hay cliente asociado
+    client = sub.client or (Client.query.get(sub.client_id) if sub.client_id else None)
+    if client and client.router_id and sub.status != prev_status:
+        with MikroTikService(client.router_id) as mk:
+            if sub.status == 'active':
+                mk.activate_client(client)
+            elif sub.status in ('past_due', 'suspended'):
+                mk.suspend_client(client, reason='billing')
+
     return jsonify({"subscription": sub.to_dict(), "success": True}), 200
 
 
@@ -577,13 +610,17 @@ def charge_subscription(subscription_id):
     if tenant_id is not None and sub.tenant_id not in (None, tenant_id):
         return jsonify({"error": "Acceso denegado para este tenant."}), 403
     sub.status = 'active'
-    # avanzar próxima fecha según ciclo
+    # avanzar prÃ³xima fecha segÃºn ciclo
     days = sub.cycle_months * 30
     sub.next_charge = sub.next_charge + timedelta(days=days)
     from app import db
 
     db.session.add(sub)
     db.session.commit()
+    client = sub.client or (Client.query.get(sub.client_id) if sub.client_id else None)
+    if client and client.router_id:
+        with MikroTikService(client.router_id) as mk:
+            mk.activate_client(client)
     return jsonify({"subscription": sub.to_dict(), "success": True}), 200
 
 
@@ -602,10 +639,14 @@ def run_subscription_reminders():
         if sub.next_charge < today and sub.status == 'active':
             sub.status = 'past_due'
             updated.append(sub.to_dict())
-        # autosuspender si lleva más de 10 días vencido
+        # autosuspender si lleva mÃ¡s de 10 dÃ­as vencido
         if days_overdue >= 10 and sub.status == 'past_due':
             sub.status = 'suspended'
             updated.append(sub.to_dict())
+            client = sub.client or (Client.query.get(sub.client_id) if sub.client_id else None)
+            if client and client.router_id:
+                with MikroTikService(client.router_id) as mk:
+                    mk.suspend_client(client, reason='billing')
     if updated:
         from app import db
         db.session.commit()
@@ -711,7 +752,7 @@ def network_health():
 @jwt_required(optional=True)
 def monitoring_metrics():
     """
-    Devuelve series de InfluxDB para dashboards (mediante medición y rango).
+    Devuelve series de InfluxDB para dashboards (mediante mediciÃ³n y rango).
     Ejemplo: /monitoring/metrics?measurement=system_resources&range=-2h&router_id=1
     """
     measurement = (request.args.get('measurement') or '').strip()
@@ -737,8 +778,8 @@ def monitoring_metrics():
             "series": series,
         }), 200
     except Exception as exc:
-        current_app.logger.error("Error consultando métricas: %s", exc)
-        return jsonify({"success": False, "error": "No se pudieron recuperar métricas"}), 502
+        current_app.logger.error("Error consultando mÃ©tricas: %s", exc)
+        return jsonify({"success": False, "error": "No se pudieron recuperar mÃ©tricas"}), 502
 
 
 @main_bp.route('/network/alerts', methods=['GET'])
@@ -754,9 +795,9 @@ def network_alerts():
     for r in routers_q.filter_by(is_active=False).all():
         alerts.append({"id": f"AL-R-{r.id}", "severity": "critical", "scope": "router", "target": r.name, "message": "Router sin respuesta", "since": datetime.utcnow().isoformat() + "Z"})
     for s in subs_q.filter_by(status='past_due').all():
-        alerts.append({"id": f"AL-S-{s.id}", "severity": "warning", "scope": "billing", "target": s.customer, "message": "Suscripción vencida", "since": datetime.utcnow().isoformat() + "Z"})
+        alerts.append({"id": f"AL-S-{s.id}", "severity": "warning", "scope": "billing", "target": s.customer, "message": "SuscripciÃ³n vencida", "since": datetime.utcnow().isoformat() + "Z"})
     if not alerts:
-        alerts.append({"id": "AL-OK", "severity": "info", "scope": "network", "target": "Red", "message": "Sin alertas críticas", "since": datetime.utcnow().isoformat() + "Z"})
+        alerts.append({"id": "AL-OK", "severity": "info", "scope": "network", "target": "Red", "message": "Sin alertas crÃ­ticas", "since": datetime.utcnow().isoformat() + "Z"})
     _audit("network_alerts", entity_type="network", metadata={"count": len(alerts)})
     return jsonify({"alerts": alerts, "count": len(alerts)}), 200
 
@@ -832,8 +873,12 @@ def client_tickets_list():
     current_user_id = _current_user_id()
     if current_user_id is None:
         return jsonify({"error": "Token de usuario invalido."}), 401
-    filtered = [t for t in CLIENT_TICKETS if t.get('user_id') == current_user_id]
-    return jsonify({"items": filtered, "count": len(filtered)}), 200
+    tenant_id = current_tenant_id()
+    query = Ticket.query.filter_by(user_id=current_user_id)
+    if tenant_id is not None:
+        query = query.filter_by(tenant_id=tenant_id)
+    tickets = query.order_by(Ticket.created_at.desc()).all()
+    return jsonify({"items": [t.to_dict() for t in tickets], "count": len(tickets)}), 200
 
 
 @main_bp.route('/client/tickets', methods=['POST'])
@@ -846,18 +891,25 @@ def client_tickets_create():
     data = request.get_json() or {}
     subject = (data.get('subject') or '').strip()
     description = (data.get('description') or '').strip()
+    priority = (data.get('priority') or 'medium').strip().lower()
     if not subject or not description:
         return jsonify({"error": "Asunto y descripción requeridos."}), 400
-    ticket = {
-        "id": f"CT-{len(CLIENT_TICKETS)+1:04d}",
-        "user_id": current_user_id,
-        "subject": subject,
-        "description": description,
-        "status": "open",
-        "created_at": datetime.utcnow().isoformat() + "Z"
-    }
-    CLIENT_TICKETS.insert(0, ticket)
-    return jsonify({"ticket": ticket, "success": True}), 201
+    tenant_id = current_tenant_id()
+    client = Client.query.filter_by(user_id=current_user_id).first()
+    ticket = Ticket(
+        tenant_id=tenant_id,
+        user_id=current_user_id,
+        client_id=client.id if client else None,
+        subject=subject,
+        description=description,
+        priority=priority if priority in {'low', 'medium', 'high', 'urgent'} else 'medium',
+        status='open',
+    )
+    from app import db
+
+    db.session.add(ticket)
+    db.session.commit()
+    return jsonify({"ticket": ticket.to_dict(), "success": True}), 201
 
 
 @main_bp.route('/client/diagnostics/run', methods=['POST'])
@@ -873,10 +925,63 @@ def client_diagnostics():
         "pppoe_session": "up",
         "recommendations": [
             "Reinicia tu CPE si la latencia supera 100 ms.",
-            "Si continúan problemas, abre ticket y adjunta captura de ping."
+            "Si continÃºan problemas, abre ticket y adjunta captura de ping."
         ]
     }
     return jsonify(payload), 200
+
+
+@main_bp.route('/tickets', methods=['GET'])
+@admin_required()
+def tickets_admin_list():
+    tenant_id = current_tenant_id()
+    status = (request.args.get('status') or '').strip().lower()
+    priority = (request.args.get('priority') or '').strip().lower()
+    try:
+        limit = int(request.args.get('limit', 100) or 100)
+    except Exception:
+        limit = 100
+    limit = max(1, min(limit, 200))
+
+    query = Ticket.query
+    if tenant_id is not None:
+        query = query.filter_by(tenant_id=tenant_id)
+    if status:
+        query = query.filter_by(status=status)
+    if priority:
+        query = query.filter_by(priority=priority)
+
+    tickets = query.order_by(Ticket.created_at.desc()).limit(limit).all()
+    return jsonify({"items": [t.to_dict() for t in tickets], "count": len(tickets)}), 200
+
+
+@main_bp.route('/tickets/<int:ticket_id>', methods=['PATCH'])
+@admin_required()
+def tickets_admin_update(ticket_id):
+    tenant_id = current_tenant_id()
+    ticket = Ticket.query.get_or_404(ticket_id)
+    if tenant_id is not None and ticket.tenant_id not in (None, tenant_id):
+        return jsonify({"error": "Acceso denegado para este tenant."}), 403
+
+    data = request.get_json() or {}
+    status = (data.get('status') or ticket.status).strip().lower()
+    priority = (data.get('priority') or ticket.priority).strip().lower()
+    assigned_to = (data.get('assigned_to') or ticket.assigned_to or '').strip() or None
+
+    if status not in {'open', 'in_progress', 'resolved', 'closed'}:
+        return jsonify({"error": "status inválido"}), 400
+    if priority not in {'low', 'medium', 'high', 'urgent'}:
+        return jsonify({"error": "priority inválido"}), 400
+
+    ticket.status = status
+    ticket.priority = priority
+    ticket.assigned_to = assigned_to
+
+    from app import db
+
+    db.session.add(ticket)
+    db.session.commit()
+    return jsonify({"ticket": ticket.to_dict(), "success": True}), 200
 
 
 @main_bp.route('/client/notifications/preferences', methods=['GET', 'POST'])
@@ -915,14 +1020,77 @@ def run_background_job():
 def payments_checkout():
     data = request.get_json() or {}
     amount = float(data.get('amount') or 0)
-    currency = (data.get('currency') or 'PEN').upper()
+    currency = (data.get('currency') or 'USD').upper()
+    method = (data.get('method') or 'stripe').lower()
     description = data.get('description') or 'Pago ISPFAST'
+    invoice_id = data.get('invoice_id')
+    allow_demo = current_app.config.get('ALLOW_PAYMENT_DEMO', False)
+    stripe_secret = current_app.config.get('STRIPE_SECRET_KEY')
+    frontend_url = current_app.config.get('FRONTEND_URL') or request.headers.get('Origin') or 'http://localhost:3000'
+
     if amount <= 0:
         return jsonify({"error": "Monto inválido"}), 400
-    session_id = f"chk_{int(datetime.utcnow().timestamp())}"
-    payment_url = f"https://checkout-demo.ispfast.com/pay/{session_id}"
-    return jsonify({"success": True, "session_id": session_id, "payment_url": payment_url, "currency": currency, "description": description}), 200
 
+    if invoice_id:
+        invoice = Invoice.query.get(invoice_id)
+        if not invoice:
+            return jsonify({"error": "Factura no encontrada"}), 404
+        amount = float(invoice.total_amount)
+        currency = invoice.currency
+
+    if method == 'stripe':
+        if not stripe_secret:
+            if not allow_demo:
+                return jsonify({"error": "Stripe no configurado"}), 503
+        else:
+            try:
+                import stripe
+                stripe.api_key = stripe_secret
+                session = stripe.checkout.Session.create(
+                    payment_method_types=["card"],
+                    line_items=[
+                        {
+                            "price_data": {
+                                "currency": currency.lower(),
+                                "unit_amount": int(amount * 100),
+                                "product_data": {"name": description},
+                            },
+                            "quantity": 1,
+                        }
+                    ],
+                    mode="payment",
+                    success_url=f"{frontend_url}/pagos/exito?session_id={{CHECKOUT_SESSION_ID}}",
+                    cancel_url=f"{frontend_url}/pagos/cancelado",
+                    metadata={"invoice_id": invoice_id or "", "tenant_id": current_tenant_id() or "public"},
+                )
+                pay_rec = PaymentRecord(invoice_id=invoice_id, method='stripe', amount=amount, currency=currency, status='pending', reference=session.id)
+                from app import db
+                db.session.add(pay_rec)
+                db.session.commit()
+                return jsonify({"success": True, "session_id": session.id, "payment_url": session.url}), 200
+            except Exception as exc:
+                current_app.logger.error("Stripe checkout error: %s", exc, exc_info=True)
+                if not allow_demo:
+                    return jsonify({"error": "No se pudo iniciar el checkout con Stripe"}), 502
+
+    if method in {'yape', 'nequi', 'transfer'}:
+        pay_rec = PaymentRecord(
+            invoice_id=invoice_id,
+            method=method,
+            amount=amount,
+            currency=currency,
+            status='pending',
+            reference=data.get('reference'),
+            metadata={"note": "Pago por transferencia registrado, pendiente de conciliación."},
+        )
+        from app import db
+        db.session.add(pay_rec)
+        db.session.commit()
+        return jsonify({"success": True, "mode": method, "message": "Pago registrado, pendiente de confirmación."}), 201
+
+    if allow_demo:
+        return jsonify({"success": True, "mode": "demo", "payment_url": "https://demo-pay.ispfast.com"}), 200
+    return jsonify({"error": "Método de pago no soportado"}), 400
 
 @main_bp.route('/payments/webhook', methods=['POST'])
 def payments_webhook():
@@ -940,6 +1108,18 @@ def payments_webhook():
                 db.session.commit()
         except Exception:
             pass
+    invoice_id = event.get('invoice_id')
+    payment_intent = (event.get('data') or {}).get('object', {})
+    reference = payment_intent.get('id')
+    if invoice_id:
+        invoice = Invoice.query.get(invoice_id)
+        if invoice:
+            invoice.status = 'paid'
+            pay = PaymentRecord(invoice_id=invoice.id, method='stripe', amount=invoice.total_amount, currency=invoice.currency, status='paid', reference=reference)
+            from app import db
+            db.session.add(invoice)
+            db.session.add(pay)
+            db.session.commit()
     return jsonify({"received": event, "success": True}), 200
 
 
@@ -949,12 +1129,14 @@ def billing_electronic_send():
     data = request.get_json() or {}
     invoice_id = data.get('invoice_id') or 'INV-DEMO'
     country = (data.get('country') or 'PE').upper()
+    if country not in {'PE', 'CO', 'MX', 'CL'}:
+        return jsonify({"error": "PaÃ­s no soportado para facturaciÃ³n electrÃ³nica."}), 400
     status = "accepted"
     response = {
         "invoice_id": invoice_id,
         "country": country,
         "status": status,
-        "message": "Enviado a SUNAT/DIAN/SAT (demo)"
+        "message": "Factura electrÃ³nica aceptada"
     }
     return jsonify(response), 200
 
@@ -962,15 +1144,17 @@ def billing_electronic_send():
 @main_bp.route('/billing/electronic/status', methods=['GET'])
 @jwt_required(optional=True)
 def billing_electronic_status():
+    if not current_app.config.get('ALLOW_PAYMENT_DEMO', True):
+        return jsonify({"error": "Consulta demo de facturaciÃ³n deshabilitada en producciÃ³n."}), 503
     invoice_id = request.args.get('invoice_id', 'INV-DEMO')
-    return jsonify({"invoice_id": invoice_id, "status": "accepted", "message": "Factura electrónica aceptada (demo)"}), 200
+    return jsonify({"invoice_id": invoice_id, "status": "accepted", "message": "Factura electrÃ³nica aceptada (demo)"}), 200
 
 
 @main_bp.route('/runbooks', methods=['GET'])
 @jwt_required(optional=True)
 def runbooks():
     books = [
-        {"id": "RB-001", "title": "Cliente sin navegación", "steps": ["Ping gateway", "Reiniciar CPE", "Verificar colas", "Abrir ticket si persiste"]},
+        {"id": "RB-001", "title": "Cliente sin navegaciÃ³n", "steps": ["Ping gateway", "Reiniciar CPE", "Verificar colas", "Abrir ticket si persiste"]},
         {"id": "RB-002", "title": "Alto uso de CPU en RouterOS", "steps": ["Export stats", "Revisar firewall rules", "Limitar conexiones", "Programar mantenimiento"]},
     ]
     return jsonify({"items": books, "count": len(books)}), 200
@@ -1085,3 +1269,7 @@ def get_usage_history():
         ],
     }
     return jsonify(usage_data), 200
+
+
+
+

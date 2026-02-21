@@ -179,7 +179,7 @@ const StatsGrid: React.FC<{ stats: DashboardStats | null; isLoading: boolean }> 
 const QuickActions: React.FC<{ onRebootClick: () => void }> = ({ onRebootClick }) => {
   const navigate = useNavigate();
   const actions = [
-    { label: 'Pagar Factura', action: () => window.open('https://billing.stripe.com/p/login/test_...'), icon: '💳' },
+    { label: 'Ver Facturas', action: () => navigate('/billing'), icon: '🧾' },
     { label: 'Reiniciar Equipo', action: onRebootClick, icon: '🔄' },
     { label: 'Ver Uso Detallado', action: () => navigate('/dashboard/usage'), icon: '📊' },
     { label: 'Invitar Amigos', action: () => toast.success('¡Gracias por recomendarnos!'), icon: '🎁' }

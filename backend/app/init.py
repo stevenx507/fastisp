@@ -61,6 +61,10 @@ def create_app(config_name_or_class='development'):
             'task': 'app.tasks.compute_daily_network_kpis',
             'schedule': crontab(minute=5, hour=0),
         },
+        'enforce-billing-status-every-15min': {
+            'task': 'app.tasks.enforce_billing_status',
+            'schedule': 900.0,
+        },
     }
 
     # Define the Celery task context

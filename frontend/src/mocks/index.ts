@@ -7,16 +7,9 @@ export async function mockRequest(endpoint: string, method = 'GET', body?: any) 
 
   if (endpoint.startsWith('/auth/login') && method === 'POST') {
     // accept any credentials for demo
-    const email = String(body?.email || '')
-    const isAdmin = /admin/i.test(email)
     return {
       token: 'demo-token',
-      user: {
-        id: isAdmin ? '99' : '1',
-        name: isAdmin ? 'Admin Demo' : 'Demo User',
-        email: email || 'demo@local',
-        role: isAdmin ? 'admin' : 'client'
-      }
+      user: { id: '1', name: 'Demo User', email: 'demo@local', role: 'client' }
     }
   }
 

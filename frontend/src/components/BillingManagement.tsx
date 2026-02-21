@@ -1,7 +1,6 @@
 import React, { useState } from 'react'
 import { motion } from 'framer-motion'
-import { ArrowDownTrayIcon, CalendarIcon } from '@heroicons/react/24/outline'
-import toast from 'react-hot-toast'
+import { ArrowDownTrayIcon, CreditCardIcon, CalendarIcon } from '@heroicons/react/24/outline'
 
 interface Invoice {
   id: string
@@ -35,32 +34,6 @@ const BillingManagement: React.FC = () => {
     paid: { bg: 'bg-green-100', text: 'text-green-800', label: 'Pagado' },
     pending: { bg: 'bg-yellow-100', text: 'text-yellow-800', label: 'Pendiente' },
     overdue: { bg: 'bg-red-100', text: 'text-red-800', label: 'Vencido' }
-  }
-
-  const exportCsv = (rows: Invoice[], fileName: string) => {
-    if (typeof document === 'undefined') return
-    const header = ['id', 'number', 'client', 'amount', 'date', 'dueDate', 'status']
-    const content = rows.map((item) => [item.id, item.number, item.client, String(item.amount), item.date, item.dueDate, item.status].join(','))
-    const csv = [header.join(','), ...content].join('\n')
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = fileName
-    document.body.appendChild(link)
-    link.click()
-    document.body.removeChild(link)
-    URL.revokeObjectURL(url)
-  }
-
-  const exportFilteredInvoices = () => {
-    exportCsv(filteredInvoices, `facturas-${filterStatus}.csv`)
-    toast.success(`Exportadas ${filteredInvoices.length} facturas.`)
-  }
-
-  const downloadSingleInvoice = (invoice: Invoice) => {
-    exportCsv([invoice], `${invoice.number}.csv`)
-    toast.success(`Factura ${invoice.number} descargada.`)
   }
 
   return (
@@ -104,7 +77,7 @@ const BillingManagement: React.FC = () => {
         <div className="p-6 border-b border-gray-200">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-2xl font-bold text-gray-900">Facturas</h2>
-            <button onClick={exportFilteredInvoices} className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition flex items-center gap-2">
+            <button className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition flex items-center gap-2">
               <ArrowDownTrayIcon className="w-5 h-5" />
               Exportar
             </button>
@@ -174,7 +147,7 @@ const BillingManagement: React.FC = () => {
                     </span>
                   </td>
                   <td className="px-6 py-4 text-sm">
-                    <button onClick={() => downloadSingleInvoice(invoice)} className="text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1">
+                    <button className="text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1">
                       <ArrowDownTrayIcon className="w-4 h-4" />
                       Descargar
                     </button>

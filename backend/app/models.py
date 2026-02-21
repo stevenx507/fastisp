@@ -28,6 +28,7 @@ class Tenant(db.Model):
     clients = db.relationship('Client', back_populates='tenant')
     plans = db.relationship('Plan', back_populates='tenant')
     routers = db.relationship('MikroTikRouter', back_populates='tenant')
+    tickets = db.relationship('Ticket', back_populates='tenant')
 
     def to_dict(self):
         return {
@@ -54,6 +55,7 @@ class User(db.Model):
     # Relationship to Client
     client = db.relationship('Client', back_populates='user', uselist=False, cascade="all, delete-orphan")
     tenant = db.relationship('Tenant', back_populates='users')
+    tickets = db.relationship('Ticket', back_populates='user')
 
     def set_password(self, password):
         """Hashes and sets the user's password."""
@@ -91,12 +93,18 @@ class Subscription(db.Model):
     plan = db.Column(db.String(30), nullable=False)  # Mensual, Trimestral, Semestral, Anual
     cycle_months = db.Column(db.Integer, nullable=False, default=1)
     amount = db.Column(db.Numeric(10, 2), nullable=False)
-    status = db.Column(db.String(20), nullable=False, default='active')  # active, past_due, trial, suspended
+    status = db.Column(db.String(20), nullable=False, default='active')  # active, past_due, trial, suspended, cancelled
+    currency = db.Column(db.String(8), nullable=False, default='USD')
+    country = db.Column(db.String(4), nullable=True)
+    tax_percent = db.Column(db.Numeric(5, 2), nullable=False, default=0)
     next_charge = db.Column(db.Date, nullable=False)
-    method = db.Column(db.String(30), nullable=False, default='Stripe')
+    method = db.Column(db.String(30), nullable=False, default='manual')
+    client_id = db.Column(db.Integer, db.ForeignKey('clients.id'), index=True)
     tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id'), index=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    client = db.relationship('Client', back_populates='subscriptions')
+    invoices = db.relationship('Invoice', back_populates='subscription', cascade="all, delete-orphan")
 
     def to_dict(self):
         return {
@@ -107,9 +115,13 @@ class Subscription(db.Model):
             'cycle_months': self.cycle_months,
             'amount': float(self.amount),
             'status': self.status,
+            'currency': self.currency,
+            'country': self.country,
+            'tax_percent': float(self.tax_percent),
             'next_charge': self.next_charge.isoformat() if self.next_charge else None,
             'method': self.method,
             'tenant_id': self.tenant_id,
+            'client_id': self.client_id,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -139,6 +151,8 @@ class Client(db.Model):
     plan = db.relationship('Plan', back_populates='clients')
     router = db.relationship('MikroTikRouter', back_populates='clients')
     tenant = db.relationship('Tenant', back_populates='clients')
+    subscriptions = db.relationship('Subscription', back_populates='client')
+    tickets = db.relationship('Ticket', back_populates='client')
 
     def to_dict(self):
         """Serializes the Client object to a dictionary."""
@@ -240,7 +254,8 @@ class AuditLog(db.Model):
     action = db.Column(db.String(120), nullable=False)
     entity_type = db.Column(db.String(120), nullable=True)
     entity_id = db.Column(db.String(120), nullable=True)
-    metadata = db.Column(db.JSON, nullable=True)
+    # "metadata" is reserved in SQLAlchemy Declarative; keep column name but expose as meta
+    meta = db.Column('metadata', db.JSON, nullable=True)
     ip_address = db.Column(db.String(64), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
 
@@ -255,7 +270,105 @@ class AuditLog(db.Model):
             "action": self.action,
             "entity_type": self.entity_type,
             "entity_id": self.entity_id,
-            "metadata": self.metadata,
+            "metadata": self.meta,
             "ip_address": self.ip_address,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class Ticket(db.Model):
+    __tablename__ = 'tickets'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id'), index=True, nullable=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), index=True, nullable=True)
+    client_id = db.Column(db.Integer, db.ForeignKey('clients.id'), index=True, nullable=True)
+    subject = db.Column(db.String(200), nullable=False)
+    description = db.Column(db.Text, nullable=False)
+    status = db.Column(db.String(20), default='open', nullable=False)  # open, in_progress, resolved, closed
+    priority = db.Column(db.String(20), default='medium', nullable=False)  # low, medium, high, urgent
+    assigned_to = db.Column(db.String(120), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    tenant = db.relationship('Tenant', back_populates='tickets')
+    user = db.relationship('User', back_populates='tickets')
+    client = db.relationship('Client', back_populates='tickets')
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "tenant_id": self.tenant_id,
+            "user_id": self.user_id,
+            "client_id": self.client_id,
+            "subject": self.subject,
+            "description": self.description,
+            "status": self.status,
+            "priority": self.priority,
+            "assigned_to": self.assigned_to,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class Invoice(db.Model):
+    __tablename__ = 'invoices'
+
+    id = db.Column(db.Integer, primary_key=True)
+    subscription_id = db.Column(db.Integer, db.ForeignKey('subscriptions.id'), index=True, nullable=False)
+    amount = db.Column(db.Numeric(10, 2), nullable=False)
+    currency = db.Column(db.String(8), nullable=False, default='USD')
+    tax_percent = db.Column(db.Numeric(5, 2), nullable=False, default=0)
+    total_amount = db.Column(db.Numeric(10, 2), nullable=False)
+    status = db.Column(db.String(20), nullable=False, default='pending')  # pending, paid, cancelled
+    due_date = db.Column(db.Date, nullable=False)
+    country = db.Column(db.String(4), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    subscription = db.relationship('Subscription', back_populates='invoices')
+    payments = db.relationship('PaymentRecord', back_populates='invoice', cascade="all, delete-orphan")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "subscription_id": self.subscription_id,
+            "amount": float(self.amount),
+            "currency": self.currency,
+            "tax_percent": float(self.tax_percent),
+            "total_amount": float(self.total_amount),
+            "status": self.status,
+            "due_date": self.due_date.isoformat() if self.due_date else None,
+            "country": self.country,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class PaymentRecord(db.Model):
+    __tablename__ = 'payments'
+
+    id = db.Column(db.Integer, primary_key=True)
+    invoice_id = db.Column(db.Integer, db.ForeignKey('invoices.id'), index=True, nullable=False)
+    method = db.Column(db.String(30), nullable=False, default='manual')  # stripe, yape, nequi, transfer
+    reference = db.Column(db.String(120), nullable=True)
+    amount = db.Column(db.Numeric(10, 2), nullable=False)
+    currency = db.Column(db.String(8), nullable=False, default='USD')
+    status = db.Column(db.String(20), nullable=False, default='pending')  # pending, paid, failed
+    meta = db.Column('metadata', db.JSON, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+    invoice = db.relationship('Invoice', back_populates='payments')
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "invoice_id": self.invoice_id,
+            "method": self.method,
+            "reference": self.reference,
+            "amount": float(self.amount),
+            "currency": self.currency,
+            "status": self.status,
+            "metadata": self.meta,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }

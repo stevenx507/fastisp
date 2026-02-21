@@ -4,6 +4,12 @@ Configuration settings for different environments
 import os
 from datetime import timedelta
 
+
+def _as_bool(raw_value: str | None, default: bool = False) -> bool:
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
+
 DEV_ENCRYPTION_KEY = "itTQ-n1WYoDTC_iw8glZpwkfxAknjNtz85t-6xeUkso="
 
 
@@ -47,7 +53,23 @@ class Config:
     CACHE_TYPE = os.environ.get('CACHE_TYPE', 'SimpleCache')
     CACHE_DEFAULT_TIMEOUT = int(os.environ.get('CACHE_DEFAULT_TIMEOUT', 300))
     CACHE_REDIS_URL = REDIS_URL
-    
+
+    # Frontend + access toggles
+    FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:3000')
+    ALLOW_SELF_SIGNUP = _as_bool(os.environ.get('ALLOW_SELF_SIGNUP'), default=True)
+    ALLOW_DEMO_LOGIN = _as_bool(os.environ.get('ALLOW_DEMO_LOGIN'), default=False)
+    ALLOW_PAYMENT_DEMO = _as_bool(os.environ.get('ALLOW_PAYMENT_DEMO'), default=True)
+    ALLOW_GOOGLE_LOGIN = _as_bool(os.environ.get('ALLOW_GOOGLE_LOGIN'), default=True)
+
+    # Observability & Alerts
+    PAGERDUTY_ROUTING_KEY = os.environ.get('PAGERDUTY_ROUTING_KEY')
+    TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+    TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
+
+    # Backups
+    PG_DUMP_PATH = os.environ.get('PG_DUMP_PATH', 'pg_dump')
+    BACKUP_BUCKET = os.environ.get('BACKUP_BUCKET')  # optional external storage
+
     # Email
     MAIL_SERVER = os.environ.get('MAIL_SERVER', 'smtp.gmail.com')
     MAIL_PORT = int(os.environ.get('MAIL_PORT', 587))
@@ -55,11 +77,6 @@ class Config:
     MAIL_USERNAME = os.environ.get('MAIL_USERNAME')
     MAIL_PASSWORD = os.environ.get('MAIL_PASSWORD')
     MAIL_DEFAULT_SENDER = os.environ.get('MAIL_DEFAULT_SENDER', 'noreply@ispmax.com')
-    
-    # Stripe
-    STRIPE_SECRET_KEY = os.environ.get('STRIPE_SECRET_KEY')
-    STRIPE_PUBLISHABLE_KEY = os.environ.get('STRIPE_PUBLISHABLE_KEY')
-    STRIPE_WEBHOOK_SECRET = os.environ.get('STRIPE_WEBHOOK_SECRET')
     
     # Twilio (WhatsApp/SMS)
     TWILIO_ACCOUNT_SID = os.environ.get('TWILIO_ACCOUNT_SID')
@@ -115,6 +132,12 @@ class ProductionConfig(Config):
     RATELIMIT_STORAGE_URL = REDIS_URL
     CACHE_TYPE = os.environ.get('CACHE_TYPE', 'RedisCache')
     CACHE_REDIS_URL = REDIS_URL
+
+    FRONTEND_URL = os.environ.get('FRONTEND_URL')
+    ALLOW_SELF_SIGNUP = _as_bool(os.environ.get('ALLOW_SELF_SIGNUP'), default=True)
+    ALLOW_DEMO_LOGIN = _as_bool(os.environ.get('ALLOW_DEMO_LOGIN'), default=False)
+    ALLOW_PAYMENT_DEMO = _as_bool(os.environ.get('ALLOW_PAYMENT_DEMO'), default=False)
+    ALLOW_GOOGLE_LOGIN = _as_bool(os.environ.get('ALLOW_GOOGLE_LOGIN'), default=True)
 
     MIKROTIK_DEFAULT_USERNAME = os.environ.get('MIKROTIK_DEFAULT_USERNAME')
     MIKROTIK_DEFAULT_PASSWORD = os.environ.get('MIKROTIK_DEFAULT_PASSWORD')

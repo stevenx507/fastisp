@@ -9,7 +9,7 @@ import redis
 from flask import current_app
 
 from app import celery
-from app.models import MikroTikRouter
+from app.models import MikroTikRouter, Subscription, Client
 from app.services.analytics_service import analytics_service
 from app.services.mikrotik_service import MikroTikService
 from app.services.monitoring_service import MonitoringService
@@ -50,6 +50,31 @@ def _release_lock(client: Optional[redis.Redis], lock_key: str, token: Optional[
             client.delete(lock_key)
     except Exception:
         current_app.logger.warning('Failed to release Redis task lock: %s', lock_key)
+
+
+def _send_billing_notification(sub: Subscription, message: str) -> None:
+    """Send SMS/WhatsApp notification if Twilio is configured."""
+    try:
+        sid = current_app.config.get('TWILIO_ACCOUNT_SID')
+        token = current_app.config.get('TWILIO_AUTH_TOKEN')
+        from_number = current_app.config.get('TWILIO_PHONE_NUMBER')
+        if not (sid and token and from_number):
+            current_app.logger.info('Twilio not configured; skipping billing notification.')
+            return
+        to = sub.email  # fallback; ideally phone is stored
+        # If email looks like phone (digits), append plus
+        if to and to.replace('+', '').isdigit():
+            to_number = to if to.startswith('+') else f"+{to}"
+        else:
+            current_app.logger.info('No phone available for billing notification; skipping.')
+            return
+        from twilio.rest import Client as TwilioClient
+
+        client = TwilioClient(sid, token)
+        client.messages.create(body=message, from_=from_number, to=to_number)
+        current_app.logger.info('Billing notification sent to %s', to_number)
+    except Exception as exc:
+        current_app.logger.warning('Failed to send billing notification: %s', exc)
 
 
 @celery.task(
@@ -224,3 +249,42 @@ def execute_router_operation(self, router_id: int, operation: str, payload: Opti
             return {'success': False, 'error': f'Unsupported operation: {operation}'}
     finally:
         _release_lock(lock_client, lock_key, lock_token)
+
+
+@celery.task(name='app.tasks.enforce_billing_status')
+def enforce_billing_status() -> Dict[str, Any]:
+    """
+    Auto-suspende clientes vencidos y reactiva los que volvieron a 'active'.
+    Inspirado en cortes automáticos de Wispro/Wisphub.
+    """
+    today = datetime.utcnow().date()
+    updated: List[Dict[str, Any]] = []
+
+    for sub in Subscription.query.all():
+        original_status = sub.status
+        if sub.next_charge and sub.next_charge < today and sub.status == 'active':
+            sub.status = 'past_due'
+
+        client: Optional[Client] = sub.client
+        if not client and sub.client_id:
+            client = Client.query.get(sub.client_id)
+
+        if sub.status in ('past_due', 'suspended') and client and client.router_id:
+            with MikroTikService(client.router_id) as service:
+                service.suspend_client(client, reason='billing')
+            sub.status = 'suspended'
+            _send_billing_notification(sub, f'Tu servicio está suspendido por pago vencido (sub {sub.id}).')
+        elif sub.status == 'active' and client and client.router_id:
+            with MikroTikService(client.router_id) as service:
+                service.activate_client(client)
+
+        if sub.status != original_status:
+            updated.append({"subscription_id": sub.id, "from": original_status, "to": sub.status})
+        from app import db
+        db.session.add(sub)
+
+    from app import db
+    db.session.commit()
+    summary = {"timestamp": datetime.utcnow().isoformat() + "Z", "updated": updated, "count": len(updated)}
+    current_app.logger.info('Billing enforcement summary: %s', json.dumps(summary, ensure_ascii=True))
+    return summary

@@ -11,37 +11,38 @@ interface StatsCardProps {
 }
 
 const colorVariants = {
-  blue: { ring: 'ring-blue-300/35', text: 'text-blue-200', value: 'text-blue-100' },
-  green: { ring: 'ring-emerald-300/35', text: 'text-emerald-200', value: 'text-emerald-100' },
-  purple: { ring: 'ring-purple-300/35', text: 'text-purple-200', value: 'text-purple-100' },
-  orange: { ring: 'ring-orange-300/35', text: 'text-orange-200', value: 'text-orange-100' },
-  red: { ring: 'ring-rose-300/35', text: 'text-rose-200', value: 'text-rose-100' },
-  emerald: { ring: 'ring-emerald-300/35', text: 'text-emerald-200', value: 'text-emerald-100' },
-  cyan: { ring: 'ring-cyan-300/35', text: 'text-cyan-200', value: 'text-cyan-100' }
+  blue: { bg: 'bg-blue-50', text: 'text-blue-700', dark: 'text-blue-600', icon: 'text-blue-500' },
+  green: { bg: 'bg-green-50', text: 'text-green-700', dark: 'text-green-600', icon: 'text-green-500' },
+  purple: { bg: 'bg-purple-50', text: 'text-purple-700', dark: 'text-purple-600', icon: 'text-purple-500' },
+  orange: { bg: 'bg-orange-50', text: 'text-orange-700', dark: 'text-orange-600', icon: 'text-orange-500' },
+  red: { bg: 'bg-red-50', text: 'text-red-700', dark: 'text-red-600', icon: 'text-red-500' },
+  emerald: { bg: 'bg-emerald-50', text: 'text-emerald-700', dark: 'text-emerald-600', icon: 'text-emerald-500' },
+  cyan: { bg: 'bg-cyan-50', text: 'text-cyan-700', dark: 'text-cyan-600', icon: 'text-cyan-500' }
 }
 
-const StatsCard: React.FC<StatsCardProps> = ({ title, value, trend, icon, color, subtitle }) => {
+export const StatsCard: React.FC<StatsCardProps> = ({ 
+  title, value, trend, icon, color, subtitle 
+}) => {
   const colors = colorVariants[color]
-
+  
   return (
     <motion.div
-      whileHover={{ y: -4, scale: 1.01 }}
-      transition={{ duration: 0.2 }}
-      className={`rounded-2xl border border-white/10 bg-slate-900/75 p-5 shadow-xl ring-1 backdrop-blur-xl ${colors.ring}`}
+      whileHover={{ y: -4 }}
+      className={`${colors.bg} rounded-xl p-6 border-l-4 border-${color}-600 shadow-sm hover:shadow-md transition-all`}
     >
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
+      <div className="flex items-center justify-between">
+        <div className="flex-1">
           <p className={`text-sm font-medium ${colors.text}`}>{title}</p>
-          <p className={`mt-1 text-3xl font-bold ${colors.value}`}>{value}</p>
-          {subtitle ? <p className="mt-1 text-xs text-slate-300">{subtitle}</p> : null}
-          {trend !== undefined ? (
-            <p className={`mt-2 text-xs font-medium ${trend >= 0 ? 'text-emerald-300' : 'text-rose-300'}`}>
-              {trend >= 0 ? '↑' : '↓'} {Math.abs(trend)}% vs mes anterior
+          <p className={`text-3xl font-bold ${colors.dark} mt-2`}>{value}</p>
+          {subtitle && <p className="text-xs text-gray-600 mt-1">{subtitle}</p>}
+          {trend !== undefined && (
+            <p className={`text-xs mt-2 ${trend > 0 ? 'text-green-600' : 'text-red-600'}`}>
+              {trend > 0 ? '↑' : '↓'} {Math.abs(trend)}% vs mes anterior
             </p>
-          ) : null}
+          )}
         </div>
-        <div className="rounded-xl bg-white/10 p-2 text-white">
-          {React.isValidElement(icon) ? React.cloneElement(icon, { className: 'h-6 w-6' }) : icon}
+        <div className={`${colors.icon} p-3`}>
+          {React.cloneElement(icon as React.ReactElement, { className: 'w-8 h-8' })}
         </div>
       </div>
     </motion.div>

@@ -18,9 +18,6 @@ routeros-api  # use latest available on PyPI; pin to a specific repo/version if 
 paramiko==3.5.0
 pyotp==2.9.0
 
-# Payments
-stripe==7.14.0
-
 # Async & Queue
 celery==5.3.4
 eventlet==0.33.3

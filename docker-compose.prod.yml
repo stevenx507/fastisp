@@ -13,11 +13,15 @@ services:
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
       - CORS_ORIGINS=${CORS_ORIGINS}
+      - FRONTEND_URL=${FRONTEND_URL}
+      - ALLOW_SELF_SIGNUP=${ALLOW_SELF_SIGNUP}
+      - ALLOW_DEMO_LOGIN=${ALLOW_DEMO_LOGIN}
+      - ALLOW_PAYMENT_DEMO=${ALLOW_PAYMENT_DEMO}
+      - ALLOW_GOOGLE_LOGIN=${ALLOW_GOOGLE_LOGIN}
       - MIKROTIK_DEFAULT_USERNAME=${MIKROTIK_DEFAULT_USERNAME}
       - MIKROTIK_DEFAULT_PASSWORD=${MIKROTIK_DEFAULT_PASSWORD}
       - LOG_LEVEL=${LOG_LEVEL}
       - GUNICORN_WORKERS=${GUNICORN_WORKERS}
-      - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
       - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID}
       - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
@@ -30,11 +34,19 @@ services:
         delay: 10s
       restart_policy:
         condition: on-failure
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.api.rule=Host(`${API_HOST}`)"
+        - "traefik.http.routers.api.entrypoints=websecure"
+        - "traefik.http.routers.api.tls.certresolver=myresolver"
+        - "traefik.http.services.api.loadbalancer.server.port=5000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+    networks:
+      - ispmax-network
 
   frontend:
     build:
@@ -42,7 +54,7 @@ services:
       target: production
     environment:
       - VITE_API_URL=${API_URL}
-      - VITE_STRIPE_PUBLISHABLE_KEY=${STRIPE_PUBLISHABLE_KEY}
+      - VITE_GOOGLE_CLIENT_ID=${VITE_GOOGLE_CLIENT_ID}
     deploy:
       replicas: 2
       update_config:
@@ -54,6 +66,70 @@ services:
         - "traefik.http.routers.frontend.entrypoints=websecure"
         - "traefik.http.routers.frontend.tls.certresolver=myresolver"
         - "traefik.http.services.frontend.loadbalancer.server.port=80" # Nginx serves on port 80 inside the container
+    networks:
+      - ispmax-network
+
+  celery-worker:
+    build:
+      context: ./backend
+      target: production
+    environment:
+      - FLASK_ENV=production
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
+      - SECRET_KEY=${SECRET_KEY}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - CORS_ORIGINS=${CORS_ORIGINS}
+      - FRONTEND_URL=${FRONTEND_URL}
+      - ALLOW_SELF_SIGNUP=${ALLOW_SELF_SIGNUP}
+      - ALLOW_DEMO_LOGIN=${ALLOW_DEMO_LOGIN}
+      - ALLOW_PAYMENT_DEMO=${ALLOW_PAYMENT_DEMO}
+      - ALLOW_GOOGLE_LOGIN=${ALLOW_GOOGLE_LOGIN}
+      - MIKROTIK_DEFAULT_USERNAME=${MIKROTIK_DEFAULT_USERNAME}
+      - MIKROTIK_DEFAULT_PASSWORD=${MIKROTIK_DEFAULT_PASSWORD}
+      - LOG_LEVEL=${LOG_LEVEL}
+      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID}
+      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - MAIL_USERNAME=${MAIL_USERNAME}
+      - MAIL_PASSWORD=${MAIL_PASSWORD}
+    command: ["celery", "-A", "app.tasks", "worker", "--loglevel=info", "--concurrency=2"]
+    depends_on:
+      - backend
+    networks:
+      - ispmax-network
+
+  celery-beat:
+    build:
+      context: ./backend
+      target: production
+    environment:
+      - FLASK_ENV=production
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
+      - SECRET_KEY=${SECRET_KEY}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - CORS_ORIGINS=${CORS_ORIGINS}
+      - FRONTEND_URL=${FRONTEND_URL}
+      - ALLOW_SELF_SIGNUP=${ALLOW_SELF_SIGNUP}
+      - ALLOW_DEMO_LOGIN=${ALLOW_DEMO_LOGIN}
+      - ALLOW_PAYMENT_DEMO=${ALLOW_PAYMENT_DEMO}
+      - ALLOW_GOOGLE_LOGIN=${ALLOW_GOOGLE_LOGIN}
+      - MIKROTIK_DEFAULT_USERNAME=${MIKROTIK_DEFAULT_USERNAME}
+      - MIKROTIK_DEFAULT_PASSWORD=${MIKROTIK_DEFAULT_PASSWORD}
+      - LOG_LEVEL=${LOG_LEVEL}
+      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID}
+      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - MAIL_USERNAME=${MAIL_USERNAME}
+      - MAIL_PASSWORD=${MAIL_PASSWORD}
+    command: ["celery", "-A", "app.tasks", "beat", "--loglevel=info", "--scheduler", "celery.beat:PersistentScheduler"]
+    depends_on:
+      - backend
+    networks:
+      - ispmax-network
 
   # Add load balancer for production
   traefik:
@@ -77,3 +153,7 @@ services:
       - "./letsencrypt:/letsencrypt"
     networks:
       - ispmax-network
+
+networks:
+  ispmax-network:
+    driver: bridge

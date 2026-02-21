@@ -17,7 +17,6 @@ interface AuthState {
   token: string | null
   isAuthenticated: boolean
   login: (email: string, password: string) => Promise<void>
-  updateProfile: (payload: Partial<User>) => Promise<void>
   logout: () => void
 }
 
@@ -65,18 +64,6 @@ export const useAuthStore = create<AuthState>()(
         }
 
         set({ user, token, isAuthenticated: true })
-      },
-      updateProfile: async (payload) => {
-        const current = (state: AuthState) => state.user
-        set((state) => ({ user: state.user ? { ...state.user, ...payload } : state.user }))
-        try {
-          await apiClient.put('/auth/profile', payload).catch(() => null)
-          const user = current as any
-          if (!user) throw new Error()
-        } catch (error) {
-          // si falla, no revertimos pero notificamos via consola
-          console.warn('[AuthStore] profile update fallback', error)
-        }
       },
       logout: () => {
         set({ user: null, token: null, isAuthenticated: false })

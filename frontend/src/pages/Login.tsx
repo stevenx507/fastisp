@@ -1,268 +1,240 @@
 import React, { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion } from 'framer-motion'
-import { EyeIcon, EyeSlashIcon, EnvelopeIcon, LockClosedIcon, SparklesIcon } from '@heroicons/react/24/outline'
+import { EyeIcon, EyeSlashIcon, EnvelopeIcon, LockClosedIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import { useAuthStore } from '../store/authStore'
 import { safeStorage } from '../lib/storage'
 import { apiClient } from '../lib/apiClient'
+import { config } from '../lib/config'
 
-const Login: React.FC = () => {
-  const navigate = useNavigate()
-  const { isAuthenticated, login } = useAuthStore()
+declare global {
+  interface Window {
+    google?: any
+  }
+}
+
+const LoginHeader: React.FC = () => (
+  <div className="text-center mb-10">
+    <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-r from-blue-600 to-purple-600 rounded-2xl shadow-lg mb-4">
+      <span className="text-white text-2xl font-bold">IM</span>
+    </div>
+    <h1 className="text-3xl font-bold text-gray-900 mb-2">ISPMAX</h1>
+    <p className="text-gray-600">Panel de Control para Clientes y Administradores</p>
+  </div>
+)
+
+const LoginForm: React.FC = () => {
   const [email, setEmail] = useState(safeStorage.getItem('rememberedEmail') || '')
   const [password, setPassword] = useState('')
-  const [confirmPassword, setConfirmPassword] = useState('')
-  const [fullName, setFullName] = useState('')
   const [showPassword, setShowPassword] = useState(false)
-  const [rememberMe, setRememberMe] = useState(Boolean(safeStorage.getItem('rememberedEmail')))
+  const [rememberMe, setRememberMe] = useState(!!safeStorage.getItem('rememberedEmail'))
   const [isLoading, setIsLoading] = useState(false)
-  const [isRegister, setIsRegister] = useState(false)
+  const [isGoogleReady, setIsGoogleReady] = useState(false)
+  const { login } = useAuthStore()
 
-  useEffect(() => {
-    if (isAuthenticated) navigate('/dashboard')
-  }, [isAuthenticated, navigate])
+  const handleRememberMeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setRememberMe(e.target.checked)
+    if (!e.target.checked) {
+      safeStorage.removeItem('rememberedEmail')
+    }
+  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!email || !password) {
-      toast.error('Completa correo y contrasena.')
+      toast.error('Por favor ingresa email y contraseña')
       return
     }
-    if (isRegister) {
-      if (!fullName.trim()) {
-        toast.error('Ingresa tu nombre.')
-        return
-      }
-      if (password !== confirmPassword) {
-        toast.error('Las contrasenas no coinciden.')
-        return
-      }
-    }
-
     setIsLoading(true)
     try {
-      if (rememberMe) safeStorage.setItem('rememberedEmail', email)
-      else safeStorage.removeItem('rememberedEmail')
-
-      if (isRegister) {
-        // Intento de registro real; si no existe endpoint, simulamos éxito.
-        await apiClient
-          .post('/auth/register', { name: fullName.trim(), email: email.trim(), password })
-          .catch(() => ({ ok: true }))
-        toast.success('Cuenta creada, iniciando sesion...')
-        setIsRegister(false)
+      if (rememberMe) {
+        safeStorage.setItem('rememberedEmail', email)
+      } else {
+        safeStorage.removeItem('rememberedEmail')
       }
-
       await login(email, password)
-      navigate('/dashboard', { replace: true })
-      toast.success('Bienvenido a ISPMAX')
+      toast.success('¡Inicio de sesión exitoso!')
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Error de autenticacion'
+      const errorMessage = error instanceof Error ? error.message : 'Credenciales incorrectas o error en el servidor.'
       toast.error(errorMessage)
     } finally {
       setIsLoading(false)
     }
   }
 
-  const handleGoogle = () => {
-    // Si hay backend OAuth, redirige. Si no, simulamos éxito.
+  const decodeJwtPayload = (jwt: string) => {
     try {
-      const googleUrl = import.meta.env.VITE_API_BASE_URL ? `${import.meta.env.VITE_API_BASE_URL}/auth/google` : '/auth/google'
-      if (typeof window !== 'undefined') {
-        window.location.href = googleUrl
-      }
-    } catch {
-      // Fallback: login demo directo
-      login('demo1@ispmax.com', 'demo1')
-        .then(() => {
-          toast.success('Sesion iniciada con Google (demo)')
-          navigate('/dashboard', { replace: true })
-        })
-        .catch(() => toast.error('No se pudo iniciar sesion con Google'))
+      const payload = jwt.split('.')[1]
+      const normalized = payload.replace(/-/g, '+').replace(/_/g, '/')
+      const json = atob(normalized)
+      return JSON.parse(json)
+    } catch (err) {
+      console.error('[Google] Error decoding token', err)
+      return null
     }
   }
 
-  return (
-    <div className="relative min-h-screen overflow-hidden bg-slate-950 px-4 py-10 text-white">
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_15%_18%,rgba(34,211,238,0.20),transparent_30%),radial-gradient(circle_at_82%_84%,rgba(129,140,248,0.18),transparent_30%)]" />
+  const handleGoogleCredential = async (credential: string) => {
+    const data = decodeJwtPayload(credential)
+    if (!data?.email) {
+      toast.error('No se pudo obtener el correo de Google.')
+      return
+    }
+    try {
+      const resp = await apiClient.post('/auth/google', {
+        email: data.email,
+        name: data.name || data.given_name || data.email.split('@')[0],
+      })
+      useAuthStore.setState({ user: resp.user, token: resp.token, isAuthenticated: true })
+      toast.success('Inicio de sesión con Google exitoso')
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Error iniciando con Google.'
+      toast.error(msg)
+    }
+  }
 
+  useEffect(() => {
+    if (!config.GOOGLE_CLIENT_ID) return
+    const initGoogle = () => {
+      if (!window.google?.accounts?.id) return
+      window.google.accounts.id.initialize({
+        client_id: config.GOOGLE_CLIENT_ID,
+        callback: (response: any) => handleGoogleCredential(response.credential),
+      })
+      setIsGoogleReady(true)
+    }
+    if (window.google?.accounts?.id) {
+      initGoogle()
+      return
+    }
+    const script = document.createElement('script')
+    script.src = 'https://accounts.google.com/gsi/client'
+    script.async = true
+    script.defer = true
+    script.onload = initGoogle
+    script.onerror = () => console.warn('[Google] No se pudo cargar el script de Google Identity')
+    document.body.appendChild(script)
+  }, [])
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-6">
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-2">Correo Electrónico</label>
+        <div className="relative">
+          <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"><EnvelopeIcon className="h-5 w-5 text-gray-400" /></div>
+          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} className="block w-full pl-10 pr-3 py-3 border border-gray-300 rounded-lg bg-gray-50 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors" placeholder="usuario@ejemplo.com" required />
+        </div>
+      </div>
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-2">Contraseña</label>
+        <div className="relative">
+          <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"><LockClosedIcon className="h-5 w-5 text-gray-400" /></div>
+          <input type={showPassword ? 'text' : 'password'} value={password} onChange={(e) => setPassword(e.target.value)} className="block w-full pl-10 pr-12 py-3 border border-gray-300 rounded-lg bg-gray-50 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors" placeholder="••••••••" required />
+          <button type="button" onClick={() => setShowPassword(!showPassword)} className="absolute inset-y-0 right-0 pr-3 flex items-center">
+            {showPassword ? <EyeSlashIcon className="h-5 w-5 text-gray-400 hover:text-gray-600" /> : <EyeIcon className="h-5 w-5 text-gray-400 hover:text-gray-600" />}
+          </button>
+        </div>
+      </div>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center">
+          <input id="remember-me" name="remember-me" type="checkbox" checked={rememberMe} onChange={handleRememberMeChange} className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded" />
+          <label htmlFor="remember-me" className="ml-2 block text-sm text-gray-700">Recordarme</label>
+        </div>
+        <button type="button" onClick={() => toast('La funcionalidad de recuperación de contraseña está en desarrollo.')} className="text-sm font-medium text-blue-600 hover:text-blue-500">¿Olvidaste tu contraseña?</button>
+      </div>
+      <button type="submit" disabled={isLoading} className="w-full flex justify-center py-3 px-4 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
+        {isLoading ? (
+          <div className="flex items-center"><div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-2"></div>Iniciando sesión...</div>
+        ) : (
+          'Iniciar Sesión'
+        )}
+      </button>
+
+      {config.GOOGLE_CLIENT_ID && (
+        <button
+          type="button"
+          onClick={() => window.google?.accounts?.id?.prompt()}
+          disabled={!isGoogleReady}
+          className="w-full mt-4 flex justify-center items-center gap-2 py-3 px-4 border border-gray-300 rounded-lg shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+        >
+          <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" className="h-5 w-5" />
+          {isGoogleReady ? 'Continuar con Google' : 'Cargando Google...'}
+        </button>
+      )}
+    </form>
+  )
+}
+
+const Login: React.FC = () => {
+  const navigate = useNavigate()
+  const { isAuthenticated } = useAuthStore()
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      navigate('/dashboard')
+    }
+  }, [isAuthenticated, navigate])
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50 flex items-center justify-center p-4">
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.45 }}
-        className="relative mx-auto grid w-full max-w-6xl overflow-hidden rounded-3xl border border-cyan-300/25 bg-slate-900/75 shadow-2xl backdrop-blur-xl lg:grid-cols-2"
+        transition={{ duration: 0.5 }}
+        className="max-w-md w-full"
       >
-        <section className="hidden border-r border-cyan-300/20 p-10 lg:flex lg:flex-col lg:justify-between">
-          <div>
-            <div className="mb-6 inline-flex items-center rounded-xl border border-cyan-300/30 bg-cyan-400/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-cyan-200">
-              Plataforma inteligente
-            </div>
-            <h1 className="text-4xl font-black leading-tight text-white">
-              Conecta tu red con una experiencia mas humana
-            </h1>
-            <p className="mt-5 max-w-lg text-slate-300">
-              Diseno futurista, controles claros y panel interactivo para que el usuario entienda su servicio en segundos.
-            </p>
-          </div>
+        <LoginHeader />
 
-          <div className="space-y-3">
-            {['Monitoreo en tiempo real', 'Soporte asistido', 'Facturacion rapida'].map((feature, i) => (
-              <motion.div
-                key={feature}
-                initial={{ opacity: 0, x: -15 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ delay: 0.15 + i * 0.08 }}
-                className="flex items-center gap-3 rounded-xl border border-cyan-300/20 bg-white/5 px-4 py-3 text-sm text-slate-100"
+        {/* Login Card */}
+        <div className="bg-white rounded-2xl shadow-xl border border-gray-200 p-8">
+          <h2 className="text-2xl font-bold text-gray-900 mb-6 text-center">Iniciar Sesión</h2>
+          <LoginForm />
+
+          {/* Divider */}
+          <div className="mt-8 pt-6 border-t border-gray-200">
+            <p className="text-center text-sm text-gray-600">
+              ¿No tienes una cuenta?{' '}
+              <button
+                type="button"
+                onClick={() => toast.success('Por favor, contacta a soporte para crear una cuenta.')}
+                className="font-medium text-blue-600 hover:text-blue-500"
               >
-                <SparklesIcon className="h-5 w-5 text-cyan-300" />
-                {feature}
-              </motion.div>
-            ))}
-          </div>
-        </section>
-
-        <section className="p-6 sm:p-10">
-          <div className="mb-8">
-            <div className="mb-4 inline-flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-cyan-400 to-indigo-500 text-xl font-black text-slate-900 shadow-lg shadow-cyan-500/30">
-              IM
-            </div>
-            <h2 className="text-3xl font-black text-white">{isRegister ? 'Crear cuenta' : 'Bienvenido'}</h2>
-            <p className="mt-2 text-sm text-slate-300">
-              {isRegister ? 'Completa tus datos para activar un acceso demo.' : 'Inicia sesion para acceder a tu panel personalizado.'}
+                Contacta a tu proveedor
+              </button>
             </p>
           </div>
+        </div>
 
-          <form onSubmit={handleSubmit} className="space-y-5">
-            {isRegister && (
-              <label className="block">
-                <span className="mb-2 block text-sm font-medium text-slate-200">Nombre completo</span>
-                <div className="relative">
-                  <SparklesIcon className="pointer-events-none absolute left-3 top-3.5 h-5 w-5 text-slate-400" />
-                  <input
-                    type="text"
-                    value={fullName}
-                    onChange={(e) => setFullName(e.target.value)}
-                    className="w-full rounded-xl border border-cyan-300/25 bg-slate-800/70 py-3 pl-11 pr-3 text-white placeholder-slate-400 outline-none ring-cyan-300/40 transition focus:ring-2"
-                    placeholder="Tu nombre"
-                    required
-                  />
-                </div>
-              </label>
-            )}
-
-            <label className="block">
-              <span className="mb-2 block text-sm font-medium text-slate-200">Correo</span>
-              <div className="relative">
-                <EnvelopeIcon className="pointer-events-none absolute left-3 top-3.5 h-5 w-5 text-slate-400" />
-                <input
-                  type="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="w-full rounded-xl border border-cyan-300/25 bg-slate-800/70 py-3 pl-11 pr-3 text-white placeholder-slate-400 outline-none ring-cyan-300/40 transition focus:ring-2"
-                  placeholder="usuario@ejemplo.com"
-                  required
-                />
-              </div>
-            </label>
-
-            <label className="block">
-              <span className="mb-2 block text-sm font-medium text-slate-200">Contrasena</span>
-              <div className="relative">
-                <LockClosedIcon className="pointer-events-none absolute left-3 top-3.5 h-5 w-5 text-slate-400" />
-                <input
-                  type={showPassword ? 'text' : 'password'}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="w-full rounded-xl border border-cyan-300/25 bg-slate-800/70 py-3 pl-11 pr-11 text-white placeholder-slate-400 outline-none ring-cyan-300/40 transition focus:ring-2"
-                  placeholder="********"
-                  required
-                />
-                <button type="button" onClick={() => setShowPassword((v) => !v)} className="absolute right-3 top-3 text-slate-300 hover:text-white">
-                  {showPassword ? <EyeSlashIcon className="h-5 w-5" /> : <EyeIcon className="h-5 w-5" />}
-                </button>
-              </div>
-            </label>
-
-            {isRegister && (
-              <label className="block">
-                <span className="mb-2 block text-sm font-medium text-slate-200">Confirmar contrasena</span>
-                <div className="relative">
-                  <LockClosedIcon className="pointer-events-none absolute left-3 top-3.5 h-5 w-5 text-slate-400" />
-                  <input
-                    type={showPassword ? 'text' : 'password'}
-                    value={confirmPassword}
-                    onChange={(e) => setConfirmPassword(e.target.value)}
-                    className="w-full rounded-xl border border-cyan-300/25 bg-slate-800/70 py-3 pl-11 pr-3 text-white placeholder-slate-400 outline-none ring-cyan-300/40 transition focus:ring-2"
-                    placeholder="********"
-                    required
-                  />
-                </div>
-              </label>
-            )}
-
-            <div className="flex items-center justify-between">
-              <label className="flex items-center gap-2 text-sm text-slate-300">
-                <input
-                  type="checkbox"
-                  checked={rememberMe}
-                  onChange={(e) => setRememberMe(e.target.checked)}
-                  className="h-4 w-4 rounded border-cyan-300/30 bg-slate-800/70 text-cyan-400"
-                />
-                Recordarme
-              </label>
-              <button type="button" onClick={() => toast('Recuperacion de contrasena en proceso.')} className="text-sm font-medium text-cyan-300 hover:text-cyan-200">
-                Olvide mi clave
-              </button>
-            </div>
-
-            <button
-              type="submit"
-              disabled={isLoading}
-              className="w-full rounded-xl bg-gradient-to-r from-cyan-400 to-blue-600 px-4 py-3 text-sm font-semibold text-slate-950 shadow-lg shadow-cyan-500/30 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-70"
-            >
-              {isLoading ? (isRegister ? 'Creando cuenta...' : 'Ingresando...') : isRegister ? 'Crear cuenta demo' : 'Entrar al panel'}
-            </button>
-
-            <div className="relative py-2 text-center text-xs text-slate-400">
-              <span className="bg-slate-900 px-2">ó</span>
-              <div className="absolute inset-x-0 top-1/2 -z-10 border-t border-slate-800" />
-            </div>
-
-            <button
-              type="button"
-              onClick={handleGoogle}
-              className="w-full inline-flex items-center justify-center gap-3 rounded-xl border border-slate-700 bg-slate-900/60 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-black/20 transition hover:border-cyan-400/60 hover:shadow-cyan-500/20"
-            >
-              <span className="flex h-6 w-6 items-center justify-center rounded bg-white text-[13px] font-bold text-slate-900">G</span>
-              Continuar con Google
-            </button>
-          </form>
-
-          <div className="mt-5 flex items-center justify-between text-sm text-slate-300">
-            <span>{isRegister ? '¿Ya tienes cuenta?' : '¿No tienes cuenta?'}</span>
-            <button
-              type="button"
-              onClick={() => setIsRegister((prev) => !prev)}
-              className="font-semibold text-cyan-300 hover:text-cyan-100"
-            >
-              {isRegister ? 'Iniciar sesion' : 'Crear acceso demo'}
-            </button>
+        {/* Features Grid */}
+        <div className="mt-10 grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="text-center p-4 bg-white rounded-lg border border-gray-200">
+            <div className="text-2xl mb-2">⚡</div>
+            <p className="text-xs font-medium text-gray-700">Prueba de Velocidad 4K</p>
           </div>
-
-          <div className="mt-6 grid grid-cols-3 gap-3 text-center">
-            {[
-              { title: 'Respuesta', value: '< 2 min' },
-              { title: 'Disponibilidad', value: '99.9%' },
-              { title: 'Satisfaccion', value: '4.9/5' }
-            ].map((item) => (
-              <div key={item.title} className="rounded-xl border border-cyan-300/20 bg-white/5 p-3">
-                <p className="text-lg font-bold text-cyan-200">{item.value}</p>
-                <p className="text-xs text-slate-300">{item.title}</p>
-              </div>
-            ))}
+          <div className="text-center p-4 bg-white rounded-lg border border-gray-200">
+            <div className="text-2xl mb-2">💳</div>
+            <p className="text-xs font-medium text-gray-700">Pagos en 1-Clic</p>
           </div>
-        </section>
+          <div className="text-center p-4 bg-white rounded-lg border border-gray-200">
+            <div className="text-2xl mb-2">🤖</div>
+            <p className="text-xs font-medium text-gray-700">Soporte IA 24/7</p>
+          </div>
+          <div className="text-center p-4 bg-white rounded-lg border border-gray-200">
+            <div className="text-2xl mb-2">📱</div>
+            <p className="text-xs font-medium text-gray-700">App Móvil</p>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="mt-8 text-center text-sm text-gray-500">
+          <p>© {new Date().getFullYear()} ISPMAX. Todos los derechos reservados.</p>
+          <p className="mt-1">
+            <a href="#" className="hover:text-gray-700">Términos</a> • 
+            <a href="#" className="hover:text-gray-700 mx-2">Privacidad</a> • 
+            <a href="#" className="hover:text-gray-700">Soporte</a>
+          </p>
+        </div>
       </motion.div>
     </div>
   )

@@ -5,6 +5,7 @@ export const config = {
   API_BASE_URL: import.meta.env.VITE_API_URL || '/api',
   APP_NAME: 'ISPMAX',
   APP_VERSION: '1.0.0',
+  GOOGLE_CLIENT_ID: import.meta.env.VITE_GOOGLE_CLIENT_ID || '',
   
   // Feature flags
   FEATURES: {

@@ -2,6 +2,13 @@ import React, { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
 import { BarChart } from './Chart'
 
+interface MetricData {
+  label: string
+  value: number
+  color: string
+  threshold?: number
+}
+
 const MonitoringView: React.FC = () => {
   const [metrics, setMetrics] = useState({
     cpu: 35,

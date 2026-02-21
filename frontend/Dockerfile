@@ -18,9 +18,6 @@ RUN npm run build
 # Stage 2: Production (Serve with Nginx)
 FROM nginx:stable-alpine as production
 
-# Create a non-root user and group
-RUN addgroup -S nginx && adduser -S nginx -G nginx
-
 # Copy the custom Nginx configuration from the build context
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 

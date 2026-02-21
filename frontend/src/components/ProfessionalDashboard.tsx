@@ -10,7 +10,7 @@ import StatsCard from './StatsCard'
 import { LineChart, BarChart } from './Chart'
 
 const ProfessionalDashboard: React.FC = () => {
-  const [stats] = useState({
+  const [stats, setStats] = useState({
     activeClients: 1234,
     monthlyRevenue: 45678,
     activeRouters: 12,

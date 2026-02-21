@@ -66,7 +66,7 @@ services:
     build: ./frontend
     environment:
       - VITE_API_URL=http://localhost:5000/api
-      - VITE_STRIPE_PUBLISHABLE_KEY=${STRIPE_PUBLISHABLE_KEY}
+      - VITE_GOOGLE_CLIENT_ID=${VITE_GOOGLE_CLIENT_ID}
     volumes:
       - ./frontend:/app
       - /app/node_modules

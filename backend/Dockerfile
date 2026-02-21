@@ -1,5 +1,6 @@
 # Stage 1: Builder
-FROM python:3.11-slim-buster as builder
+# Use a supported Debian base (buster is EOL and its repos return 404)
+FROM python:3.11-slim-bookworm as builder
 
 # Install system dependencies for building Python packages
 RUN apt-get update && apt-get install -y \
@@ -17,7 +18,7 @@ COPY requirements.txt .
 RUN pip wheel --no-cache-dir --wheel-dir=/wheels -r requirements.txt
 
 # Stage 2: Production
-FROM python:3.11-slim-buster as production
+FROM python:3.11-slim-bookworm as production
 
 # Install only runtime system dependencies
 RUN apt-get update && apt-get install -y \

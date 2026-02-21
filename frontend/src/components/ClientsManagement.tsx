@@ -1,7 +1,6 @@
 import React, { useState, useMemo } from 'react'
 import { motion } from 'framer-motion'
 import { MagnifyingGlassIcon, PlusIcon, EllipsisVerticalIcon } from '@heroicons/react/24/outline'
-import toast from 'react-hot-toast'
 
 interface Client {
   id: string
@@ -20,7 +19,7 @@ const ClientsManagement: React.FC = () => {
   const [filterStatus, setFilterStatus] = useState<string>('all')
   const [sortBy, setSortBy] = useState<'name' | 'date' | 'balance'>('name')
 
-  const [clients, setClients] = useState<Client[]>([
+  const [clients] = useState<Client[]>([
     { id: '1', name: 'Juan Pérez', email: 'juan@example.com', phone: '+57 310 123 4567', plan: '100 Mbps', status: 'active', balance: 50000, joinDate: '2024-01-15', bandwidth: '95%' },
     { id: '2', name: 'María García', email: 'maria@example.com', phone: '+57 320 987 6543', plan: '50 Mbps', status: 'active', balance: 0, joinDate: '2024-02-20', bandwidth: '72%' },
     { id: '3', name: 'Carlos López', email: 'carlos@example.com', phone: '+57 300 555 1234', plan: '200 Mbps', status: 'suspended', balance: -120000, joinDate: '2023-11-05', bandwidth: '0%' },
@@ -51,41 +50,6 @@ const ClientsManagement: React.FC = () => {
     suspended: { bg: 'bg-red-100', text: 'text-red-800', label: 'Suspendido' }
   }
 
-  const createClient = () => {
-    const nextIndex = clients.length + 1
-    const newClient: Client = {
-      id: String(Date.now()),
-      name: `Cliente ${nextIndex}`,
-      email: `cliente${nextIndex}@example.com`,
-      phone: '+57 300 000 0000',
-      plan: '80 Mbps',
-      status: 'inactive',
-      balance: 0,
-      joinDate: new Date().toISOString().slice(0, 10),
-      bandwidth: '0%'
-    }
-    setClients((prev) => [newClient, ...prev])
-    toast.success(`Cliente ${newClient.name} agregado.`)
-  }
-
-  const rotateStatus = (status: Client['status']): Client['status'] => {
-    if (status === 'active') return 'inactive'
-    if (status === 'inactive') return 'suspended'
-    return 'active'
-  }
-
-  const toggleClientStatus = (clientId: string) => {
-    let updatedStatus: Client['status'] = 'active'
-    setClients((prev) =>
-      prev.map((client) => {
-        if (client.id !== clientId) return client
-        updatedStatus = rotateStatus(client.status)
-        return { ...client, status: updatedStatus }
-      })
-    )
-    toast.success(`Estado actualizado a ${statusConfig[updatedStatus].label}.`)
-  }
-
   return (
     <motion.div
       initial={{ opacity: 0 }}
@@ -96,7 +60,7 @@ const ClientsManagement: React.FC = () => {
       <div className="p-6 border-b border-gray-200">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-2xl font-bold text-gray-900">Gestión de Clientes</h2>
-          <button onClick={createClient} className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">
+          <button className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">
             <PlusIcon className="w-5 h-5" />
             Nuevo Cliente
           </button>
@@ -189,7 +153,6 @@ const ClientsManagement: React.FC = () => {
                   <td className="px-6 py-4 text-sm">
                     <button 
                       title="Opciones de cliente"
-                      onClick={() => toggleClientStatus(client.id)}
                       className="p-2 hover:bg-gray-100 rounded-lg transition"
                     >
                       <EllipsisVerticalIcon className="w-5 h-5 text-gray-500" />
