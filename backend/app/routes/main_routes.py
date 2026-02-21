@@ -14,6 +14,7 @@ from app.services.monitoring_service import MonitoringService
 from app.tenancy import current_tenant_id, tenant_access_allowed
 from datetime import date
 from werkzeug.exceptions import BadRequest
+from sqlalchemy.orm import joinedload
 from io import BytesIO
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
@@ -1592,6 +1593,29 @@ def admin_router_usage():
 
     result = list(router_map.values())
     return jsonify({"items": result, "count": len(result)}), 200
+
+
+@main_bp.route('/admin/clients', methods=['GET'])
+@admin_required()
+def admin_list_clients():
+    tenant_id = current_tenant_id()
+    query = Client.query.options(joinedload(Client.plan))
+    if tenant_id is not None:
+        query = query.filter_by(tenant_id=tenant_id)
+    clients = []
+    for c in query.all():
+        subs = c.subscriptions or []
+        status = subs[0].status if subs else 'active'
+        clients.append({
+            "id": c.id,
+            "name": c.full_name,
+            "ip_address": c.ip_address,
+            "plan": c.plan.name if c.plan else None,
+            "plan_id": c.plan_id,
+            "router_id": c.router_id,
+            "status": status,
+        })
+    return jsonify({"items": clients, "count": len(clients)}), 200
 
 
 # ==================== RED: SUSPENDER / ACTIVAR / CAMBIAR VELOCIDAD ====================
