@@ -154,6 +154,7 @@
   position: relative;
   pointer-events: auto;
   background: linear-gradient(180deg, var(--shell-overlay-start) 0%, var(--shell-overlay-end) 100%);
+  z-index: 0;
 }
 
 .enterprise-shell::before {
@@ -161,6 +162,7 @@
   position: fixed;
   inset: 0;
   pointer-events: none;
+  z-index: -1;
   background-image:
     linear-gradient(var(--grid-line) 1px, transparent 1px),
     linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
