@@ -46,6 +46,7 @@ services:
       - "traefik.http.routers.api.middlewares=secure-headers@docker,ipwhitelist@docker,geoip2@file"
       - "traefik.http.services.api.loadbalancer.server.port=5000"
 
+
   frontend:
     build:
       context: ./frontend
@@ -105,6 +106,7 @@ services:
       - --api.insecure=true
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=ispmax-network
       - --providers.file.directory=/etc/traefik/dynamic
       - --entrypoints.web.address=:80
       - --entrypoints.websecure.address=:443
