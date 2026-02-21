@@ -14,7 +14,12 @@ const statusConfig: Record<InvoiceStatus, { bg: string; text: string; label: str
   cancelled: { bg: 'bg-gray-100 text-gray-700', text: 'text-gray-700', label: 'Cancelada' },
 }
 
-const BillingManagement: React.FC = () => {
+interface Props {
+  onSelectInvoice?: (invoiceId: number) => void
+  mode?: 'client' | 'admin'
+}
+
+const BillingManagement: React.FC<Props> = ({ onSelectInvoice, mode = 'client' }) => {
   const [filterStatus, setFilterStatus] = useState<'all' | InvoiceStatus>('all')
   const [invoices, setInvoices] = useState<InvoiceDTO[]>([])
   const [isLoading, setIsLoading] = useState(false)
@@ -153,6 +158,14 @@ const BillingManagement: React.FC = () => {
                         <ArrowDownTrayIcon className="w-4 h-4" />
                         Descargar
                       </button>
+                      {mode === 'admin' && onSelectInvoice && (
+                        <button
+                          onClick={() => onSelectInvoice(inv.id)}
+                          className="text-emerald-300 hover:text-white font-semibold"
+                        >
+                          Registrar pago
+                        </button>
+                      )}
                     </td>
                   </motion.tr>
                 ))}

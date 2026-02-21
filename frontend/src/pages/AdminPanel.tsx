@@ -131,28 +131,28 @@ const AdminPanel: React.FC = () => {
     network: <MikroTikManagement />,
     maps: <NetworkMap />,
     billing: (
-      <div className="relative">
-        <div className="flex flex-wrap gap-3 mb-4">
+      <div className="relative space-y-4">
+        <div className="flex flex-wrap gap-3">
           <button
             onClick={() => {
-              setSelectedClientId(1) // TODO: seleccionar desde tabla de clientes
+              const idStr = window.prompt('ID del cliente para cambiar plan')
+              const parsed = idStr ? parseInt(idStr, 10) : NaN
+              if (!parsed) return
+              setSelectedClientId(parsed)
               setShowPlanModal(true)
             }}
             className="px-4 py-2 rounded-lg bg-cyan-500 text-white font-semibold hover:bg-cyan-400"
           >
-            Cambiar plan (demo cliente 1)
-          </button>
-          <button
-            onClick={() => {
-              setSelectedInvoiceId(1) // TODO: seleccionar factura concreta
-              setShowPaymentModal(true)
-            }}
-            className="px-4 py-2 rounded-lg bg-emerald-500 text-white font-semibold hover:bg-emerald-400"
-          >
-            Registrar pago manual (demo factura 1)
+            Cambiar plan
           </button>
         </div>
-        <BillingManagement />
+        <BillingManagement
+          mode="admin"
+          onSelectInvoice={(id) => {
+            setSelectedInvoiceId(id)
+            setShowPaymentModal(true)
+          }}
+        />
       </div>
     ),
     monitoring: <MonitoringView />,
