@@ -1757,6 +1757,115 @@ def download_backup():
     return send_from_directory(directory=str(base), path=name, as_attachment=True)
 
 
+# ==================== TICKETS CON SLA ====================
+
+def _sla_due(priority: str) -> datetime:
+    now = datetime.utcnow()
+    if priority == 'urgent':
+        return now + timedelta(hours=2)
+    if priority == 'high':
+        return now + timedelta(hours=4)
+    if priority == 'medium':
+        return now + timedelta(hours=24)
+    return now + timedelta(hours=48)
+
+
+@main_bp.route('/tickets', methods=['GET'])
+@jwt_required()
+def list_tickets():
+    tenant_id = current_tenant_id()
+    user_id = _current_user_id()
+    is_admin = False
+    user = User.query.get(user_id)
+    if user and user.role == 'admin':
+        is_admin = True
+
+    query = Ticket.query.options(joinedload(Ticket.comments))
+    if not is_admin:
+        query = query.filter((Ticket.user_id == user_id) | (Ticket.tenant_id == tenant_id))
+    items = []
+    for t in query.order_by(Ticket.created_at.desc()).all():
+        items.append({
+            "id": t.id,
+            "subject": t.subject,
+            "description": t.description,
+            "status": t.status,
+            "priority": t.priority,
+            "assigned_to": t.assigned_to,
+            "sla_due_at": t.sla_due_at.isoformat() if t.sla_due_at else None,
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+        })
+    return jsonify({"items": items, "count": len(items)}), 200
+
+
+@main_bp.route('/tickets', methods=['POST'])
+@jwt_required()
+def create_ticket():
+    data = request.get_json() or {}
+    subject = (data.get('subject') or '').strip()
+    description = (data.get('description') or '').strip()
+    priority = (data.get('priority') or 'medium').lower()
+    if not subject or not description:
+        return jsonify({"error": "subject y description son requeridos"}), 400
+    user_id = _current_user_id()
+    user = User.query.get_or_404(user_id)
+    tenant_id = current_tenant_id()
+    ticket = Ticket(
+        subject=subject,
+        description=description,
+        priority=priority,
+        status='open',
+        user_id=user_id,
+        client_id=user.client.id if user.client else None,
+        tenant_id=tenant_id,
+        sla_due_at=_sla_due(priority),
+    )
+    db.session.add(ticket)
+    db.session.commit()
+    _notify_incident(f"Nuevo ticket: {subject}", severity="warning")
+    return jsonify({"ticket": ticket.to_dict()}), 201
+
+
+@main_bp.route('/tickets/<int:ticket_id>', methods=['PATCH'])
+@jwt_required()
+def update_ticket(ticket_id):
+    data = request.get_json() or {}
+    ticket = Ticket.query.get_or_404(ticket_id)
+    user_id = _current_user_id()
+    user = User.query.get(user_id)
+    is_admin = user and user.role == 'admin'
+    # Non-admin only can comment via /comments
+    if not is_admin and data:
+        return jsonify({"error": "Solo admin puede actualizar ticket"}), 403
+    status = data.get('status')
+    assigned_to = data.get('assigned_to')
+    priority = data.get('priority')
+    if status:
+        ticket.status = status
+    if assigned_to is not None:
+        ticket.assigned_to = assigned_to
+    if priority:
+        ticket.priority = priority
+        ticket.sla_due_at = _sla_due(priority)
+    db.session.commit()
+    return jsonify({"ticket": ticket.to_dict()}), 200
+
+
+@main_bp.route('/tickets/<int:ticket_id>/comments', methods=['POST'])
+@jwt_required()
+def add_ticket_comment(ticket_id):
+    data = request.get_json() or {}
+    comment = (data.get('comment') or '').strip()
+    if not comment:
+        return jsonify({"error": "comment requerido"}), 400
+    ticket = Ticket.query.get_or_404(ticket_id)
+    user_id = _current_user_id()
+    tc = TicketComment(ticket_id=ticket.id, user_id=user_id, comment=comment)
+    db.session.add(tc)
+    db.session.commit()
+    return jsonify({"comment": tc.to_dict()}), 201
+
+
 def _notify_client(client: Client, subject: str, body: str):
     """Envía correo y push si hay configuración."""
     try:
