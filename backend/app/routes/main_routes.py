@@ -15,6 +15,9 @@ from app.tenancy import current_tenant_id, tenant_access_allowed
 from datetime import date
 from werkzeug.exceptions import BadRequest
 from sqlalchemy.orm import joinedload
+import subprocess
+import os
+from flask_mail import Message
 from io import BytesIO
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
@@ -1635,6 +1638,8 @@ def suspend_client(client_id):
     if ok and client.subscriptions:
         client.subscriptions[0].status = 'suspended'
         db.session.commit()
+        _notify_incident(f"Suspendido cliente {client.full_name}", severity="warning")
+        _notify_client(client, "Aviso de suspensión", "Tu servicio ha sido suspendido por pago pendiente. Regulariza para reactivarlo.")
     return (jsonify({"success": True}), 200) if ok else (jsonify({"error": "No se pudo suspender en MikroTik"}), 500)
 
 
@@ -1653,6 +1658,8 @@ def activate_client(client_id):
     if ok and client.subscriptions:
         client.subscriptions[0].status = 'active'
         db.session.commit()
+        _notify_incident(f"Reactivado cliente {client.full_name}", severity="info")
+        _notify_client(client, "Servicio reactivado", "Tu servicio ha sido reactivado. Gracias por ponerte al día.")
     return (jsonify({"success": True}), 200) if ok else (jsonify({"error": "No se pudo activar en MikroTik"}), 500)
 
 
@@ -1705,6 +1712,64 @@ def backup_router(router_id):
     if not filename:
         return jsonify({"error": "No se pudo generar backup"}), 500
     return jsonify({"success": True, "filename": filename}), 200
+
+
+@main_bp.route('/admin/backups/db', methods=['POST'])
+@admin_required()
+def backup_db():
+    """Ejecuta pg_dump y guarda en /app/backups."""
+    os.makedirs('/app/backups', exist_ok=True)
+    ts = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
+    fname = f"/app/backups/db-backup-{ts}.sql"
+    env = os.environ.copy()
+    try:
+        cmd = ["pg_dump", env['DATABASE_URL']]
+        with open(fname, 'w') as f:
+            subprocess.check_call(cmd, stdout=f)
+        return jsonify({"success": True, "filename": fname}), 200
+    except Exception as e:
+        return jsonify({"error": f"No se pudo generar backup DB: {e}"}), 500
+
+
+@main_bp.route('/admin/backups/list', methods=['GET'])
+@admin_required()
+def list_backups():
+    base = Path('/app/backups')
+    files = []
+    if base.exists():
+        for f in sorted(base.glob('*'), reverse=True):
+            files.append({"name": f.name, "size": f.stat().st_size, "modified": datetime.utcfromtimestamp(f.stat().st_mtime).isoformat()})
+    return jsonify({"items": files, "count": len(files)}), 200
+
+
+def _notify_client(client: Client, subject: str, body: str):
+    """Envía correo y push si hay configuración."""
+    try:
+        mail = current_app.extensions.get('mail')
+        if mail and client.user and client.user.email:
+            msg = Message(subject=subject, recipients=[client.user.email], body=body, sender=current_app.config.get('MAIL_DEFAULT_SENDER'))
+            mail.send(msg)
+    except Exception:
+        current_app.logger.warning("No se pudo enviar correo al cliente")
+
+    wp_token = current_app.config.get('WONDERPUSH_ACCESS_TOKEN')
+    wp_app = current_app.config.get('WONDERPUSH_APPLICATION_ID')
+    if wp_token and wp_app:
+        try:
+            import requests
+            payload = {
+                "targetSegmentIds": ["all"],
+                "notification": {"alert": body[:120], "url": current_app.config.get('FRONTEND_URL')}
+            }
+            requests.post(
+                "https://api.wonderpush.com/v1/deliveries",
+                params={"applicationId": wp_app},
+                headers={"Authorization": f"Bearer {wp_token}"},
+                json=payload,
+                timeout=5
+            )
+        except Exception:
+            current_app.logger.warning("No se pudo enviar push al cliente")
 
 
 @main_bp.route('/admin/routers/<int:router_id>/remote-script', methods=['GET'])
