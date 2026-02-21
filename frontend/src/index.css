@@ -155,11 +155,18 @@
   pointer-events: auto;
   background: linear-gradient(180deg, var(--shell-overlay-start) 0%, var(--shell-overlay-end) 100%);
   z-index: 0;
+  isolation: isolate;
 }
 
 .enterprise-shell::before {
   content: '';
-  display: none; /* desactiva la malla para evitar cualquier overlay fantasma */
+  display: none !important; /* desactiva la malla para evitar cualquier overlay fantasma */
+}
+
+.enterprise-shell > * {
+  position: relative;
+  z-index: 1;
+  pointer-events: auto !important;
 }
 
 .enterprise-sidebar {
