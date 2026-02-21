@@ -51,6 +51,10 @@ services:
     build:
       context: ./frontend
       target: production
+      args:
+        - VITE_API_URL=${API_URL}
+        - VITE_GOOGLE_CLIENT_ID=${VITE_GOOGLE_CLIENT_ID}
+        - VITE_GRAFANA_URL=${VITE_GRAFANA_URL}
     env_file:
       - .env.prod
     environment:

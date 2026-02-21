@@ -1,6 +1,14 @@
 # Stage 1: Builder
 FROM node:20-alpine as builder
 
+# Build-time env for Vite
+ARG VITE_API_URL
+ARG VITE_GOOGLE_CLIENT_ID
+ARG VITE_GRAFANA_URL
+ENV VITE_API_URL=${VITE_API_URL}
+ENV VITE_GOOGLE_CLIENT_ID=${VITE_GOOGLE_CLIENT_ID}
+ENV VITE_GRAFANA_URL=${VITE_GRAFANA_URL}
+
 WORKDIR /app
 
 # Copy package.json and optionally yarn.lock/package-lock.json for dependency caching
@@ -12,7 +20,7 @@ RUN npm install
 # Copy the rest of the application code
 COPY . .
 
-# Build the frontend for production
+# Build the frontend for production (uses VITE_* envs above)
 RUN npm run build
 
 # Stage 2: Production (Serve with Nginx)
