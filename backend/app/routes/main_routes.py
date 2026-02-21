@@ -1543,5 +1543,55 @@ def get_usage_history():
     return jsonify(usage_data), 200
 
 
+@main_bp.route('/admin/routers/usage', methods=['GET'])
+@admin_required()
+def admin_router_usage():
+    """
+    Métricas resumidas por router (requiere Influx con measurement 'interface_traffic' y tag router_id).
+    Devuelve rx/tx en Mbps y, si existe 'router_stats', cpu/mem.
+    """
+    tenant_id = current_tenant_id()
+    monitoring = MonitoringService()
+
+    traffic = monitoring.query_metrics(
+        'interface_traffic',
+        time_range='-15m',
+        tags={'tenant_id': str(tenant_id)} if tenant_id else None,
+    )
+
+    router_map = {}
+    for point in traffic:
+        rid = point.get('router_id') or point.get('router')
+        if not rid:
+            continue
+        rx = float(point.get('rx_bytes', 0) or 0)
+        tx = float(point.get('tx_bytes', 0) or 0)
+        entry = router_map.setdefault(rid, {'router_id': rid, 'rx_mbps': 0.0, 'tx_mbps': 0.0})
+        entry['rx_mbps'] += rx * 8 / 1_000_000
+        entry['tx_mbps'] += tx * 8 / 1_000_000
+
+    stats = monitoring.query_metrics(
+        'router_stats',
+        time_range='-15m',
+        tags={'tenant_id': str(tenant_id)} if tenant_id else None,
+    )
+    for point in stats:
+        rid = point.get('router_id') or point.get('router')
+        if not rid:
+            continue
+        entry = router_map.setdefault(rid, {'router_id': rid, 'rx_mbps': 0.0, 'tx_mbps': 0.0})
+        if point.get('cpu') is not None:
+            entry['cpu'] = point.get('cpu')
+        if point.get('cpu_percent') is not None:
+            entry['cpu'] = point.get('cpu_percent')
+        if point.get('mem') is not None:
+            entry['mem'] = point.get('mem')
+        if point.get('mem_percent') is not None:
+            entry['mem'] = point.get('mem_percent')
+
+    result = list(router_map.values())
+    return jsonify({"items": result, "count": len(result)}), 200
+
+
 
 
