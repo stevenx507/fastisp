@@ -5,7 +5,6 @@ import toast from 'react-hot-toast'
 import { billingApi, InvoiceDTO } from '../lib/billingApi'
 import { useAuthStore } from '../store/authStore'
 import PaymentProofModal from './PaymentProofModal'
-import PaymentProofModal from './PaymentProofModal'
 
 type InvoiceStatus = 'paid' | 'pending' | 'cancelled' | 'overdue'
 
@@ -27,8 +26,6 @@ const BillingManagement: React.FC<Props> = ({ onSelectInvoice, mode = 'client' }
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const { user } = useAuthStore()
-  const [showProof, setShowProof] = useState(false)
-  const [selectedInvoice, setSelectedInvoice] = useState<number | null>(null)
   const [showProof, setShowProof] = useState(false)
   const [selectedInvoice, setSelectedInvoice] = useState<number | null>(null)
 
@@ -65,7 +62,8 @@ const BillingManagement: React.FC<Props> = ({ onSelectInvoice, mode = 'client' }
   const formatter = new Intl.NumberFormat('es-PE', { style: 'currency', currency: 'USD' })
 
   return (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
+    <>
+      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
       {/* KPI Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <motion.div whileHover={{ y: -4 }} className="bg-gradient-to-br from-blue-900/30 via-slate-900/40 to-slate-900/80 rounded-xl p-6 border border-white/10 shadow-xl">
@@ -191,7 +189,7 @@ const BillingManagement: React.FC<Props> = ({ onSelectInvoice, mode = 'client' }
         )}
       </div>
     </motion.div>
-    <>
+
       <PaymentProofModal
         invoiceId={selectedInvoice}
         open={showProof}

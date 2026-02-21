@@ -15,12 +15,17 @@ declare global {
 }
 
 const LoginHeader: React.FC = () => (
-  <div className="text-center mb-10">
-    <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-r from-blue-600 to-purple-600 rounded-2xl shadow-lg mb-4">
-      <span className="text-white text-2xl font-bold">IM</span>
+  <div className="flex flex-col gap-3 text-left">
+    <div className="inline-flex items-center gap-3 rounded-2xl px-4 py-2 bg-white/10 ring-1 ring-white/20 backdrop-blur">
+      <span className="text-white/80 text-xs font-semibold uppercase tracking-[0.2em]">FastISP Cloud</span>
+      <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
     </div>
-    <h1 className="text-3xl font-bold text-gray-900 mb-2">ISPMAX</h1>
-    <p className="text-gray-600">Panel de Control para Clientes y Administradores</p>
+    <h1 className="text-4xl font-black text-white leading-tight">
+      Conecta, gestiona <br /> y escala tu red ISP
+    </h1>
+    <p className="text-lg text-white/80 max-w-xl">
+      Portal unificado para operaciones, soporte y clientes finales. Control total de facturación, monitoreo y aprovisionamiento sin fricción.
+    </p>
   </div>
 )
 
@@ -120,34 +125,68 @@ const LoginForm: React.FC = () => {
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
       <div>
-        <label className="block text-sm font-medium text-gray-700 mb-2">Correo Electrónico</label>
+        <label className="block text-sm font-medium text-gray-200 mb-2">Correo electrónico</label>
         <div className="relative">
-          <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"><EnvelopeIcon className="h-5 w-5 text-gray-400" /></div>
-          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} className="block w-full pl-10 pr-3 py-3 border border-gray-300 rounded-lg bg-gray-50 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors" placeholder="usuario@ejemplo.com" required />
+          <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"><EnvelopeIcon className="h-5 w-5 text-gray-500" /></div>
+          <input
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            className="block w-full pl-10 pr-3 py-3 border border-white/10 rounded-xl bg-white/5 text-white placeholder:text-white/50 focus:ring-2 focus:ring-emerald-400 focus:border-emerald-400 transition-colors"
+            placeholder="usuario@ejemplo.com"
+            required
+          />
         </div>
       </div>
       <div>
-        <label className="block text-sm font-medium text-gray-700 mb-2">Contraseña</label>
+        <label className="block text-sm font-medium text-gray-200 mb-2">Contraseña</label>
         <div className="relative">
-          <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"><LockClosedIcon className="h-5 w-5 text-gray-400" /></div>
-          <input type={showPassword ? 'text' : 'password'} value={password} onChange={(e) => setPassword(e.target.value)} className="block w-full pl-10 pr-12 py-3 border border-gray-300 rounded-lg bg-gray-50 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors" placeholder="••••••••" required />
+          <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"><LockClosedIcon className="h-5 w-5 text-gray-500" /></div>
+          <input
+            type={showPassword ? 'text' : 'password'}
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            className="block w-full pl-10 pr-12 py-3 border border-white/10 rounded-xl bg-white/5 text-white placeholder:text-white/50 focus:ring-2 focus:ring-emerald-400 focus:border-emerald-400 transition-colors"
+            placeholder="••••••••"
+            required
+          />
           <button type="button" onClick={() => setShowPassword(!showPassword)} className="absolute inset-y-0 right-0 pr-3 flex items-center">
-            {showPassword ? <EyeSlashIcon className="h-5 w-5 text-gray-400 hover:text-gray-600" /> : <EyeIcon className="h-5 w-5 text-gray-400 hover:text-gray-600" />}
+            {showPassword ? <EyeSlashIcon className="h-5 w-5 text-gray-400 hover:text-white" /> : <EyeIcon className="h-5 w-5 text-gray-400 hover:text-white" />}
           </button>
         </div>
       </div>
       <div className="flex items-center justify-between">
         <div className="flex items-center">
-          <input id="remember-me" name="remember-me" type="checkbox" checked={rememberMe} onChange={handleRememberMeChange} className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded" />
-          <label htmlFor="remember-me" className="ml-2 block text-sm text-gray-700">Recordarme</label>
+          <input
+            id="remember-me"
+            name="remember-me"
+            type="checkbox"
+            checked={rememberMe}
+            onChange={handleRememberMeChange}
+            className="h-4 w-4 text-emerald-400 focus:ring-emerald-400 border-white/20 bg-white/10 rounded"
+          />
+          <label htmlFor="remember-me" className="ml-2 block text-sm text-white">Recordarme</label>
         </div>
-        <button type="button" onClick={() => toast('La funcionalidad de recuperación de contraseña está en desarrollo.')} className="text-sm font-medium text-blue-600 hover:text-blue-500">¿Olvidaste tu contraseña?</button>
+        <button
+          type="button"
+          onClick={() => toast('La funcionalidad de recuperación de contraseña está en desarrollo.')}
+          className="text-sm font-medium text-emerald-300 hover:text-white"
+        >
+          ¿Olvidaste tu contraseña?
+        </button>
       </div>
-      <button type="submit" disabled={isLoading} className="w-full flex justify-center py-3 px-4 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
+      <button
+        type="submit"
+        disabled={isLoading}
+        className="w-full flex justify-center py-3 px-4 border border-transparent rounded-xl shadow-lg text-sm font-semibold text-white bg-gradient-to-r from-emerald-500 via-teal-500 to-blue-600 hover:brightness-110 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-emerald-300 focus:ring-offset-gray-900 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+      >
         {isLoading ? (
-          <div className="flex items-center"><div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-2"></div>Iniciando sesión...</div>
+          <div className="flex items-center">
+            <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-2"></div>
+            Iniciando sesión...
+          </div>
         ) : (
-          'Iniciar Sesión'
+          'Iniciar sesión'
         )}
       </button>
 
@@ -156,7 +195,7 @@ const LoginForm: React.FC = () => {
           type="button"
           onClick={() => window.google?.accounts?.id?.prompt()}
           disabled={!isGoogleReady}
-          className="w-full mt-4 flex justify-center items-center gap-2 py-3 px-4 border border-gray-300 rounded-lg shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+          className="w-full mt-4 flex justify-center items-center gap-2 py-3 px-4 border border-white/20 rounded-xl shadow-md text-sm font-medium text-white bg-white/10 hover:bg-white/20 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-emerald-300 focus:ring-offset-gray-900 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
         >
           <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" className="h-5 w-5" />
           {isGoogleReady ? 'Continuar con Google' : 'Cargando Google...'}
@@ -177,65 +216,55 @@ const Login: React.FC = () => {
   }, [isAuthenticated, navigate])
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50 flex items-center justify-center p-4">
-      <motion.div
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.5 }}
-        className="max-w-md w-full"
-      >
-        <LoginHeader />
+    <div className="min-h-screen relative overflow-hidden bg-gradient-to-br from-slate-900 via-slate-900 to-slate-950 text-white">
+      <div className="absolute inset-0 opacity-60 blur-3xl" aria-hidden>
+        <div className="absolute -left-24 -top-24 h-72 w-72 rounded-full bg-emerald-500/30" />
+        <div className="absolute right-0 top-10 h-80 w-80 rounded-full bg-blue-600/20" />
+        <div className="absolute left-20 bottom-0 h-64 w-64 rounded-full bg-teal-400/20" />
+      </div>
 
-        {/* Login Card */}
-        <div className="bg-white rounded-2xl shadow-xl border border-gray-200 p-8">
-          <h2 className="text-2xl font-bold text-gray-900 mb-6 text-center">Iniciar Sesión</h2>
-          <LoginForm />
+      <div className="relative grid lg:grid-cols-5 min-h-screen">
+        <div className="lg:col-span-3 flex items-center px-8 lg:px-16 py-12">
+          <LoginHeader />
+        </div>
 
-          {/* Divider */}
-          <div className="mt-8 pt-6 border-t border-gray-200">
-            <p className="text-center text-sm text-gray-600">
-              ¿No tienes una cuenta?{' '}
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5 }}
+          className="lg:col-span-2 flex items-center justify-center px-6 lg:px-10 py-12"
+        >
+          <div className="w-full max-w-md bg-white/5 border border-white/10 rounded-2xl shadow-2xl backdrop-blur-xl p-8">
+            <div className="flex items-center justify-between mb-6">
+              <div>
+                <p className="text-sm text-white/60">Acceso seguro</p>
+                <h2 className="text-2xl font-bold">Iniciar sesión</h2>
+              </div>
+              <div className="h-12 w-12 rounded-xl bg-gradient-to-br from-emerald-400 to-cyan-500 flex items-center justify-center text-white font-bold">ISP</div>
+            </div>
+            <LoginForm />
+            <div className="mt-8 text-center text-sm text-white/70">
+              ¿No tienes una cuenta?
               <button
                 type="button"
                 onClick={() => toast.success('Por favor, contacta a soporte para crear una cuenta.')}
-                className="font-medium text-blue-600 hover:text-blue-500"
+                className="ml-1 font-semibold text-emerald-300 hover:text-white"
               >
                 Contacta a tu proveedor
               </button>
-            </p>
+            </div>
           </div>
-        </div>
+        </motion.div>
+      </div>
 
-        {/* Features Grid */}
-        <div className="mt-10 grid grid-cols-2 md:grid-cols-4 gap-4">
-          <div className="text-center p-4 bg-white rounded-lg border border-gray-200">
-            <div className="text-2xl mb-2">⚡</div>
-            <p className="text-xs font-medium text-gray-700">Prueba de Velocidad 4K</p>
-          </div>
-          <div className="text-center p-4 bg-white rounded-lg border border-gray-200">
-            <div className="text-2xl mb-2">💳</div>
-            <p className="text-xs font-medium text-gray-700">Pagos en 1-Clic</p>
-          </div>
-          <div className="text-center p-4 bg-white rounded-lg border border-gray-200">
-            <div className="text-2xl mb-2">🤖</div>
-            <p className="text-xs font-medium text-gray-700">Soporte IA 24/7</p>
-          </div>
-          <div className="text-center p-4 bg-white rounded-lg border border-gray-200">
-            <div className="text-2xl mb-2">📱</div>
-            <p className="text-xs font-medium text-gray-700">App Móvil</p>
-          </div>
+      <div className="absolute bottom-6 left-0 right-0 px-6 lg:px-12">
+        <div className="flex flex-wrap gap-3 text-xs text-white/60">
+          <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-white/5 border border-white/10">• Monitoreo NOC en vivo</span>
+          <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-white/5 border border-white/10">• Scripts rápidos Mikrotik/OLT</span>
+          <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-white/5 border border-white/10">• Pagos y facturación integrados</span>
+          <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-white/5 border border-white/10">• App móvil tech</span>
         </div>
-
-        {/* Footer */}
-        <div className="mt-8 text-center text-sm text-gray-500">
-          <p>© {new Date().getFullYear()} ISPMAX. Todos los derechos reservados.</p>
-          <p className="mt-1">
-            <a href="#" className="hover:text-gray-700">Términos</a> • 
-            <a href="#" className="hover:text-gray-700 mx-2">Privacidad</a> • 
-            <a href="#" className="hover:text-gray-700">Soporte</a>
-          </p>
-        </div>
-      </motion.div>
+      </div>
     </div>
   )
 }
