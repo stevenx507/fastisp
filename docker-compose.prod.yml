@@ -146,4 +146,3 @@ volumes:
 networks:
   ispmax-network:
     driver: bridge
-EOF
