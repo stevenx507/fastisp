@@ -17,6 +17,7 @@ from app.services.mikrotik_service import MikroTikService
 from app.services.monitoring_service import MonitoringService
 from app.services.noc_automation_service import noc_automation_service
 from app.services.olt_script_service import OLTScriptService
+from app.services.backup_service import run_backups
 
 
 def _get_redis_client() -> Optional[redis.Redis]:
@@ -298,76 +299,6 @@ def run_backups() -> Dict[str, Any]:
     """
     Backup de base de datos (pg_dump) y config de MikroTik.
     """
-    results: Dict[str, Any] = {"pg_dump": None, "mikrotik": [], "olt": []}
-    backup_dir = os.environ.get('BACKUP_DIR', '/app/backups')
-    os.makedirs(backup_dir, exist_ok=True)
-
-    # DB backup
-    try:
-        db_url = current_app.config.get('SQLALCHEMY_DATABASE_URI') or os.environ.get('DATABASE_URL')
-        pg_dump_path = current_app.config.get('PG_DUMP_PATH', 'pg_dump')
-        if db_url and db_url.startswith('postgres'):
-            outfile = os.path.join(backup_dir, f"db_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.sql")
-            subprocess.check_call([pg_dump_path, db_url, '-f', outfile])
-            results["pg_dump"] = outfile
-        else:
-            results["pg_dump"] = "SKIPPED (no Postgres DATABASE_URL)"
-    except Exception as exc:
-        current_app.logger.error("Backup DB failed: %s", exc, exc_info=True)
-        results["pg_dump"] = f"ERROR: {exc}"
-
-    # MikroTik config backup
-    try:
-        routers = MikroTikRouter.query.filter_by(is_active=True).all()
-        for r in routers:
-            with MikroTikService(r.id) as mk:
-                res = mk.backup_configuration(name=f"auto_{r.name}_{datetime.utcnow().strftime('%Y%m%d')}")
-                results["mikrotik"].append({"router": r.name, "success": bool(res.get('success')), "detail": res})
-    except Exception as exc:
-        current_app.logger.error("Backup MikroTik failed: %s", exc, exc_info=True)
-        results["mikrotik"].append({"error": str(exc)})
-
-    # OLT backup (transcript saved; run_mode simulate by default)
-    try:
-        olt_service = OLTScriptService()
-        devices = olt_service.list_devices()
-        for d in devices:
-            device_id = d.get("id")
-            if not device_id:
-                continue
-            run_mode = os.environ.get("OLT_BACKUP_MODE", "simulate").lower()
-            payload = {"action": "backup_running_config", "payload": {}, "run_mode": run_mode}
-            script = olt_service.generate_script(device_id=device_id, action="backup_running_config", payload={})
-
-            # Persist script/quick-connect for auditoría
-            fname = os.path.join(backup_dir, f"olt_{device_id}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}.txt")
-            with open(fname, "w", encoding="utf-8") as fh:
-                fh.write(script.get("script", ""))
-                fh.write("\n\nQuick connect:\n")
-                quick = script.get("quick_connect", {}) or {}
-                for k, v in quick.items():
-                    fh.write(f"[{k}] {v}\n")
-
-            # Intento live (opcional, si se configuró run_mode=live)
-            live_attempt = None
-            if run_mode == "live":
-                try:
-                    commands = script.get("commands") or script.get("script", "").splitlines()
-                    if commands:
-                        live_result = olt_service.execute_script(
-                            device_id=device_id,
-                            commands=commands,
-                            run_mode="live",
-                            actor="backup_task",
-                            source_ip="127.0.0.1",
-                        )
-                        live_attempt = {"success": live_result.get("success"), "status": live_result.get("status")}
-                except Exception as exc2:
-                    live_attempt = {"error": str(exc2)}
-
-            results["olt"].append({"olt_device": device_id, "file": fname, "run_mode": run_mode, "live": live_attempt})
-    except Exception as exc:
-        current_app.logger.error("Backup OLT failed: %s", exc, exc_info=True)
-        results.setdefault("olt", []).append({"error": str(exc)})
-
-    return results
+    # Delegamos la lógica a backup_service para mantener una sola fuente.
+    from app.services.backup_service import run_backups as run_full_backups
+    return run_full_backups()
