@@ -86,7 +86,21 @@ def create_app(config_name_or_class='development'):
     limiter.init_app(app)
     metrics.init_app(app)
     cache.init_app(app)
-    CORS(app, resources={r"/api/*": {"origins": app.config['CORS_ORIGINS']}})
+
+    # --- CORS: allow frontend -> API with proper preflight handling ---
+    allowed_origins = app.config.get('CORS_ORIGINS') or []
+    if isinstance(allowed_origins, str):
+        allowed_origins = [o.strip() for o in allowed_origins.split(',') if o.strip()]
+    cors_resources = {
+        r"/api/*": {
+            "origins": allowed_origins or "*",
+            "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"],
+            "supports_credentials": True,
+            "max_age": 600,
+        }
+    }
+    CORS(app, resources=cors_resources)
 
     @app.before_request
     def setup_request_context():
@@ -143,6 +157,11 @@ def create_app(config_name_or_class='development'):
         mikrotik_bp, url_prefix='/api/v1/mikrotik', name='mikrotik_v1'
     )
     app.register_blueprint(olt_bp, url_prefix='/api/v1/olt', name='olt_v1')
+
+    # Explicit OPTIONS responder so CORS preflights never 404/405
+    @app.route('/api/<path:any_path>', methods=['OPTIONS'])
+    def api_options(any_path):
+        return ('', 204)
     
     # Health check endpoint
     @app.route('/health')
