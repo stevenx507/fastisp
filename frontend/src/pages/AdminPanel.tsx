@@ -27,10 +27,16 @@ import AlertsView from '../components/AlertsView'
 import SettingsView from '../components/SettingsView'
 import NocDashboard from './NocDashboard'
 import TicketsAdmin from './TicketsAdmin'
+import PlanChangeModal from '../components/admin/PlanChangeModal'
+import ManualPaymentModal from '../components/admin/ManualPaymentModal'
 
 const AdminPanel: React.FC = () => {
   const [activeView, setActiveView] = useState('dashboard')
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [showPlanModal, setShowPlanModal] = useState(false)
+  const [showPaymentModal, setShowPaymentModal] = useState(false)
+  const [selectedClientId, setSelectedClientId] = useState<number | null>(null)
+  const [selectedInvoiceId, setSelectedInvoiceId] = useState<number | null>(null)
   const { logout } = useAuthStore()
 
   type NotificationType = 'error' | 'warning' | 'info';
@@ -124,7 +130,31 @@ const AdminPanel: React.FC = () => {
     clients: <ClientsManagement />,
     network: <MikroTikManagement />,
     maps: <NetworkMap />,
-    billing: <BillingManagement />,
+    billing: (
+      <div className="relative">
+        <div className="flex flex-wrap gap-3 mb-4">
+          <button
+            onClick={() => {
+              setSelectedClientId(1) // TODO: seleccionar desde tabla de clientes
+              setShowPlanModal(true)
+            }}
+            className="px-4 py-2 rounded-lg bg-cyan-500 text-white font-semibold hover:bg-cyan-400"
+          >
+            Cambiar plan (demo cliente 1)
+          </button>
+          <button
+            onClick={() => {
+              setSelectedInvoiceId(1) // TODO: seleccionar factura concreta
+              setShowPaymentModal(true)
+            }}
+            className="px-4 py-2 rounded-lg bg-emerald-500 text-white font-semibold hover:bg-emerald-400"
+          >
+            Registrar pago manual (demo factura 1)
+          </button>
+        </div>
+        <BillingManagement />
+      </div>
+    ),
     monitoring: <MonitoringView />,
     noc: <NocDashboard />,
     alerts: <AlertsView />,
@@ -284,6 +314,18 @@ const AdminPanel: React.FC = () => {
           </div>
         </main>
       </div>
+      <PlanChangeModal
+        clientId={selectedClientId || 0}
+        open={showPlanModal}
+        onClose={() => setShowPlanModal(false)}
+        onChanged={() => setActiveView('billing')}
+      />
+      <ManualPaymentModal
+        invoiceId={selectedInvoiceId}
+        open={showPaymentModal}
+        onClose={() => setShowPaymentModal(false)}
+        onSaved={() => setActiveView('billing')}
+      />
     </div>
   )
 }
