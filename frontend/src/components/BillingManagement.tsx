@@ -4,6 +4,8 @@ import { ArrowDownTrayIcon, CreditCardIcon, CalendarIcon, CheckCircleIcon, Excla
 import toast from 'react-hot-toast'
 import { billingApi, InvoiceDTO } from '../lib/billingApi'
 import { useAuthStore } from '../store/authStore'
+import PaymentProofModal from './PaymentProofModal'
+import PaymentProofModal from './PaymentProofModal'
 
 type InvoiceStatus = 'paid' | 'pending' | 'cancelled' | 'overdue'
 
@@ -25,6 +27,10 @@ const BillingManagement: React.FC<Props> = ({ onSelectInvoice, mode = 'client' }
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const { user } = useAuthStore()
+  const [showProof, setShowProof] = useState(false)
+  const [selectedInvoice, setSelectedInvoice] = useState<number | null>(null)
+  const [showProof, setShowProof] = useState(false)
+  const [selectedInvoice, setSelectedInvoice] = useState<number | null>(null)
 
   useEffect(() => {
     const load = async () => {
@@ -158,9 +164,12 @@ const BillingManagement: React.FC<Props> = ({ onSelectInvoice, mode = 'client' }
                         <ArrowDownTrayIcon className="w-4 h-4" />
                         Descargar
                       </button>
-                      {mode === 'admin' && onSelectInvoice && (
+                      {mode === 'admin' && (
                         <button
-                          onClick={() => onSelectInvoice(inv.id)}
+                          onClick={() => {
+                            setSelectedInvoice(inv.id)
+                            setShowProof(true)
+                          }}
                           className="text-emerald-300 hover:text-white font-semibold"
                         >
                           Registrar pago
@@ -182,6 +191,21 @@ const BillingManagement: React.FC<Props> = ({ onSelectInvoice, mode = 'client' }
         )}
       </div>
     </motion.div>
+    <>
+      <PaymentProofModal
+        invoiceId={selectedInvoice}
+        open={showProof}
+        onClose={() => setShowProof(false)}
+        onSaved={() => {
+          setShowProof(false)
+          setIsLoading(true)
+          billingApi
+            .listClientInvoices()
+            .then((resp) => setInvoices(resp.items || []))
+            .finally(() => setIsLoading(false))
+        }}
+      />
+    </>
   )
 }
 
