@@ -108,8 +108,8 @@ const AdminPanel: React.FC = () => {
             isMobile ? 'px-2 py-2 text-base font-medium' : 'px-3 py-2 text-sm font-medium'
           } ${
             activeView === item.id
-              ? 'bg-blue-100 text-blue-700'
-              : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
+              ? 'bg-white/10 text-cyan-200'
+              : 'text-slate-200 hover:bg-white/5 hover:text-white'
           }`}
         >
           <item.icon className={`mr-3 h-6 w-6 ${isMobile ? '' : 'h-5 w-5'}`} />
@@ -133,16 +133,16 @@ const AdminPanel: React.FC = () => {
   }
 
   return (
-    <div className="min-h-screen bg-gray-100">
+    <div className="enterprise-shell min-h-screen text-slate-100">
       {/* Sidebar for Mobile */}
       <Transition.Root show={sidebarOpen} as={Fragment}>
         <Dialog as="div" className="relative z-40 lg:hidden" onClose={setSidebarOpen}>
           <Transition.Child as={Fragment} enter="transition-opacity ease-linear duration-300" enterFrom="opacity-0" enterTo="opacity-100" leave="transition-opacity ease-linear duration-300" leaveFrom="opacity-100" leaveTo="opacity-0">
-            <div className="fixed inset-0 bg-gray-600 bg-opacity-75" />
+            <div className="fixed inset-0 bg-slate-900/70 backdrop-blur-sm" />
           </Transition.Child>
           <div className="fixed inset-0 z-40 flex">
             <Transition.Child as={Fragment} enter="transition ease-in-out duration-300 transform" enterFrom="-translate-x-full" enterTo="translate-x-0" leave="transition ease-in-out duration-300 transform" leaveFrom="translate-x-0" leaveTo="-translate-x-full">
-              <Dialog.Panel className="relative flex w-full max-w-xs flex-1 flex-col bg-white pt-5 pb-4">
+              <Dialog.Panel className="relative flex w-full max-w-xs flex-1 flex-col enterprise-sidebar pt-5 pb-4 text-slate-100">
                 <Transition.Child as={Fragment} enter="ease-in-out duration-300" enterFrom="opacity-0" enterTo="opacity-100" leave="ease-in-out duration-300" leaveFrom="opacity-100" leaveTo="opacity-0">
                   <div className="absolute top-0 right-0 -mr-12 pt-2">
                     <button 
@@ -171,7 +171,7 @@ const AdminPanel: React.FC = () => {
 
       {/* Static sidebar for desktop */}
       <div className="hidden lg:flex lg:w-64 lg:flex-col lg:fixed lg:inset-y-0">
-        <div className="flex flex-grow flex-col overflow-y-auto border-r border-gray-200 bg-white">
+          <div className="flex flex-grow flex-col overflow-y-auto enterprise-sidebar">
           <div className="flex flex-col flex-shrink-0 pt-5 pb-4">
             <div className="flex items-center flex-shrink-0 px-4">
               <div className="w-10 h-10 bg-gradient-to-r from-blue-600 to-purple-600 rounded-xl flex items-center justify-center"><span className="text-white font-bold text-lg">IM</span></div>
@@ -179,7 +179,7 @@ const AdminPanel: React.FC = () => {
             </div>
             <NavigationItems />
           </div>
-          <div className="flex-shrink-0 flex border-t border-gray-200 p-4">
+          <div className="flex-shrink-0 flex border-t border-white/10 p-4">
             <div className="flex items-center w-full">
               <div className="ml-3">
                 <p className="text-sm font-medium text-gray-700">Admin ISP</p>
@@ -191,9 +191,9 @@ const AdminPanel: React.FC = () => {
       </div>
 
       {/* Main content */}
-      <div className="lg:pl-64 flex flex-col">
+      <div className="lg:pl-64 flex flex-col enterprise-main">
         {/* Top navbar */}
-        <div className="sticky top-0 z-10 flex-shrink-0 flex h-16 bg-white shadow">
+        <div className="sticky top-0 z-10 flex-shrink-0 flex h-16 enterprise-header border-b border-white/10">
           <button
             type="button"
             className="px-4 border-r border-gray-200 text-gray-500 lg:hidden"
@@ -211,7 +211,7 @@ const AdminPanel: React.FC = () => {
             <div className="ml-4 flex items-center md:ml-6">
               {/* Notifications Dropdown */}
               <Menu as="div" className="relative">
-                <Menu.Button className="relative p-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg">
+                <Menu.Button className="relative p-2 text-slate-200 hover:text-white hover:bg-white/10 rounded-lg">
                   <span className="sr-only">Ver notificaciones</span>
                   <BellAlertIcon className="h-6 w-6" />
                   {unreadNotificationsCount > 0 && (
@@ -235,7 +235,7 @@ const AdminPanel: React.FC = () => {
                       return (
                         <Menu.Item key={n.id}>
                           {({ active }) => (
-                            <a href="#" onClick={(e) => { e.preventDefault(); handleMarkAsRead(n.id); }} className={`${active ? 'bg-gray-100' : ''} flex items-start px-4 py-3 text-sm`}>
+                            <a href="#" onClick={(e) => { e.preventDefault(); handleMarkAsRead(n.id); }} className={`${active ? 'bg-white/10' : ''} flex items-start px-4 py-3 text-sm text-slate-100`}>
                               {!n.read && <div className="w-2 h-2 bg-blue-500 rounded-full mt-1.5 mr-3 flex-shrink-0"></div>}
                               <Icon className={`w-5 h-5 ${notificationIconColors[n.type]} mr-3 flex-shrink-0 mt-0.5 ${n.read ? 'ml-5' : ''}`} />
                               <div className="flex-1">
@@ -263,7 +263,7 @@ const AdminPanel: React.FC = () => {
                   <Menu.Items className="absolute right-0 z-10 mt-2 w-48 origin-top-right rounded-md bg-white py-1 shadow-lg ring-1 ring-black ring-opacity-5 focus:outline-none">
                     <Menu.Item>
                       {({ active }) => (
-                        <button onClick={logout} className={`${active ? 'bg-gray-100' : ''} group flex w-full items-center px-4 py-2 text-sm text-red-600`}>
+                        <button onClick={logout} className={`${active ? 'bg-white/10' : ''} group flex w-full items-center px-4 py-2 text-sm text-red-300`}>
                           <ArrowLeftOnRectangleIcon className="mr-2 h-5 w-5 text-red-500" />Cerrar SesiÃ³n
                         </button>
                       )}
