@@ -106,6 +106,10 @@ def create_app(config_name_or_class='development'):
     def setup_request_context():
         g.request_id = request.headers.get('X-Request-ID') or str(uuid.uuid4())
         g.request_started_at = time.perf_counter()
+        # Short-circuit for CORS preflight: no auth/tenant resolution needed
+        if request.method == 'OPTIONS':
+            return None
+
         # GeoIP allowlist based on upstream header (e.g., from Traefik/Cloudflare)
         allowed_countries = app.config.get('GEOIP_ALLOWLIST') or []
         if allowed_countries:
