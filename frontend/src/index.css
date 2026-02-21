@@ -152,6 +152,7 @@
 
 .enterprise-shell {
   position: relative;
+  pointer-events: auto;
   background: linear-gradient(180deg, var(--shell-overlay-start) 0%, var(--shell-overlay-end) 100%);
 }
 
@@ -184,6 +185,8 @@
 .enterprise-main {
   position: relative;
   min-height: calc(100vh - 56px);
+  pointer-events: auto;
+  z-index: 1;
 }
 
 .enterprise-banner {
