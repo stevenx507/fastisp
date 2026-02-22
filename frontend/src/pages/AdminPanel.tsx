@@ -203,7 +203,7 @@ const AdminPanel: React.FC = () => {
       </Transition.Root>
 
       {/* Static sidebar for desktop */}
-      <div className="hidden lg:flex lg:w-64 lg:flex-col lg:fixed lg:inset-y-0">
+      <div className="hidden lg:flex lg:w-64 lg:flex-col lg:fixed lg:inset-y-0 pointer-events-auto z-30">
           <div className="flex flex-grow flex-col overflow-y-auto enterprise-sidebar">
           <div className="flex flex-col flex-shrink-0 pt-5 pb-4">
             <div className="flex items-center flex-shrink-0 px-4">
@@ -224,7 +224,7 @@ const AdminPanel: React.FC = () => {
       </div>
 
       {/* Main content */}
-      <div className="lg:pl-64 flex flex-col enterprise-main">
+      <div className="lg:pl-64 flex flex-col enterprise-main relative z-10">
         {/* Top navbar */}
         <div className="sticky top-0 z-10 flex-shrink-0 flex h-16 enterprise-header border-b border-white/10">
           <button
