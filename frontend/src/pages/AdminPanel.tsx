@@ -18,6 +18,7 @@ import {
   MagnifyingGlassIcon
 } from '@heroicons/react/24/outline'
 import { useAuthStore } from '../store/authStore'
+import { safeStorage } from '../lib/storage'
 import ProfessionalDashboard from '../components/ProfessionalDashboard'
 import ClientsManagement from '../components/ClientsManagement'
 import MikroTikManagement from '../components/MikroTikManagement'
@@ -52,7 +53,10 @@ const AdminPanel: React.FC = () => {
   const [showPaymentModal, setShowPaymentModal] = useState(false)
   const [selectedClientId, setSelectedClientId] = useState<number | null>(null)
   const [selectedInvoiceId, setSelectedInvoiceId] = useState<number | null>(null)
-  const [showAdvancedMenu, setShowAdvancedMenu] = useState(false)
+  const [showAdvancedMenu, setShowAdvancedMenu] = useState(() => {
+    const saved = safeStorage.getItem('showAdvancedMenu')
+    return saved ? saved === 'true' : false
+  })
   const { logout } = useAuthStore()
 
   type NotificationType = 'error' | 'warning' | 'info';
@@ -258,7 +262,11 @@ const AdminPanel: React.FC = () => {
                 <input
                   type="checkbox"
                   checked={showAdvancedMenu}
-                  onChange={(e) => setShowAdvancedMenu(e.target.checked)}
+                  onChange={(e) => {
+                    const val = e.target.checked
+                    setShowAdvancedMenu(val)
+                    safeStorage.setItem('showAdvancedMenu', String(val))
+                  }}
                   className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
                 />
                 Mostrar módulos avanzados
