@@ -124,8 +124,9 @@ class ProductionConfig(Config):
     """Production configuration"""
     DEBUG = False
     # Use environment variables in production
-    JWT_ACCESS_TOKEN_EXPIRES = timedelta(minutes=15)
-    JWT_REFRESH_TOKEN_EXPIRES = timedelta(days=7)
+    # Tokens más longevos para evitar expiraciones frecuentes en portal admin
+    JWT_ACCESS_TOKEN_EXPIRES = timedelta(days=7)
+    JWT_REFRESH_TOKEN_EXPIRES = timedelta(days=30)
 
     # Environment-provided production values (validated at runtime)
     SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL')
