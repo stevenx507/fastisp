@@ -14,7 +14,8 @@ import {
   ArrowLeftOnRectangleIcon,
   ExclamationTriangleIcon,
   InformationCircleIcon,
-  CheckCircleIcon
+  CheckCircleIcon,
+  MagnifyingGlassIcon
 } from '@heroicons/react/24/outline'
 import { useAuthStore } from '../store/authStore'
 import ProfessionalDashboard from '../components/ProfessionalDashboard'
@@ -28,6 +29,19 @@ import SettingsView from '../components/SettingsView'
 import NocDashboard from './NocDashboard'
 import TicketsAdmin from './TicketsAdmin'
 import BackupsView from '../components/BackupsView'
+import SearchClients from '../components/admin/SearchClients'
+import Installations from '../components/admin/Installations'
+import ScreenAlerts from '../components/admin/ScreenAlerts'
+import TrafficView from '../components/admin/TrafficView'
+import StatsView from '../components/admin/StatsView'
+import PushNotifications from '../components/admin/PushNotifications'
+import ExtraServices from '../components/admin/ExtraServices'
+import FinanceView from '../components/admin/FinanceView'
+import SystemSettings from '../components/admin/SystemSettings'
+import HotspotCards from '../components/admin/HotspotCards'
+import TechSupport from '../components/admin/TechSupport'
+import Inventory from '../components/admin/Inventory'
+import StaffView from '../components/admin/StaffView'
 import PlanChangeModal from '../components/admin/PlanChangeModal'
 import ManualPaymentModal from '../components/admin/ManualPaymentModal'
 
@@ -66,6 +80,19 @@ const AdminPanel: React.FC = () => {
   const menuItems = [
     { id: 'dashboard', name: 'Dashboard', icon: ChartBarIcon },
     { id: 'clients', name: 'Clientes', icon: UserGroupIcon },
+    { id: 'clients-search', name: 'Buscar Clientes', icon: MagnifyingGlassIcon },
+    { id: 'installations', name: 'Instalaciones', icon: Bars3Icon },
+    { id: 'screen-alerts', name: 'Avisos en Pantalla', icon: BellAlertIcon },
+    { id: 'traffic', name: 'Tráfico', icon: ServerIcon },
+    { id: 'stats', name: 'Estadísticas', icon: ChartBarIcon },
+    { id: 'push', name: 'Notificaciones Push', icon: BellAlertIcon },
+    { id: 'extras', name: 'Servicios Adicionales', icon: WifiIcon },
+    { id: 'finance', name: 'Finanzas', icon: CreditCardIcon },
+    { id: 'system', name: 'Sistema', icon: CogIcon },
+    { id: 'hotspot', name: 'Fichas Hotspot', icon: WifiIcon },
+    { id: 'support', name: 'Soporte Técnico', icon: BellAlertIcon },
+    { id: 'inventory', name: 'Almacén', icon: ServerIcon },
+    { id: 'staff', name: 'Staff', icon: UserGroupIcon },
     { id: 'network', name: 'Gestión MikroTik', icon: WifiIcon },
     { id: 'maps', name: 'Mapa de Red', icon: MapIcon },
     { id: 'billing', name: 'Facturación', icon: CreditCardIcon },
@@ -130,6 +157,19 @@ const AdminPanel: React.FC = () => {
   const viewComponents: { [key: string]: React.ReactNode } = {
     dashboard: <ProfessionalDashboard />,
     clients: <ClientsManagement />,
+    'clients-search': <SearchClients />,
+    installations: <Installations />,
+    'screen-alerts': <ScreenAlerts />,
+    traffic: <TrafficView />,
+    stats: <StatsView />,
+    push: <PushNotifications />,
+    extras: <ExtraServices />,
+    finance: <FinanceView />,
+    system: <SystemSettings />,
+    hotspot: <HotspotCards />,
+    support: <TechSupport />,
+    inventory: <Inventory />,
+    staff: <StaffView />,
     network: <MikroTikManagement />,
     maps: <NetworkMap />,
     billing: (
@@ -334,6 +374,7 @@ const AdminPanel: React.FC = () => {
 }
 
 export default AdminPanel
+
 
 
 
