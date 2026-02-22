@@ -1,3 +1,4 @@
+
 import React, { useEffect, useMemo, useState } from 'react'
 import { motion } from 'framer-motion'
 import { MagnifyingGlassIcon, PlusIcon } from '@heroicons/react/24/outline'
@@ -36,6 +37,7 @@ const ClientsManagement: React.FC = () => {
   const [filterStatus, setFilterStatus] = useState<string>('all')
   const [sortBy, setSortBy] = useState<'name' | 'plan'>('name')
   const [loading, setLoading] = useState(false)
+  const [creating, setCreating] = useState(false)
 
   useEffect(() => {
     const load = async () => {
@@ -108,14 +110,46 @@ const ClientsManagement: React.FC = () => {
     }
   }
 
+  const createClient = async () => {
+    const name = window.prompt('Nombre del cliente')
+    if (!name) return
+    const planIdStr = window.prompt('ID de plan (ej: 1)')
+    const planId = planIdStr ? Number(planIdStr) : NaN
+    if (!planId) {
+      toast.error('Plan inválido')
+      return
+    }
+    const ip = window.prompt('IP del cliente (opcional, ej: 10.0.0.51)') || undefined
+    setCreating(true)
+    try {
+      const resp = await apiClient.post('/admin/clients', {
+        name,
+        plan_id: planId,
+        ip_address: ip,
+        connection_type: 'pppoe',
+      })
+      const newClient = resp.client as Client
+      setClients((prev) => [...prev, newClient])
+      toast.success('Cliente creado')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'No se pudo crear el cliente')
+    } finally {
+      setCreating(false)
+    }
+  }
+
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="bg-white rounded-lg shadow">
       <div className="p-6 border-b border-gray-200">
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-2xl font-bold text-gray-900">Gestión de Clientes</h2>
-          <button className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition">
+          <button
+            onClick={createClient}
+            disabled={creating}
+            className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition disabled:opacity-50"
+          >
             <PlusIcon className="w-5 h-5" />
-            Nuevo Cliente
+            {creating ? 'Creando...' : 'Nuevo Cliente'}
           </button>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">

@@ -1623,6 +1623,45 @@ def admin_list_clients():
     return jsonify({"items": clients, "count": len(clients)}), 200
 
 
+@main_bp.route('/admin/clients', methods=['POST'])
+@admin_required()
+def admin_create_client():
+    data = request.get_json() or {}
+    name = (data.get('name') or '').strip()
+    ip = (data.get('ip_address') or '').strip() or None
+    connection_type = (data.get('connection_type') or 'pppoe').strip().lower()
+    plan_id = data.get('plan_id')
+    router_id = data.get('router_id')
+    if not name:
+        return jsonify({"error": "name es requerido"}), 400
+    if not plan_id:
+        return jsonify({"error": "plan_id es requerido"}), 400
+    plan = Plan.query.get(plan_id)
+    if not plan:
+        return jsonify({"error": "Plan no encontrado"}), 404
+    router = MikroTikRouter.query.get(router_id) if router_id else None
+    tenant_id = current_tenant_id()
+    if tenant_id:
+        if router and router.tenant_id not in (None, tenant_id):
+            return jsonify({"error": "Router fuera del tenant"}), 403
+        if plan.tenant_id not in (None, tenant_id):
+            return jsonify({"error": "Plan fuera del tenant"}), 403
+    client = Client(
+        full_name=name,
+        ip_address=ip,
+        connection_type=connection_type,
+        plan_id=plan.id,
+        router_id=router.id if router else None,
+        tenant_id=tenant_id,
+        pppoe_username=data.get('pppoe_username'),
+        pppoe_password=data.get('pppoe_password'),
+    )
+    from app import db
+    db.session.add(client)
+    db.session.commit()
+    return jsonify({"client": client.to_dict()}), 201
+
+
 # ==================== RED: SUSPENDER / ACTIVAR / CAMBIAR VELOCIDAD ====================
 
 @main_bp.route('/admin/clients/<int:client_id>/suspend', methods=['POST'])
