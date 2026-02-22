@@ -1,6 +1,6 @@
 ﻿import React, { useState, Fragment, useEffect } from 'react'
 import { Dialog, Transition, Menu } from '@headlessui/react'
-import { 
+import {
   ChartBarIcon,
   UserGroupIcon,
   CreditCardIcon,
@@ -15,7 +15,9 @@ import {
   ExclamationTriangleIcon,
   InformationCircleIcon,
   CheckCircleIcon,
-  MagnifyingGlassIcon
+  MagnifyingGlassIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
 } from '@heroicons/react/24/outline'
 import { useAuthStore } from '../store/authStore'
 import { safeStorage } from '../lib/storage'
@@ -57,6 +59,7 @@ const AdminPanel: React.FC = () => {
     const saved = safeStorage.getItem('showAdvancedMenu')
     return saved ? saved === 'true' : false
   })
+  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({ core: true })
   const { logout } = useAuthStore()
 
   type NotificationType = 'error' | 'warning' | 'info';
@@ -109,7 +112,25 @@ const AdminPanel: React.FC = () => {
     { id: 'settings', name: 'Configuración', icon: CogIcon }
   ]
   const coreMenuIds = new Set(['dashboard','clients','network','maps','billing','monitoring','noc','alerts','tickets','backups','settings'])
-  const visibleMenu = showAdvancedMenu ? menuItems : menuItems.filter(m => coreMenuIds.has(m.id))
+  const groups = React.useMemo(() => {
+    const core = { id: 'core', label: 'Principal', items: menuItems.filter(m => coreMenuIds.has(m.id)) }
+    if (!showAdvancedMenu) return [core]
+    return [
+      core,
+      { id: 'clientes', label: 'Clientes', items: menuItems.filter(m => ['clients','clients-search','installations','screen-alerts','traffic','stats','push','extras'].includes(m.id)) },
+      { id: 'finanzas', label: 'Finanzas', items: menuItems.filter(m => ['finance'].includes(m.id)) },
+      { id: 'sistema', label: 'Sistema', items: menuItems.filter(m => ['system'].includes(m.id)) },
+      { id: 'hotspot', label: 'Fichas Hotspot', items: menuItems.filter(m => ['hotspot'].includes(m.id)) },
+      { id: 'soporte', label: 'Soporte Técnico', items: menuItems.filter(m => ['support'].includes(m.id)) },
+      { id: 'almacen', label: 'Almacén', items: menuItems.filter(m => ['inventory'].includes(m.id)) },
+      { id: 'staff', label: 'Staff', items: menuItems.filter(m => ['staff'].includes(m.id)) },
+    ]
+  }, [showAdvancedMenu])
+
+  useEffect(() => {
+    // reset open groups when toggling advanced modules
+    setOpenGroups((prev) => ({ core: true, ...prev }))
+  }, [showAdvancedMenu])
 
   const handleMarkAsRead = (id: number) => {
     setNotifications(notifications.map(n => n.id === id ? { ...n, read: true } : n))
@@ -136,28 +157,49 @@ const AdminPanel: React.FC = () => {
   }
 
   const NavigationItems: React.FC<{ isMobile?: boolean }> = ({ isMobile = false }) => (
-    <nav className={`mt-5 ${isMobile ? 'px-2 space-y-1' : 'flex-1 px-4 space-y-1'}`}>
-      {menuItems.map((item) => (
-        <a
-          key={item.id}
-          href="#"
-          onClick={(e) => {
-            e.preventDefault()
-            setActiveView(item.id)
-            if (isMobile) setSidebarOpen(false)
-          }}
-          className={`group flex items-center w-full rounded-md ${
-            isMobile ? 'px-2 py-2 text-base font-medium' : 'px-3 py-2 text-sm font-medium'
-          } ${
-            activeView === item.id
-              ? 'bg-white/10 text-cyan-200'
-              : 'text-slate-200 hover:bg-white/5 hover:text-white'
-          }`}
-        >
-          <item.icon className={`mr-3 h-6 w-6 ${isMobile ? '' : 'h-5 w-5'}`} />
-          {item.name}
-        </a>
-      ))}
+    <nav className={`mt-5 ${isMobile ? 'px-2 space-y-1' : 'flex-1 px-4 space-y-2'}`}>
+      {groups.map((group) => {
+        const isOpen = openGroups[group.id] ?? false
+        return (
+          <div key={group.id} className="border border-white/10 rounded-lg overflow-hidden">
+            <button
+              onClick={() => setOpenGroups((prev) => ({ ...prev, [group.id]: !isOpen }))}
+              className="w-full flex items-center justify-between px-3 py-2 text-sm font-semibold text-slate-100 bg-white/5 hover:bg-white/10"
+            >
+              <span className="flex items-center gap-2">
+                <ChevronRightIcon className={`h-4 w-4 transition-transform ${isOpen ? 'rotate-90' : ''}`} />
+                {group.label}
+              </span>
+              <span className="text-xs text-slate-300">{group.items.length}</span>
+            </button>
+            {isOpen && (
+              <div className="py-1">
+                {group.items.map((item) => (
+                  <a
+                    key={item.id}
+                    href="#"
+                    onClick={(e) => {
+                      e.preventDefault()
+                      setActiveView(item.id)
+                      if (isMobile) setSidebarOpen(false)
+                    }}
+                    className={`group flex items-center w-full rounded-md ${
+                      isMobile ? 'px-3 py-2 text-base font-medium' : 'px-4 py-2 text-sm font-medium'
+                    } ${
+                      activeView === item.id
+                        ? 'bg-white/10 text-cyan-200'
+                        : 'text-slate-200 hover:bg-white/5 hover:text-white'
+                    }`}
+                  >
+                    <item.icon className={`mr-3 h-5 w-5`} />
+                    {item.name}
+                  </a>
+                ))}
+              </div>
+            )}
+          </div>
+        )
+      })}
     </nav>
   )
 
