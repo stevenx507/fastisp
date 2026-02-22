@@ -52,6 +52,7 @@ const AdminPanel: React.FC = () => {
   const [showPaymentModal, setShowPaymentModal] = useState(false)
   const [selectedClientId, setSelectedClientId] = useState<number | null>(null)
   const [selectedInvoiceId, setSelectedInvoiceId] = useState<number | null>(null)
+  const [showAdvancedMenu, setShowAdvancedMenu] = useState(false)
   const { logout } = useAuthStore()
 
   type NotificationType = 'error' | 'warning' | 'info';
@@ -103,6 +104,8 @@ const AdminPanel: React.FC = () => {
     { id: 'backups', name: 'Backups', icon: ServerIcon },
     { id: 'settings', name: 'Configuración', icon: CogIcon }
   ]
+  const coreMenuIds = new Set(['dashboard','clients','network','maps','billing','monitoring','noc','alerts','tickets','backups','settings'])
+  const visibleMenu = showAdvancedMenu ? menuItems : menuItems.filter(m => coreMenuIds.has(m.id))
 
   const handleMarkAsRead = (id: number) => {
     setNotifications(notifications.map(n => n.id === id ? { ...n, read: true } : n))
@@ -249,6 +252,17 @@ const AdminPanel: React.FC = () => {
             <div className="flex items-center flex-shrink-0 px-4">
               <div className="w-10 h-10 bg-gradient-to-r from-blue-600 to-purple-600 rounded-xl flex items-center justify-center"><span className="text-white font-bold text-lg">IM</span></div>
               <div className="ml-3"><h1 className="text-lg font-bold text-gray-900">ISPMAX</h1><p className="text-xs text-gray-600">Panel Admin</p></div>
+            </div>
+            <div className="mt-3 px-4">
+              <label className="flex items-center gap-2 text-xs text-gray-500">
+                <input
+                  type="checkbox"
+                  checked={showAdvancedMenu}
+                  onChange={(e) => setShowAdvancedMenu(e.target.checked)}
+                  className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                />
+                Mostrar módulos avanzados
+              </label>
             </div>
             <NavigationItems />
           </div>
