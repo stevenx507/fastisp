@@ -1,6 +1,10 @@
 ﻿from datetime import datetime, timedelta
 from functools import wraps
+import hashlib
+import hmac
+import json
 import secrets
+import time
 
 from flask import Blueprint, jsonify, request, Response, current_app
 from flask_jwt_extended import create_access_token, get_jwt_identity, jwt_required
@@ -49,6 +53,88 @@ def _parse_iso_datetime(value) -> datetime | None:
         return None
 
 
+
+def _parse_int(value) -> int | None:
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_stripe_signature_header(signature_header: str) -> tuple[int | None, list[str]]:
+    timestamp = None
+    signatures: list[str] = []
+    for part in str(signature_header or "").split(","):
+        key, sep, value = part.partition("=")
+        if not sep:
+            continue
+        key = key.strip()
+        value = value.strip()
+        if key == "t":
+            timestamp = _parse_int(value)
+        elif key == "v1" and value:
+            signatures.append(value)
+    return timestamp, signatures
+
+
+def _verify_stripe_signature(payload: bytes, signature_header: str, secret: str, tolerance_seconds: int = 300) -> bool:
+    timestamp, signatures = _parse_stripe_signature_header(signature_header)
+    if timestamp is None or not signatures or not secret:
+        return False
+
+    now = int(time.time())
+    if tolerance_seconds > 0 and abs(now - timestamp) > tolerance_seconds:
+        return False
+
+    try:
+        payload_text = payload.decode('utf-8')
+    except Exception:
+        return False
+
+    signed_payload = f"{timestamp}.{payload_text}".encode("utf-8")
+    expected = hmac.new(secret.encode("utf-8"), signed_payload, hashlib.sha256).hexdigest()
+    return any(hmac.compare_digest(expected, sig) for sig in signatures)
+
+
+def _extract_webhook_payment_context(event: dict) -> dict:
+    event_type = str(event.get("type") or "").strip().lower()
+    data = event.get("data")
+    obj = data.get("object") if isinstance(data, dict) else {}
+    obj = obj if isinstance(obj, dict) else {}
+    metadata = obj.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+
+    invoice_id = metadata.get("invoice_id") or event.get("invoice_id")
+    subscription_id = metadata.get("subscription_id") or event.get("subscription_id")
+    session_id = obj.get("id")
+    payment_intent = obj.get("payment_intent")
+    event_id = event.get("id")
+    event_status = str(event.get("status") or "").strip().lower()
+
+    normalized_status = event_status
+    if event_type in {"checkout.session.completed", "payment_intent.succeeded", "charge.succeeded"}:
+        normalized_status = "paid"
+    elif event_type in {"payment_intent.payment_failed", "charge.failed"}:
+        normalized_status = "failed"
+    elif normalized_status in {"succeeded", "success"}:
+        normalized_status = "paid"
+
+    candidate_references = []
+    for ref in (payment_intent, session_id, event_id):
+        token = str(ref or "").strip()
+        if token and token not in candidate_references:
+            candidate_references.append(token)
+
+    return {
+        "event_type": event_type,
+        "normalized_status": normalized_status,
+        "invoice_id": _parse_int(invoice_id),
+        "subscription_id": _parse_int(subscription_id),
+        "session_id": str(session_id or "").strip() or None,
+        "payment_intent": str(payment_intent or "").strip() or None,
+        "event_id": str(event_id or "").strip() or None,
+        "candidate_references": candidate_references,
+    }
 def _get_plan_for_request(data, tenant_id):
     plan = None
     if data.get('plan_id'):
@@ -1739,7 +1825,7 @@ def payments_checkout():
         return jsonify({"error": "Monto inválido"}), 400
 
     if invoice_id:
-        invoice = Invoice.query.get(invoice_id)
+        invoice = db.session.get(Invoice, _parse_int(invoice_id))
         if not invoice:
             return jsonify({"error": "Factura no encontrada"}), 404
         amount = float(invoice.total_amount)
@@ -1786,7 +1872,7 @@ def payments_checkout():
             currency=currency,
             status='pending',
             reference=data.get('reference'),
-            metadata={"note": "Pago por transferencia registrado, pendiente de conciliación."},
+            meta={"note": "Pago por transferencia registrado, pendiente de conciliacion."},
         )
         from app import db
         db.session.add(pay_rec)
@@ -1797,33 +1883,91 @@ def payments_checkout():
 
 @main_bp.route('/payments/webhook', methods=['POST'])
 def payments_webhook():
-    event = request.get_json() or {}
-    sub_id = event.get('subscription_id')
-    status = str(event.get('status') or '').lower()
-    if sub_id and status in ('paid', 'succeeded'):
-        try:
-            sub = Subscription.query.get(int(sub_id))
-            if sub:
-                sub.status = 'active'
-                sub.next_charge = (sub.next_charge or datetime.utcnow().date()) + timedelta(days=sub.cycle_months * 30)
-                from app import db
-                db.session.add(sub)
-                db.session.commit()
-        except Exception:
-            pass
-    invoice_id = event.get('invoice_id')
-    payment_intent = (event.get('data') or {}).get('object', {})
-    reference = payment_intent.get('id')
-    if invoice_id:
-        invoice = Invoice.query.get(invoice_id)
-        if invoice:
-            invoice.status = 'paid'
-            pay = PaymentRecord(invoice_id=invoice.id, method='stripe', amount=invoice.total_amount, currency=invoice.currency, status='paid', reference=reference)
-            from app import db
-            db.session.add(invoice)
-            db.session.add(pay)
-            db.session.commit()
-    return jsonify({"received": event, "success": True}), 200
+    webhook_secret = (current_app.config.get('STRIPE_WEBHOOK_SECRET') or '').strip()
+    if not webhook_secret:
+        return jsonify({"success": False, "error": "Stripe webhook secret no configurado"}), 503
+
+    payload = request.get_data(cache=False, as_text=False) or b""
+    signature_header = request.headers.get('Stripe-Signature', '')
+    if not _verify_stripe_signature(payload, signature_header, webhook_secret):
+        return jsonify({"success": False, "error": "Firma de webhook invalida"}), 400
+
+    try:
+        event = json.loads(payload.decode('utf-8'))
+    except Exception:
+        return jsonify({"success": False, "error": "Payload JSON invalido"}), 400
+    if not isinstance(event, dict):
+        return jsonify({"success": False, "error": "Evento de webhook invalido"}), 400
+
+    ctx = _extract_webhook_payment_context(event)
+    status = ctx.get("normalized_status")
+    invoice_id = ctx.get("invoice_id")
+    sub_id = ctx.get("subscription_id")
+    candidate_refs = ctx.get("candidate_references") or []
+
+    if status in {'paid', 'succeeded'} and sub_id:
+        sub = db.session.get(Subscription, sub_id)
+        if sub:
+            sub.status = 'active'
+            sub.next_charge = (sub.next_charge or datetime.utcnow().date()) + timedelta(days=sub.cycle_months * 30)
+            db.session.add(sub)
+
+    invoice = db.session.get(Invoice, invoice_id) if invoice_id else None
+    payment = None
+    if candidate_refs:
+        payment = (
+            PaymentRecord.query
+            .filter(
+                PaymentRecord.method == 'stripe',
+                PaymentRecord.reference.in_(candidate_refs),
+            )
+            .order_by(PaymentRecord.created_at.desc())
+            .first()
+        )
+
+    reference = (
+        ctx.get("payment_intent")
+        or ctx.get("session_id")
+        or ctx.get("event_id")
+    )
+
+    if invoice and status in {'paid', 'succeeded'}:
+        invoice.status = 'paid'
+        db.session.add(invoice)
+
+        if payment:
+            if payment.status != 'paid':
+                payment.status = 'paid'
+            if reference and payment.reference != reference:
+                payment.reference = reference
+            if payment.invoice_id != invoice.id:
+                payment.invoice_id = invoice.id
+            db.session.add(payment)
+        else:
+            payment = PaymentRecord(
+                invoice_id=invoice.id,
+                method='stripe',
+                amount=invoice.total_amount,
+                currency=invoice.currency,
+                status='paid',
+                reference=reference,
+                meta={
+                    "event_id": ctx.get("event_id"),
+                    "event_type": ctx.get("event_type"),
+                    "source": "webhook",
+                },
+            )
+            db.session.add(payment)
+
+    db.session.commit()
+    return jsonify(
+        {
+            "success": True,
+            "event_type": ctx.get("event_type"),
+            "invoice_found": bool(invoice),
+            "payment_record_id": payment.id if payment else None,
+        }
+    ), 200
 
 
 @main_bp.route('/billing/electronic/send', methods=['POST'])

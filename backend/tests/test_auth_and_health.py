@@ -1,12 +1,25 @@
+from datetime import date
+import hashlib
+import hmac
+import json
+import time
+
 from flask_jwt_extended import create_access_token, decode_token
 
 from app import db
-from app.models import Tenant, User
+from app.models import Invoice, PaymentRecord, Subscription, Tenant, User
 
 
 def _token_for_user(app, user_id: int) -> str:
     with app.app_context():
         return create_access_token(identity=str(user_id))
+
+
+def _stripe_signature(payload: str, secret: str, timestamp: int | None = None) -> str:
+    ts = timestamp or int(time.time())
+    signed_payload = f"{ts}.{payload}".encode("utf-8")
+    signature = hmac.new(secret.encode("utf-8"), signed_payload, hashlib.sha256).hexdigest()
+    return f"t={ts},v1={signature}"
 
 
 def test_health_endpoint(client):
@@ -223,4 +236,106 @@ def test_billing_electronic_status_requires_invoice_id(client, app):
         headers={'Authorization': f'Bearer {token}'},
     )
     assert not_found_response.status_code == 404
+
+
+def test_payments_webhook_requires_secret(client):
+    payload = json.dumps({"id": "evt_missing_secret", "type": "checkout.session.completed"})
+    response = client.post(
+        '/api/payments/webhook',
+        data=payload,
+        content_type='application/json',
+    )
+    assert response.status_code == 503
+    assert response.get_json()['success'] is False
+
+
+def test_payments_webhook_rejects_invalid_signature(client, app):
+    app.config['STRIPE_WEBHOOK_SECRET'] = 'whsec_test'
+    payload = json.dumps({"id": "evt_invalid_sig", "type": "checkout.session.completed"})
+    response = client.post(
+        '/api/payments/webhook',
+        data=payload,
+        content_type='application/json',
+        headers={'Stripe-Signature': 't=123,v1=deadbeef'},
+    )
+    assert response.status_code == 400
+    assert 'invalida' in response.get_json()['error']
+
+
+def test_payments_webhook_marks_invoice_paid_idempotently(client, app):
+    secret = 'whsec_live_test'
+    app.config['STRIPE_WEBHOOK_SECRET'] = secret
+
+    with app.app_context():
+        subscription = Subscription(
+            customer='Webhook Customer',
+            email='billing@webhook.test',
+            plan='Mensual',
+            cycle_months=1,
+            amount=59.0,
+            status='past_due',
+            currency='USD',
+            next_charge=date.today(),
+            method='stripe',
+        )
+        db.session.add(subscription)
+        db.session.flush()
+
+        invoice = Invoice(
+            subscription_id=subscription.id,
+            amount=59.0,
+            currency='USD',
+            tax_percent=0,
+            total_amount=59.0,
+            status='pending',
+            due_date=date.today(),
+        )
+        db.session.add(invoice)
+        db.session.commit()
+        invoice_id = invoice.id
+        subscription_id = subscription.id
+
+    event = {
+        "id": "evt_checkout_paid",
+        "type": "checkout.session.completed",
+        "data": {
+            "object": {
+                "id": "cs_test_123",
+                "payment_intent": "pi_test_123",
+                "metadata": {
+                    "invoice_id": str(invoice_id),
+                    "subscription_id": str(subscription_id),
+                },
+            }
+        },
+    }
+    payload = json.dumps(event, separators=(',', ':'))
+    signature = _stripe_signature(payload, secret)
+
+    first = client.post(
+        '/api/payments/webhook',
+        data=payload,
+        content_type='application/json',
+        headers={'Stripe-Signature': signature},
+    )
+    second = client.post(
+        '/api/payments/webhook',
+        data=payload,
+        content_type='application/json',
+        headers={'Stripe-Signature': signature},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+
+    with app.app_context():
+        updated_invoice = db.session.get(Invoice, invoice_id)
+        updated_subscription = db.session.get(Subscription, subscription_id)
+        payment_records = PaymentRecord.query.filter_by(method='stripe', reference='pi_test_123').all()
+
+        assert updated_invoice is not None
+        assert updated_invoice.status == 'paid'
+        assert updated_subscription is not None
+        assert updated_subscription.status == 'active'
+        assert len(payment_records) == 1
 
