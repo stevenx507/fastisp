@@ -126,6 +126,7 @@ const MikroTikManagement: React.FC = () => {
   const [actionLoading, setActionLoading] = useState(false)
   const [creatingRouter, setCreatingRouter] = useState(false)
   const [quickLoading, setQuickLoading] = useState(false)
+  const [bthActionLoading, setBthActionLoading] = useState(false)
 
   const [aiAnalysis, setAiAnalysis] = useState<string | null>(null)
   const [aiError, setAiError] = useState<string | null>(null)
@@ -137,6 +138,9 @@ const MikroTikManagement: React.FC = () => {
   const confirmActionRef = useRef<(() => void) | null>(null)
   const [sidePanel, setSidePanel] = useState<'none' | 'logs' | 'dhcp' | 'wifi'>('none')
   const [quickConnect, setQuickConnect] = useState<RouterQuickConnectResponse | null>(null)
+  const [bthUserName, setBthUserName] = useState('noc-vps')
+  const [bthPrivateKey, setBthPrivateKey] = useState('')
+  const [bthAllowLan, setBthAllowLan] = useState(true)
   const [routerForm, setRouterForm] = useState<RouterFormState>({
     name: '',
     ip_address: '',
@@ -389,6 +393,128 @@ const MikroTikManagement: React.FC = () => {
     addToast(ok ? 'success' : 'error', ok ? `${label} copiado` : `No se pudo copiar ${label}`)
   }
 
+  const enableBackToHome = async () => {
+    if (!selectedRouter) return
+    setBthActionLoading(true)
+    try {
+      const response = await apiFetch(`/api/mikrotik/routers/${selectedRouter.id}/back-to-home/enable`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirm: true }),
+      })
+      const payload = (await safeJson(response)) as { success?: boolean; error?: string } | null
+      if (response.ok && payload?.success) {
+        addToast('success', 'Back To Home habilitado en router')
+      } else {
+        addToast('error', payload?.error || 'No se pudo habilitar Back To Home')
+      }
+      await loadQuickConnect(selectedRouter.id)
+    } catch (error) {
+      console.error('Error enabling Back To Home:', error)
+      addToast('error', 'Error de red habilitando Back To Home')
+    } finally {
+      setBthActionLoading(false)
+    }
+  }
+
+  const createBackToHomeUser = async () => {
+    if (!selectedRouter) return
+    const userName = bthUserName.trim()
+    const privateKey = bthPrivateKey.trim()
+    if (!userName) {
+      addToast('error', 'Ingresa un nombre de usuario BTH')
+      return
+    }
+    if (!privateKey) {
+      addToast('error', 'Ingresa la private key WireGuard del VPS')
+      return
+    }
+    setBthActionLoading(true)
+    try {
+      const response = await apiFetch(`/api/mikrotik/routers/${selectedRouter.id}/back-to-home/users/add`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          confirm: true,
+          user_name: userName,
+          private_key: privateKey,
+          allow_lan: bthAllowLan,
+          comment: 'FastISP VPS',
+        }),
+      })
+      const payload = (await safeJson(response)) as { success?: boolean; error?: string } | null
+      if (response.ok && payload?.success) {
+        addToast('success', `Usuario BTH ${userName} creado`)
+      } else {
+        addToast('error', payload?.error || 'No se pudo crear usuario BTH')
+      }
+      await loadQuickConnect(selectedRouter.id)
+    } catch (error) {
+      console.error('Error creating Back To Home user:', error)
+      addToast('error', 'Error de red creando usuario BTH')
+    } finally {
+      setBthActionLoading(false)
+    }
+  }
+
+  const removeBackToHomeUser = async (userName: string) => {
+    if (!selectedRouter || !userName.trim()) return
+    setBthActionLoading(true)
+    try {
+      const response = await apiFetch(`/api/mikrotik/routers/${selectedRouter.id}/back-to-home/users/remove`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          confirm: true,
+          user_name: userName.trim(),
+        }),
+      })
+      const payload = (await safeJson(response)) as { success?: boolean; error?: string } | null
+      if (response.ok && payload?.success) {
+        addToast('success', `Usuario BTH ${userName} eliminado`)
+      } else {
+        addToast('error', payload?.error || 'No se pudo eliminar usuario BTH')
+      }
+      await loadQuickConnect(selectedRouter.id)
+    } catch (error) {
+      console.error('Error removing Back To Home user:', error)
+      addToast('error', 'Error de red eliminando usuario BTH')
+    } finally {
+      setBthActionLoading(false)
+    }
+  }
+
+  const confirmEnableBackToHome = () => {
+    if (!selectedRouter) return
+    openConfirm(`Habilitar Back To Home en ${selectedRouter.name}?`, () => {
+      void enableBackToHome()
+    })
+  }
+
+  const confirmCreateBackToHomeUser = () => {
+    if (!selectedRouter) return
+    const userName = bthUserName.trim()
+    const privateKey = bthPrivateKey.trim()
+    if (!userName) {
+      addToast('error', 'Ingresa un nombre de usuario BTH')
+      return
+    }
+    if (!privateKey) {
+      addToast('error', 'Ingresa la private key WireGuard del VPS')
+      return
+    }
+    openConfirm(`Crear usuario Back To Home ${userName} en ${selectedRouter.name}?`, () => {
+      void createBackToHomeUser()
+    })
+  }
+
+  const confirmRemoveBackToHomeUser = (userName: string) => {
+    if (!selectedRouter) return
+    openConfirm(`Eliminar usuario Back To Home ${userName} de ${selectedRouter.name}?`, () => {
+      void removeBackToHomeUser(userName)
+    })
+  }
+
   return (
     <div className="space-y-6">
       <ActionsHeader
@@ -613,6 +739,63 @@ const MikroTikManagement: React.FC = () => {
                               DNS: <strong>{quickConnect.back_to_home.vpn_dns_name || '-'}</strong> | Interfaz: <strong>{quickConnect.back_to_home.vpn_interface || '-'}</strong> | Puerto: <strong>{quickConnect.back_to_home.vpn_port || '-'}</strong>
                             </p>
 
+                            <div className="rounded border border-gray-300 bg-white p-3">
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <p className="text-xs font-semibold uppercase text-gray-600">Acciones operativas BTH</p>
+                                <button
+                                  onClick={confirmEnableBackToHome}
+                                  disabled={bthActionLoading || !quickConnect.back_to_home.reachable}
+                                  className="rounded bg-blue-600 px-3 py-1 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
+                                >
+                                  {bthActionLoading ? 'Procesando...' : 'Habilitar BTH'}
+                                </button>
+                              </div>
+                              <p className="mt-2 text-xs text-gray-600">
+                                Este boton aplica DDNS + Back To Home VPN en el router seleccionado.
+                              </p>
+
+                              <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-2">
+                                <input
+                                  value={bthUserName}
+                                  onChange={(e) => setBthUserName(e.target.value)}
+                                  placeholder="Usuario BTH (ej: noc-vps)"
+                                  className="rounded border border-gray-300 px-2 py-1 text-xs text-gray-900"
+                                />
+                                <input
+                                  type="password"
+                                  value={bthPrivateKey}
+                                  onChange={(e) => setBthPrivateKey(e.target.value)}
+                                  placeholder="Private key WireGuard del VPS"
+                                  className="rounded border border-gray-300 px-2 py-1 text-xs text-gray-900"
+                                />
+                              </div>
+
+                              <label className="mt-2 flex items-center gap-2 text-xs text-gray-700">
+                                <input
+                                  type="checkbox"
+                                  checked={bthAllowLan}
+                                  onChange={(e) => setBthAllowLan(e.target.checked)}
+                                  className="rounded border-gray-300"
+                                />
+                                Permitir acceso LAN desde este usuario BTH
+                              </label>
+
+                              <div className="mt-3">
+                                <button
+                                  onClick={confirmCreateBackToHomeUser}
+                                  disabled={bthActionLoading || quickConnect.back_to_home.bth_users_supported === false}
+                                  className="rounded bg-emerald-600 px-3 py-1 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-60"
+                                >
+                                  {bthActionLoading ? 'Procesando...' : 'Crear usuario BTH para VPS'}
+                                </button>
+                                {quickConnect.back_to_home.bth_users_supported === false && (
+                                  <p className="mt-2 text-xs text-amber-700">
+                                    Este router no expone API de usuarios BTH. Requiere RouterOS 7.14+.
+                                  </p>
+                                )}
+                              </div>
+                            </div>
+
                             {quickConnect.back_to_home.scripts?.enable_script && (
                               <div className="rounded border border-gray-300 bg-white p-2">
                                 <div className="mb-2 flex items-center justify-between">
@@ -653,11 +836,31 @@ const MikroTikManagement: React.FC = () => {
                             {Array.isArray(quickConnect.back_to_home.users) && quickConnect.back_to_home.users.length > 0 && (
                               <div className="rounded border border-gray-300 bg-white p-2">
                                 <p className="text-xs font-semibold uppercase text-gray-600">Usuarios BTH actuales</p>
-                                <ul className="mt-2 space-y-1 text-xs text-gray-700">
+                                <ul className="mt-2 space-y-2 text-xs text-gray-700">
                                   {quickConnect.back_to_home.users.map((user, idx) => (
-                                    <li key={`${user.name}-${idx}`}>
-                                      - {user.name} | allow-lan: {String(user.allow_lan)} | disabled: {String(user.disabled)} | expires: {user.expires || '-'}
+                                    <li key={`${user.name}-${idx}`} className="flex flex-wrap items-center justify-between gap-2 rounded border border-gray-200 px-2 py-1">
+                                      <span>
+                                        {user.name} | allow-lan: {String(user.allow_lan)} | disabled: {String(user.disabled)} | expires: {user.expires || '-'}
+                                      </span>
+                                      <button
+                                        onClick={() => confirmRemoveBackToHomeUser(user.name)}
+                                        disabled={bthActionLoading || !user.name}
+                                        className="rounded bg-rose-600 px-2 py-1 text-xs font-semibold text-white hover:bg-rose-700 disabled:opacity-60"
+                                      >
+                                        Eliminar
+                                      </button>
                                     </li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+
+                            {Array.isArray(quickConnect.back_to_home.limitations) && quickConnect.back_to_home.limitations.length > 0 && (
+                              <div className="rounded border border-gray-300 bg-white p-2">
+                                <p className="text-xs font-semibold uppercase text-gray-600">Limitaciones BTH</p>
+                                <ul className="mt-2 space-y-1 text-xs text-gray-700">
+                                  {quickConnect.back_to_home.limitations.map((item, idx) => (
+                                    <li key={idx}>- {item}</li>
                                   ))}
                                 </ul>
                               </div>
@@ -665,6 +868,9 @@ const MikroTikManagement: React.FC = () => {
 
                             {quickConnect.back_to_home.users_error && (
                               <p className="text-xs text-amber-700">No fue posible leer usuarios BTH: {quickConnect.back_to_home.users_error}</p>
+                            )}
+                            {quickConnect.back_to_home.error && (
+                              <p className="text-xs text-rose-700">Error BTH: {quickConnect.back_to_home.error}</p>
                             )}
                           </div>
                         )}

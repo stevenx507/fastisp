@@ -595,6 +595,141 @@ def router_quick_connect(router_id):
     }
     return jsonify({'success': True, 'router': router.to_dict(), 'scripts': scripts, 'guidance': guidance, 'back_to_home': back_to_home}), 200
 
+
+def _script_escape(value: Any) -> str:
+    token = str(value or '')
+    return token.replace('\\', '\\\\').replace('"', '\\"')
+
+
+def _execute_router_script(router: MikroTikRouter, script_content: str) -> Dict[str, Any]:
+    with MikroTikService(router.id) as service:
+        if not service.api:
+            return {'success': False, 'error': 'Could not connect to router'}
+        result = service.execute_script(script_content)
+    if isinstance(result, dict):
+        return result
+    return {'success': bool(result), 'result': str(result)}
+
+
+@mikrotik_bp.route('/routers/<router_id>/back-to-home/enable', methods=['POST'])
+@admin_required()
+def enable_back_to_home(router_id):
+    router = _router_for_request(router_id)
+    if not router:
+        return jsonify({'success': False, 'error': 'Router not found'}), 404
+
+    data = request.get_json() or {}
+    if not _as_bool(data.get('confirm'), default=False):
+        return jsonify({'success': False, 'error': 'confirm=true is required'}), 400
+
+    update_time = _as_bool(data.get('update_time'), default=True)
+    ddns_enabled = _as_bool(data.get('ddns_enabled'), default=True)
+    enable_vpn = _as_bool(data.get('enable_vpn'), default=True)
+
+    commands = []
+    if ddns_enabled:
+        commands.append(f"/ip/cloud/set ddns-enabled=yes update-time={'yes' if update_time else 'no'}")
+    if enable_vpn:
+        commands.append("/ip/cloud/set back-to-home-vpn=enabled")
+    commands.append("/ip/cloud/print")
+    script_content = '\n'.join(commands)
+
+    try:
+        result = _execute_router_script(router, script_content)
+        status_code = 200 if result.get('success') else 502
+        return jsonify(
+            {
+                'success': bool(result.get('success')),
+                'router': router.to_dict(),
+                'script': script_content,
+                'result': result,
+            }
+        ), status_code
+    except Exception as exc:
+        logger.error("Error enabling Back To Home for router %s: %s", router_id, exc, exc_info=True)
+        return jsonify({'success': False, 'error': str(exc)}), 500
+
+
+@mikrotik_bp.route('/routers/<router_id>/back-to-home/users/add', methods=['POST'])
+@admin_required()
+def add_back_to_home_user(router_id):
+    router = _router_for_request(router_id)
+    if not router:
+        return jsonify({'success': False, 'error': 'Router not found'}), 404
+
+    data = request.get_json() or {}
+    if not _as_bool(data.get('confirm'), default=False):
+        return jsonify({'success': False, 'error': 'confirm=true is required'}), 400
+
+    user_name = str(data.get('user_name') or data.get('name') or '').strip()
+    private_key = str(data.get('private_key') or '').strip()
+    if not user_name:
+        return jsonify({'success': False, 'error': 'user_name is required'}), 400
+    if not private_key:
+        return jsonify({'success': False, 'error': 'private_key is required'}), 400
+
+    allow_lan = _as_bool(data.get('allow_lan'), default=True)
+    comment = str(data.get('comment') or 'FastISP VPS').strip() or 'FastISP VPS'
+
+    safe_name = _script_escape(user_name)
+    safe_key = _script_escape(private_key)
+    safe_comment = _script_escape(comment)
+    script_content = (
+        f'/ip/cloud/back-to-home-users/add name="{safe_name}" private-key="{safe_key}" '
+        f'allow-lan={"yes" if allow_lan else "no"} comment="{safe_comment}" disabled=no'
+    )
+
+    try:
+        result = _execute_router_script(router, script_content)
+        status_code = 200 if result.get('success') else 502
+        return jsonify(
+            {
+                'success': bool(result.get('success')),
+                'router': router.to_dict(),
+                'user_name': user_name,
+                'allow_lan': allow_lan,
+                'script': script_content,
+                'result': result,
+            }
+        ), status_code
+    except Exception as exc:
+        logger.error("Error adding Back To Home user for router %s: %s", router_id, exc, exc_info=True)
+        return jsonify({'success': False, 'error': str(exc)}), 500
+
+
+@mikrotik_bp.route('/routers/<router_id>/back-to-home/users/remove', methods=['POST'])
+@admin_required()
+def remove_back_to_home_user(router_id):
+    router = _router_for_request(router_id)
+    if not router:
+        return jsonify({'success': False, 'error': 'Router not found'}), 404
+
+    data = request.get_json() or {}
+    if not _as_bool(data.get('confirm'), default=False):
+        return jsonify({'success': False, 'error': 'confirm=true is required'}), 400
+
+    user_name = str(data.get('user_name') or data.get('name') or '').strip()
+    if not user_name:
+        return jsonify({'success': False, 'error': 'user_name is required'}), 400
+
+    safe_name = _script_escape(user_name)
+    script_content = f'/ip/cloud/back-to-home-users/remove [find where name="{safe_name}"]'
+    try:
+        result = _execute_router_script(router, script_content)
+        status_code = 200 if result.get('success') else 502
+        return jsonify(
+            {
+                'success': bool(result.get('success')),
+                'router': router.to_dict(),
+                'user_name': user_name,
+                'script': script_content,
+                'result': result,
+            }
+        ), status_code
+    except Exception as exc:
+        logger.error("Error removing Back To Home user for router %s: %s", router_id, exc, exc_info=True)
+        return jsonify({'success': False, 'error': str(exc)}), 500
+
 @mikrotik_bp.route('/validate-config', methods=['POST'])
 @admin_required()
 def validate_config():
