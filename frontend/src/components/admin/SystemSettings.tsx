@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { ArrowPathIcon } from '@heroicons/react/24/outline'
 import toast from 'react-hot-toast'
 import { apiClient } from '../../lib/apiClient'
@@ -32,6 +32,7 @@ interface JobEntry {
 }
 
 const jobs = ['backup', 'cleanup_leases', 'rotate_passwords', 'recalc_balances'] as const
+const jobStatuses = ['all', 'completed', 'completed_with_errors', 'skipped', 'failed'] as const
 
 const SystemSettings: React.FC = () => {
   const [settings, setSettings] = useState<SystemSettingsPayload | null>(null)
@@ -40,25 +41,45 @@ const SystemSettings: React.FC = () => {
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [runningJob, setRunningJob] = useState<string | null>(null)
+  const [jobStatusFilter, setJobStatusFilter] = useState<(typeof jobStatuses)[number]>('all')
+  const [jobTypeFilter, setJobTypeFilter] = useState<'all' | (typeof jobs)[number]>('all')
 
-  const load = async () => {
+  const loadJobHistory = useCallback(async (
+    status: (typeof jobStatuses)[number] = jobStatusFilter,
+    job: 'all' | (typeof jobs)[number] = jobTypeFilter,
+  ) => {
+    const params = new URLSearchParams({ limit: '50' })
+    if (status !== 'all') params.set('status', status)
+    if (job !== 'all') params.set('job', job)
+    const history = await apiClient.get(`/admin/system/jobs/history?${params.toString()}`) as { items?: JobEntry[] }
+    setJobHistory((history.items || []) as JobEntry[])
+  }, [jobStatusFilter, jobTypeFilter])
+
+  const load = useCallback(async () => {
     setLoading(true)
     try {
       const response = await apiClient.get('/admin/system/settings')
       setSettings((response.settings || null) as SystemSettingsPayload | null)
       setHealth((response.health || null) as SystemHealth | null)
-      setJobHistory((response.jobs || []) as JobEntry[])
+      await loadJobHistory()
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'No se pudieron cargar ajustes del sistema'
       toast.error(msg)
     } finally {
       setLoading(false)
     }
-  }
+  }, [loadJobHistory])
 
   useEffect(() => {
     load()
-  }, [])
+  }, [load])
+
+  useEffect(() => {
+    loadJobHistory().catch((err) => {
+      const msg = err instanceof Error ? err.message : 'No se pudo cargar historial de jobs'
+      toast.error(msg)
+    })
+  }, [loadJobHistory])
 
   const save = async () => {
     if (!settings) return
@@ -81,6 +102,7 @@ const SystemSettings: React.FC = () => {
       const response = await apiClient.post('/admin/system/jobs/run', { job })
       const completedJob = response.job as JobEntry
       setJobHistory((prev) => [completedJob, ...prev.filter((item) => item.id !== completedJob.id)])
+      await loadJobHistory()
       const status = String(completedJob.status || 'completed')
       const human = status === 'completed_with_errors' ? 'completado con errores' : status
       toast.success(`Job ${job}: ${human}`)
@@ -265,6 +287,31 @@ const SystemSettings: React.FC = () => {
 
         <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
           <h3 className="mb-3 font-semibold text-gray-900">Jobs</h3>
+          <div className="mb-3 grid grid-cols-1 gap-2">
+            <select
+              value={jobTypeFilter}
+              onChange={(e) => setJobTypeFilter(e.target.value as 'all' | (typeof jobs)[number])}
+              className="rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-700"
+            >
+              <option value="all">todos los jobs</option>
+              {jobs.map((job) => (
+                <option key={job} value={job}>
+                  {job}
+                </option>
+              ))}
+            </select>
+            <select
+              value={jobStatusFilter}
+              onChange={(e) => setJobStatusFilter(e.target.value as (typeof jobStatuses)[number])}
+              className="rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-700"
+            >
+              {jobStatuses.map((status) => (
+                <option key={status} value={status}>
+                  {status}
+                </option>
+              ))}
+            </select>
+          </div>
           <div className="space-y-2">
             {jobs.map((job) => (
               <button

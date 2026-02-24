@@ -220,3 +220,42 @@ def test_rotate_passwords_dry_run_does_not_change_password(client, app, monkeypa
         updated = db.session.get(MikroTikRouter, router_id)
         assert updated is not None
         assert updated.password == 'KeepThisPass#123'
+
+
+def test_system_jobs_history_supports_filters_and_offset(client, app):
+    token = _admin_token(app, 'jobs-admin-history-filter@test.local')
+
+    first = client.post(
+        '/api/admin/system/jobs/run',
+        json={'job': 'rotate_passwords'},
+        headers={'Authorization': f'Bearer {token}'},
+    )
+    assert first.status_code == 200
+
+    second = client.post(
+        '/api/admin/system/jobs/run',
+        json={'job': 'recalc_balances'},
+        headers={'Authorization': f'Bearer {token}'},
+    )
+    assert second.status_code == 200
+
+    filtered = client.get(
+        '/api/admin/system/jobs/history?status=skipped&job=rotate_passwords&limit=5',
+        headers={'Authorization': f'Bearer {token}'},
+    )
+    assert filtered.status_code == 200
+    filtered_payload = filtered.get_json()
+    assert filtered_payload['total'] >= 1
+    assert filtered_payload['count'] >= 1
+    assert filtered_payload['items'][0]['job'] == 'rotate_passwords'
+    assert filtered_payload['items'][0]['status'] == 'skipped'
+
+    paged = client.get(
+        '/api/admin/system/jobs/history?limit=1&offset=1',
+        headers={'Authorization': f'Bearer {token}'},
+    )
+    assert paged.status_code == 200
+    paged_payload = paged.get_json()
+    assert paged_payload['limit'] == 1
+    assert paged_payload['offset'] == 1
+    assert paged_payload['count'] <= 1

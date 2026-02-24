@@ -4194,8 +4194,33 @@ def admin_system_jobs_history():
         limit = int(request.args.get('limit', 50) or 50)
     except Exception:
         limit = 50
+    try:
+        offset = int(request.args.get('offset', 0) or 0)
+    except Exception:
+        offset = 0
     limit = max(1, min(limit, 200))
-    return jsonify({"items": jobs[:limit], "count": min(len(jobs), limit)}), 200
+    offset = max(0, offset)
+
+    status_filter = str(request.args.get('status') or '').strip().lower()
+    job_filter = str(request.args.get('job') or '').strip().lower()
+
+    filtered = jobs
+    if status_filter:
+        filtered = [item for item in filtered if str(item.get('status') or '').lower() == status_filter]
+    if job_filter:
+        filtered = [item for item in filtered if str(item.get('job') or '').lower() == job_filter]
+
+    page = filtered[offset:offset + limit]
+    return jsonify(
+        {
+            "items": page,
+            "count": len(page),
+            "total": len(filtered),
+            "offset": offset,
+            "limit": limit,
+            "has_more": (offset + len(page)) < len(filtered),
+        }
+    ), 200
 
 
 @main_bp.route('/admin/system/jobs/run', methods=['POST'])
