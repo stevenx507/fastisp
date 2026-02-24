@@ -92,6 +92,13 @@ DEMO_USERS = {"demo1@ispmax.com", "demo2@ispmax.com"}
 STAFF_ALLOWED_ROLES = {"admin", "tech", "support", "billing", "noc", "operator"}
 STAFF_ALLOWED_STATUS = {"active", "on_leave", "inactive"}
 STAFF_ALLOWED_SHIFTS = {"day", "night", "mixed"}
+INSTALLATION_ALLOWED_STATUS = {"pending", "scheduled", "in_progress", "completed", "cancelled"}
+SCREEN_ALERT_ALLOWED_STATUS = {"draft", "active", "paused", "expired"}
+SCREEN_ALERT_ALLOWED_SEVERITY = {"info", "warning", "critical", "success"}
+SCREEN_ALERT_ALLOWED_AUDIENCE = {"all", "active", "overdue", "suspended"}
+EXTRA_SERVICE_ALLOWED_STATUS = {"active", "disabled"}
+HOTSPOT_VOUCHER_ALLOWED_STATUS = {"generated", "sold", "used", "expired", "cancelled"}
+SYSTEM_ALLOWED_JOBS = {"backup", "cleanup_leases", "rotate_passwords", "recalc_balances"}
 
 
 def _tenant_cache_key(prefix: str, tenant_id) -> str:
@@ -105,6 +112,30 @@ def _staff_meta_key(tenant_id) -> str:
 
 def _notifications_history_key(tenant_id) -> str:
     return _tenant_cache_key("admin_notifications_history", tenant_id)
+
+
+def _installations_key(tenant_id) -> str:
+    return _tenant_cache_key("admin_installations", tenant_id)
+
+
+def _screen_alerts_key(tenant_id) -> str:
+    return _tenant_cache_key("admin_screen_alerts", tenant_id)
+
+
+def _extra_services_key(tenant_id) -> str:
+    return _tenant_cache_key("admin_extra_services", tenant_id)
+
+
+def _hotspot_vouchers_key(tenant_id) -> str:
+    return _tenant_cache_key("admin_hotspot_vouchers", tenant_id)
+
+
+def _system_settings_key(tenant_id) -> str:
+    return _tenant_cache_key("admin_system_settings", tenant_id)
+
+
+def _system_jobs_key(tenant_id) -> str:
+    return _tenant_cache_key("admin_system_jobs", tenant_id)
 
 
 def _load_staff_meta(tenant_id) -> dict:
@@ -121,6 +152,22 @@ def _load_notification_history(tenant_id) -> list[dict]:
 
 def _save_notification_history(tenant_id, history: list[dict]) -> None:
     cache.set(_notifications_history_key(tenant_id), history[:200], timeout=86400 * 30)
+
+
+def _load_cached_list(key: str) -> list[dict]:
+    return cache.get(key) or []
+
+
+def _save_cached_list(key: str, items: list[dict], max_items: int = 500) -> None:
+    cache.set(key, items[:max_items], timeout=86400 * 30)
+
+
+def _load_cached_dict(key: str) -> dict:
+    return cache.get(key) or {}
+
+
+def _save_cached_dict(key: str, data: dict) -> None:
+    cache.set(key, data, timeout=86400 * 30)
 
 
 def _iso_utc_now() -> str:
@@ -1418,7 +1465,7 @@ def client_notification_preferences():
 def run_background_job():
     data = request.get_json() or {}
     job = (data.get('job') or '').strip().lower()
-    if job not in {'backup', 'cleanup_leases', 'rotate_passwords', 'recalc_balances'}:
+    if job not in SYSTEM_ALLOWED_JOBS:
         return jsonify({"error": "job debe ser backup | cleanup_leases | rotate_passwords | recalc_balances"}), 400
     return jsonify({"success": True, "job": job, "started_at": datetime.utcnow().isoformat() + "Z"}), 200
 
@@ -2294,6 +2341,895 @@ def admin_notifications_send():
     _audit("notification_send", entity_type="notification", entity_id=entry["id"], metadata=entry)
 
     return jsonify({"success": True, "notification": entry}), 201
+
+
+# ==================== ADMIN: FINANCE / INSTALLATIONS / CONTENT / SYSTEM ====================
+
+@main_bp.route('/admin/finance/summary', methods=['GET'])
+@admin_required()
+def admin_finance_summary():
+    tenant_id = current_tenant_id()
+    now = datetime.utcnow()
+    today = now.date()
+
+    subscriptions_query = Subscription.query
+    invoices_query = Invoice.query.join(Subscription, Invoice.subscription_id == Subscription.id)
+    payments_query = PaymentRecord.query.join(Invoice, PaymentRecord.invoice_id == Invoice.id).join(
+        Subscription, Invoice.subscription_id == Subscription.id
+    )
+
+    if tenant_id is not None:
+        subscriptions_query = subscriptions_query.filter(Subscription.tenant_id == tenant_id)
+        invoices_query = invoices_query.filter(Subscription.tenant_id == tenant_id)
+        payments_query = payments_query.filter(Subscription.tenant_id == tenant_id)
+
+    subscriptions = subscriptions_query.all()
+    invoices = invoices_query.order_by(Invoice.created_at.desc()).all()
+    payments = payments_query.order_by(PaymentRecord.created_at.desc()).all()
+
+    active_status = {"active", "trial"}
+    mrr = round(sum(float(sub.amount or 0) for sub in subscriptions if sub.status in active_status), 2)
+    arr = round(mrr * 12, 2)
+
+    pending_invoices = [invoice for invoice in invoices if invoice.status == 'pending']
+    overdue_invoices = [invoice for invoice in pending_invoices if invoice.due_date and invoice.due_date < today]
+    pending_balance = round(sum(float(invoice.total_amount or 0) for invoice in pending_invoices), 2)
+    overdue_balance = round(sum(float(invoice.total_amount or 0) for invoice in overdue_invoices), 2)
+
+    paid_this_month = round(
+        sum(
+            float(payment.amount or 0)
+            for payment in payments
+            if payment.status == 'paid'
+            and payment.created_at
+            and payment.created_at.year == now.year
+            and payment.created_at.month == now.month
+        ),
+        2,
+    )
+    pending_this_month = round(
+        sum(
+            float(invoice.total_amount or 0)
+            for invoice in pending_invoices
+            if invoice.due_date and invoice.due_date.year == now.year and invoice.due_date.month == now.month
+        ),
+        2,
+    )
+    denominator = paid_this_month + pending_this_month
+    collection_rate = round((paid_this_month / denominator) * 100, 2) if denominator > 0 else 100.0
+
+    overdue_clients = [sub for sub in subscriptions if sub.status == 'past_due']
+    suspended_clients = [sub for sub in subscriptions if sub.status == 'suspended']
+    top_debtors = [
+        {
+            "subscription_id": sub.id,
+            "customer": sub.customer,
+            "amount": float(sub.amount or 0),
+            "status": sub.status,
+            "next_charge": sub.next_charge.isoformat() if sub.next_charge else None,
+        }
+        for sub in sorted(overdue_clients + suspended_clients, key=lambda row: float(row.amount or 0), reverse=True)[:10]
+    ]
+
+    aging = {
+        "current": 0.0,
+        "days_1_30": 0.0,
+        "days_31_60": 0.0,
+        "days_61_90": 0.0,
+        "days_90_plus": 0.0,
+    }
+    for invoice in pending_invoices:
+        amount = float(invoice.total_amount or 0)
+        if not invoice.due_date:
+            aging["current"] += amount
+            continue
+        days_overdue = (today - invoice.due_date).days
+        if days_overdue <= 0:
+            aging["current"] += amount
+        elif days_overdue <= 30:
+            aging["days_1_30"] += amount
+        elif days_overdue <= 60:
+            aging["days_31_60"] += amount
+        elif days_overdue <= 90:
+            aging["days_61_90"] += amount
+        else:
+            aging["days_90_plus"] += amount
+    aging = {bucket: round(value, 2) for bucket, value in aging.items()}
+
+    cursor = date(today.year, today.month, 1)
+    months: list[date] = []
+    for _ in range(6):
+        months.append(cursor)
+        prev_year = cursor.year
+        prev_month = cursor.month - 1
+        if prev_month == 0:
+            prev_month = 12
+            prev_year -= 1
+        cursor = date(prev_year, prev_month, 1)
+    months.reverse()
+
+    cashflow_map: dict[str, dict] = {}
+    for month_point in months:
+        key = month_point.strftime('%Y-%m')
+        cashflow_map[key] = {"label": month_point.strftime('%b %Y'), "paid": 0.0, "pending": 0.0}
+
+    for payment in payments:
+        if payment.status != 'paid' or not payment.created_at:
+            continue
+        key = payment.created_at.strftime('%Y-%m')
+        if key in cashflow_map:
+            cashflow_map[key]["paid"] += float(payment.amount or 0)
+
+    for invoice in pending_invoices:
+        if not invoice.due_date:
+            continue
+        key = invoice.due_date.strftime('%Y-%m')
+        if key in cashflow_map:
+            cashflow_map[key]["pending"] += float(invoice.total_amount or 0)
+
+    cashflow = [
+        {"label": row["label"], "paid": round(row["paid"], 2), "pending": round(row["pending"], 2)}
+        for row in cashflow_map.values()
+    ]
+
+    recent_invoices = []
+    for invoice in invoices[:20]:
+        subscription = invoice.subscription
+        recent_invoices.append(
+            {
+                "id": invoice.id,
+                "customer": subscription.customer if subscription else None,
+                "status": invoice.status,
+                "currency": invoice.currency,
+                "amount": float(invoice.amount or 0),
+                "total_amount": float(invoice.total_amount or 0),
+                "due_date": invoice.due_date.isoformat() if invoice.due_date else None,
+                "created_at": invoice.created_at.isoformat() if invoice.created_at else None,
+            }
+        )
+
+    summary = {
+        "mrr": mrr,
+        "arr": arr,
+        "pending_balance": pending_balance,
+        "overdue_balance": overdue_balance,
+        "paid_this_month": paid_this_month,
+        "pending_this_month": pending_this_month,
+        "collection_rate": collection_rate,
+        "subscriptions_total": len(subscriptions),
+        "invoices_total": len(invoices),
+        "overdue_clients": len(overdue_clients),
+        "suspended_clients": len(suspended_clients),
+        "updated_at": _iso_utc_now(),
+    }
+
+    _audit("finance_summary", entity_type="finance", metadata=summary)
+    return jsonify(
+        {
+            "summary": summary,
+            "aging": aging,
+            "cashflow": cashflow,
+            "top_debtors": top_debtors,
+            "recent_invoices": recent_invoices,
+        }
+    ), 200
+
+
+def _default_installations(tenant_id) -> list[dict]:
+    clients_query = Client.query.options(joinedload(Client.plan), joinedload(Client.router))
+    if tenant_id is not None:
+        clients_query = clients_query.filter_by(tenant_id=tenant_id)
+    clients = clients_query.order_by(Client.id.asc()).limit(12).all()
+
+    staff_query = User.query.filter(User.role.in_(("tech", "support", "admin", "noc")))
+    if tenant_id is not None:
+        staff_query = staff_query.filter_by(tenant_id=tenant_id)
+    technicians = [user.email for user in staff_query.order_by(User.name.asc()).all()]
+    if not technicians:
+        technicians = ["pendiente@ispfast.local"]
+
+    statuses = ["pending", "scheduled", "in_progress", "completed"]
+    now = datetime.utcnow()
+    items: list[dict] = []
+    for index, client in enumerate(clients, start=1):
+        status = statuses[index % len(statuses)]
+        scheduled_at = (now + timedelta(days=index % 6, hours=(index % 4) * 2)).replace(microsecond=0)
+        checklist = {
+            "onu_registered": status == "completed",
+            "cpe_configured": status in {"in_progress", "completed"},
+            "signal_validated": status == "completed",
+            "speedtest_ok": status == "completed",
+        }
+        items.append(
+            {
+                "id": f"inst-{client.id}",
+                "client_id": client.id,
+                "client_name": client.full_name,
+                "plan": client.plan.name if client.plan else None,
+                "router": client.router.name if client.router else None,
+                "address": client.ip_address or "Sin direccion",
+                "status": status,
+                "priority": "high" if index % 5 == 0 else "normal",
+                "technician": technicians[index % len(technicians)],
+                "scheduled_for": scheduled_at.isoformat() + "Z",
+                "notes": "Instalacion programada automaticamente",
+                "checklist": checklist,
+                "created_at": _iso_utc_now(),
+                "updated_at": _iso_utc_now(),
+            }
+        )
+    return items
+
+
+@main_bp.route('/admin/installations', methods=['GET'])
+@admin_required()
+def admin_installations_list():
+    tenant_id = current_tenant_id()
+    key = _installations_key(tenant_id)
+    items = _load_cached_list(key)
+    if not items:
+        items = _default_installations(tenant_id)
+        _save_cached_list(key, items, max_items=400)
+
+    status_filter = (request.args.get('status') or '').strip().lower()
+    technician_filter = (request.args.get('technician') or '').strip().lower()
+    if status_filter:
+        items = [item for item in items if str(item.get("status", "")).lower() == status_filter]
+    if technician_filter:
+        items = [
+            item for item in items if technician_filter in str(item.get("technician", "")).lower()
+        ]
+
+    summary = {status: 0 for status in INSTALLATION_ALLOWED_STATUS}
+    for item in items:
+        state = str(item.get("status") or "pending")
+        summary[state] = summary.get(state, 0) + 1
+    return jsonify({"items": items, "count": len(items), "summary": summary}), 200
+
+
+@main_bp.route('/admin/installations', methods=['POST'])
+@admin_required()
+def admin_installations_create():
+    tenant_id = current_tenant_id()
+    data = request.get_json() or {}
+
+    client_id = data.get('client_id')
+    client_name = (data.get('client_name') or '').strip()
+    client = None
+    if client_id:
+        client = Client.query.get(client_id)
+        if not client:
+            return jsonify({"error": "Cliente no encontrado"}), 404
+        if tenant_id is not None and client.tenant_id not in (None, tenant_id):
+            return jsonify({"error": "Cliente fuera del tenant"}), 403
+        client_name = client.full_name
+
+    if not client_name:
+        return jsonify({"error": "client_name o client_id es requerido"}), 400
+
+    status = (data.get('status') or 'scheduled').strip().lower()
+    if status not in INSTALLATION_ALLOWED_STATUS:
+        return jsonify({"error": f"status invalido. permitidos: {', '.join(sorted(INSTALLATION_ALLOWED_STATUS))}"}), 400
+
+    raw_scheduled = (data.get('scheduled_for') or '').strip()
+    if raw_scheduled:
+        try:
+            scheduled_for = datetime.fromisoformat(raw_scheduled.replace('Z', '+00:00')).replace(microsecond=0)
+        except Exception:
+            return jsonify({"error": "scheduled_for debe ser ISO date-time"}), 400
+    else:
+        scheduled_for = datetime.utcnow().replace(microsecond=0) + timedelta(days=1)
+
+    entry = {
+        "id": secrets.token_hex(8),
+        "client_id": client.id if client else None,
+        "client_name": client_name,
+        "plan": client.plan.name if client and client.plan else (data.get('plan') or None),
+        "router": client.router.name if client and client.router else (data.get('router') or None),
+        "address": (data.get('address') or (client.ip_address if client else '') or 'Sin direccion').strip(),
+        "status": status,
+        "priority": (data.get('priority') or 'normal').strip().lower(),
+        "technician": (data.get('technician') or '').strip() or "pendiente@ispfast.local",
+        "scheduled_for": scheduled_for.isoformat() + "Z",
+        "notes": (data.get('notes') or '').strip(),
+        "checklist": {
+            "onu_registered": False,
+            "cpe_configured": False,
+            "signal_validated": False,
+            "speedtest_ok": False,
+        },
+        "created_at": _iso_utc_now(),
+        "updated_at": _iso_utc_now(),
+    }
+
+    key = _installations_key(tenant_id)
+    items = _load_cached_list(key)
+    items.insert(0, entry)
+    _save_cached_list(key, items, max_items=400)
+    _audit("installation_create", entity_type="installation", entity_id=entry["id"], metadata=entry)
+    return jsonify({"success": True, "installation": entry}), 201
+
+
+@main_bp.route('/admin/installations/<string:installation_id>', methods=['PATCH'])
+@admin_required()
+def admin_installations_update(installation_id):
+    tenant_id = current_tenant_id()
+    key = _installations_key(tenant_id)
+    items = _load_cached_list(key)
+    entry = next((item for item in items if str(item.get("id")) == installation_id), None)
+    if not entry:
+        return jsonify({"error": "Instalacion no encontrada"}), 404
+
+    data = request.get_json() or {}
+    if 'status' in data:
+        status = str(data.get('status') or '').strip().lower()
+        if status not in INSTALLATION_ALLOWED_STATUS:
+            return jsonify({"error": f"status invalido. permitidos: {', '.join(sorted(INSTALLATION_ALLOWED_STATUS))}"}), 400
+        entry['status'] = status
+    if 'priority' in data:
+        entry['priority'] = str(data.get('priority') or 'normal').strip().lower() or 'normal'
+    if 'technician' in data:
+        entry['technician'] = str(data.get('technician') or '').strip() or "pendiente@ispfast.local"
+    if 'address' in data:
+        entry['address'] = str(data.get('address') or '').strip() or entry.get('address')
+    if 'notes' in data:
+        entry['notes'] = str(data.get('notes') or '').strip()
+    if 'scheduled_for' in data:
+        raw_scheduled = str(data.get('scheduled_for') or '').strip()
+        if raw_scheduled:
+            try:
+                scheduled_for = datetime.fromisoformat(raw_scheduled.replace('Z', '+00:00')).replace(microsecond=0)
+            except Exception:
+                return jsonify({"error": "scheduled_for debe ser ISO date-time"}), 400
+            entry['scheduled_for'] = scheduled_for.isoformat() + "Z"
+    if 'checklist' in data and isinstance(data.get('checklist'), dict):
+        checklist = entry.get('checklist') or {}
+        for key_name, value in data['checklist'].items():
+            checklist[str(key_name)] = bool(value)
+        entry['checklist'] = checklist
+
+    if entry.get('status') == 'completed':
+        entry['completed_at'] = entry.get('completed_at') or _iso_utc_now()
+    entry['updated_at'] = _iso_utc_now()
+
+    _save_cached_list(key, items, max_items=400)
+    _audit("installation_update", entity_type="installation", entity_id=installation_id, metadata={"changes": list(data.keys())})
+    return jsonify({"success": True, "installation": entry}), 200
+
+
+def _default_screen_alerts() -> list[dict]:
+    now = _iso_utc_now()
+    return [
+        {
+            "id": secrets.token_hex(8),
+            "title": "Mantenimiento programado",
+            "message": "Habra ventana de mantenimiento de 01:00 a 02:00.",
+            "severity": "info",
+            "audience": "all",
+            "status": "active",
+            "starts_at": now,
+            "ends_at": None,
+            "impressions": 0,
+            "acknowledged": 0,
+            "created_by": None,
+            "created_at": now,
+            "updated_at": now,
+        },
+        {
+            "id": secrets.token_hex(8),
+            "title": "Recordatorio de pago",
+            "message": "Clientes con saldo pendiente evitaran corte regularizando hoy.",
+            "severity": "warning",
+            "audience": "overdue",
+            "status": "draft",
+            "starts_at": now,
+            "ends_at": None,
+            "impressions": 0,
+            "acknowledged": 0,
+            "created_by": None,
+            "created_at": now,
+            "updated_at": now,
+        },
+    ]
+
+
+@main_bp.route('/admin/screen-alerts', methods=['GET'])
+@admin_required()
+def admin_screen_alerts_list():
+    tenant_id = current_tenant_id()
+    key = _screen_alerts_key(tenant_id)
+    items = _load_cached_list(key)
+    if not items:
+        items = _default_screen_alerts()
+        _save_cached_list(key, items, max_items=400)
+
+    status_filter = (request.args.get('status') or '').strip().lower()
+    if status_filter:
+        items = [item for item in items if str(item.get("status") or "").lower() == status_filter]
+
+    summary = {status: 0 for status in SCREEN_ALERT_ALLOWED_STATUS}
+    for item in items:
+        state = str(item.get("status") or "draft")
+        summary[state] = summary.get(state, 0) + 1
+
+    return jsonify({"items": items, "count": len(items), "summary": summary}), 200
+
+
+@main_bp.route('/admin/screen-alerts', methods=['POST'])
+@admin_required()
+def admin_screen_alerts_create():
+    tenant_id = current_tenant_id()
+    data = request.get_json() or {}
+    title = (data.get('title') or '').strip()
+    message = (data.get('message') or '').strip()
+    if not title or not message:
+        return jsonify({"error": "title y message son requeridos"}), 400
+
+    severity = (data.get('severity') or 'info').strip().lower()
+    if severity not in SCREEN_ALERT_ALLOWED_SEVERITY:
+        return jsonify({"error": f"severity invalido. permitidos: {', '.join(sorted(SCREEN_ALERT_ALLOWED_SEVERITY))}"}), 400
+
+    audience = (data.get('audience') or 'all').strip().lower()
+    if audience not in SCREEN_ALERT_ALLOWED_AUDIENCE:
+        return jsonify({"error": f"audience invalido. permitidos: {', '.join(sorted(SCREEN_ALERT_ALLOWED_AUDIENCE))}"}), 400
+
+    status = (data.get('status') or 'draft').strip().lower()
+    if status not in SCREEN_ALERT_ALLOWED_STATUS:
+        return jsonify({"error": f"status invalido. permitidos: {', '.join(sorted(SCREEN_ALERT_ALLOWED_STATUS))}"}), 400
+
+    now = _iso_utc_now()
+    entry = {
+        "id": secrets.token_hex(8),
+        "title": title,
+        "message": message,
+        "severity": severity,
+        "audience": audience,
+        "status": status,
+        "starts_at": (data.get('starts_at') or now),
+        "ends_at": data.get('ends_at'),
+        "impressions": 0,
+        "acknowledged": 0,
+        "created_by": _current_user_id(),
+        "created_at": now,
+        "updated_at": now,
+    }
+
+    key = _screen_alerts_key(tenant_id)
+    items = _load_cached_list(key)
+    items.insert(0, entry)
+    _save_cached_list(key, items, max_items=400)
+    _audit("screen_alert_create", entity_type="screen_alert", entity_id=entry["id"], metadata=entry)
+    return jsonify({"success": True, "alert": entry}), 201
+
+
+@main_bp.route('/admin/screen-alerts/<string:alert_id>', methods=['PATCH'])
+@admin_required()
+def admin_screen_alerts_update(alert_id):
+    tenant_id = current_tenant_id()
+    key = _screen_alerts_key(tenant_id)
+    items = _load_cached_list(key)
+    entry = next((item for item in items if str(item.get("id")) == alert_id), None)
+    if not entry:
+        return jsonify({"error": "Alerta no encontrada"}), 404
+
+    data = request.get_json() or {}
+    if 'title' in data:
+        title = str(data.get('title') or '').strip()
+        if not title:
+            return jsonify({"error": "title no puede estar vacio"}), 400
+        entry['title'] = title
+    if 'message' in data:
+        message = str(data.get('message') or '').strip()
+        if not message:
+            return jsonify({"error": "message no puede estar vacio"}), 400
+        entry['message'] = message
+    if 'severity' in data:
+        severity = str(data.get('severity') or '').strip().lower()
+        if severity not in SCREEN_ALERT_ALLOWED_SEVERITY:
+            return jsonify({"error": f"severity invalido. permitidos: {', '.join(sorted(SCREEN_ALERT_ALLOWED_SEVERITY))}"}), 400
+        entry['severity'] = severity
+    if 'audience' in data:
+        audience = str(data.get('audience') or '').strip().lower()
+        if audience not in SCREEN_ALERT_ALLOWED_AUDIENCE:
+            return jsonify({"error": f"audience invalido. permitidos: {', '.join(sorted(SCREEN_ALERT_ALLOWED_AUDIENCE))}"}), 400
+        entry['audience'] = audience
+    if 'status' in data:
+        status = str(data.get('status') or '').strip().lower()
+        if status not in SCREEN_ALERT_ALLOWED_STATUS:
+            return jsonify({"error": f"status invalido. permitidos: {', '.join(sorted(SCREEN_ALERT_ALLOWED_STATUS))}"}), 400
+        entry['status'] = status
+    if 'starts_at' in data:
+        entry['starts_at'] = data.get('starts_at')
+    if 'ends_at' in data:
+        entry['ends_at'] = data.get('ends_at')
+    if 'impressions_delta' in data:
+        entry['impressions'] = max(0, int(entry.get('impressions') or 0) + int(data.get('impressions_delta') or 0))
+    if 'acknowledged_delta' in data:
+        entry['acknowledged'] = max(0, int(entry.get('acknowledged') or 0) + int(data.get('acknowledged_delta') or 0))
+
+    entry['updated_at'] = _iso_utc_now()
+    _save_cached_list(key, items, max_items=400)
+    _audit("screen_alert_update", entity_type="screen_alert", entity_id=alert_id, metadata={"changes": list(data.keys())})
+    return jsonify({"success": True, "alert": entry}), 200
+
+
+def _default_extra_services(tenant_id) -> list[dict]:
+    clients_query = Client.query
+    if tenant_id is not None:
+        clients_query = clients_query.filter_by(tenant_id=tenant_id)
+    clients_count = clients_query.count()
+    now = _iso_utc_now()
+    return [
+        {
+            "id": "svc-iptv",
+            "name": "IPTV Premium",
+            "category": "tv",
+            "description": "Canales HD y catch-up basico",
+            "monthly_price": 9.9,
+            "one_time_fee": 0.0,
+            "status": "active",
+            "subscribers": max(0, round(clients_count * 0.22)),
+            "updated_at": now,
+        },
+        {
+            "id": "svc-voip",
+            "name": "Linea VoIP",
+            "category": "voice",
+            "description": "Numero fijo virtual con llamadas locales",
+            "monthly_price": 5.5,
+            "one_time_fee": 8.0,
+            "status": "active",
+            "subscribers": max(0, round(clients_count * 0.13)),
+            "updated_at": now,
+        },
+        {
+            "id": "svc-ipfixa",
+            "name": "IP Publica Fija",
+            "category": "ip",
+            "description": "Direccion IP estatica para negocios",
+            "monthly_price": 14.0,
+            "one_time_fee": 20.0,
+            "status": "active",
+            "subscribers": max(0, round(clients_count * 0.09)),
+            "updated_at": now,
+        },
+        {
+            "id": "svc-backup4g",
+            "name": "Backup LTE",
+            "category": "redundancy",
+            "description": "Failover movil para continuidad basica",
+            "monthly_price": 17.5,
+            "one_time_fee": 25.0,
+            "status": "disabled",
+            "subscribers": max(0, round(clients_count * 0.04)),
+            "updated_at": now,
+        },
+    ]
+
+
+@main_bp.route('/admin/extra-services', methods=['GET'])
+@admin_required()
+def admin_extra_services_list():
+    tenant_id = current_tenant_id()
+    key = _extra_services_key(tenant_id)
+    items = _load_cached_list(key)
+    if not items:
+        items = _default_extra_services(tenant_id)
+        _save_cached_list(key, items, max_items=300)
+
+    status_filter = (request.args.get('status') or '').strip().lower()
+    if status_filter:
+        items = [item for item in items if str(item.get("status") or "").lower() == status_filter]
+
+    summary = {
+        "services_total": len(items),
+        "active_services": sum(1 for item in items if item.get("status") == "active"),
+        "subscribers_total": sum(int(item.get("subscribers") or 0) for item in items),
+        "mrr_estimated": round(
+            sum(float(item.get("monthly_price") or 0) * int(item.get("subscribers") or 0) for item in items), 2
+        ),
+    }
+    return jsonify({"items": items, "count": len(items), "summary": summary}), 200
+
+
+@main_bp.route('/admin/extra-services', methods=['POST'])
+@admin_required()
+def admin_extra_services_create():
+    tenant_id = current_tenant_id()
+    data = request.get_json() or {}
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify({"error": "name es requerido"}), 400
+
+    status = (data.get('status') or 'active').strip().lower()
+    if status not in EXTRA_SERVICE_ALLOWED_STATUS:
+        return jsonify({"error": f"status invalido. permitidos: {', '.join(sorted(EXTRA_SERVICE_ALLOWED_STATUS))}"}), 400
+
+    entry = {
+        "id": secrets.token_hex(8),
+        "name": name,
+        "category": (data.get('category') or 'other').strip().lower(),
+        "description": (data.get('description') or '').strip(),
+        "monthly_price": round(float(data.get('monthly_price') or 0), 2),
+        "one_time_fee": round(float(data.get('one_time_fee') or 0), 2),
+        "status": status,
+        "subscribers": int(data.get('subscribers') or 0),
+        "updated_at": _iso_utc_now(),
+    }
+
+    key = _extra_services_key(tenant_id)
+    items = _load_cached_list(key)
+    items.insert(0, entry)
+    _save_cached_list(key, items, max_items=300)
+    _audit("extra_service_create", entity_type="extra_service", entity_id=entry["id"], metadata=entry)
+    return jsonify({"success": True, "service": entry}), 201
+
+
+@main_bp.route('/admin/extra-services/<string:service_id>', methods=['PATCH'])
+@admin_required()
+def admin_extra_services_update(service_id):
+    tenant_id = current_tenant_id()
+    key = _extra_services_key(tenant_id)
+    items = _load_cached_list(key)
+    entry = next((item for item in items if str(item.get("id")) == service_id), None)
+    if not entry:
+        return jsonify({"error": "Servicio no encontrado"}), 404
+
+    data = request.get_json() or {}
+    if 'name' in data:
+        name = str(data.get('name') or '').strip()
+        if not name:
+            return jsonify({"error": "name no puede estar vacio"}), 400
+        entry['name'] = name
+    if 'category' in data:
+        entry['category'] = str(data.get('category') or 'other').strip().lower() or 'other'
+    if 'description' in data:
+        entry['description'] = str(data.get('description') or '').strip()
+    if 'monthly_price' in data:
+        entry['monthly_price'] = round(float(data.get('monthly_price') or 0), 2)
+    if 'one_time_fee' in data:
+        entry['one_time_fee'] = round(float(data.get('one_time_fee') or 0), 2)
+    if 'subscribers' in data:
+        entry['subscribers'] = max(0, int(data.get('subscribers') or 0))
+    if 'status' in data:
+        status = str(data.get('status') or '').strip().lower()
+        if status not in EXTRA_SERVICE_ALLOWED_STATUS:
+            return jsonify({"error": f"status invalido. permitidos: {', '.join(sorted(EXTRA_SERVICE_ALLOWED_STATUS))}"}), 400
+        entry['status'] = status
+
+    entry['updated_at'] = _iso_utc_now()
+    _save_cached_list(key, items, max_items=300)
+    _audit("extra_service_update", entity_type="extra_service", entity_id=service_id, metadata={"changes": list(data.keys())})
+    return jsonify({"success": True, "service": entry}), 200
+
+
+@main_bp.route('/admin/hotspot/vouchers', methods=['GET'])
+@admin_required()
+def admin_hotspot_vouchers_list():
+    tenant_id = current_tenant_id()
+    key = _hotspot_vouchers_key(tenant_id)
+    items = _load_cached_list(key)
+
+    status_filter = (request.args.get('status') or '').strip().lower()
+    if status_filter:
+        items = [item for item in items if str(item.get("status") or "").lower() == status_filter]
+
+    summary = {status: 0 for status in HOTSPOT_VOUCHER_ALLOWED_STATUS}
+    revenue_estimated = 0.0
+    for item in items:
+        state = str(item.get("status") or "generated")
+        summary[state] = summary.get(state, 0) + 1
+        if state in {"sold", "used"}:
+            revenue_estimated += float(item.get("price") or 0)
+    return jsonify(
+        {
+            "items": items[:300],
+            "count": len(items),
+            "summary": summary,
+            "revenue_estimated": round(revenue_estimated, 2),
+        }
+    ), 200
+
+
+@main_bp.route('/admin/hotspot/vouchers', methods=['POST'])
+@admin_required()
+def admin_hotspot_vouchers_create():
+    tenant_id = current_tenant_id()
+    data = request.get_json() or {}
+
+    try:
+        quantity = int(data.get('quantity') or 1)
+    except Exception:
+        quantity = 1
+    quantity = max(1, min(quantity, 200))
+
+    profile = (data.get('profile') or 'basic').strip().lower() or 'basic'
+    duration_minutes = max(5, int(data.get('duration_minutes') or 60))
+    data_limit_mb = max(0, int(data.get('data_limit_mb') or 0))
+    price = round(float(data.get('price') or 0), 2)
+    expires_days = max(1, int(data.get('expires_days') or 7))
+    now = datetime.utcnow().replace(microsecond=0)
+
+    key = _hotspot_vouchers_key(tenant_id)
+    items = _load_cached_list(key)
+    created = []
+    for _ in range(quantity):
+        code_prefix = ''.join(ch for ch in profile.upper() if ch.isalnum())[:3] or 'VCH'
+        code = f"{code_prefix}-{secrets.token_hex(3).upper()}"
+        entry = {
+            "id": secrets.token_hex(8),
+            "code": code,
+            "profile": profile,
+            "duration_minutes": duration_minutes,
+            "data_limit_mb": data_limit_mb,
+            "price": price,
+            "status": "generated",
+            "assigned_to": None,
+            "created_at": _iso_utc_now(),
+            "expires_at": (now + timedelta(days=expires_days)).isoformat() + "Z",
+            "used_at": None,
+        }
+        items.insert(0, entry)
+        created.append(entry)
+
+    _save_cached_list(key, items, max_items=1000)
+    _audit(
+        "hotspot_vouchers_create",
+        entity_type="hotspot_voucher",
+        metadata={"quantity": quantity, "profile": profile, "price": price},
+    )
+    return jsonify({"success": True, "items": created, "count": len(created)}), 201
+
+
+@main_bp.route('/admin/hotspot/vouchers/<string:voucher_id>', methods=['PATCH'])
+@admin_required()
+def admin_hotspot_vouchers_update(voucher_id):
+    tenant_id = current_tenant_id()
+    key = _hotspot_vouchers_key(tenant_id)
+    items = _load_cached_list(key)
+    entry = next((item for item in items if str(item.get("id")) == voucher_id), None)
+    if not entry:
+        return jsonify({"error": "Voucher no encontrado"}), 404
+
+    data = request.get_json() or {}
+    if 'status' in data:
+        status = str(data.get('status') or '').strip().lower()
+        if status not in HOTSPOT_VOUCHER_ALLOWED_STATUS:
+            return jsonify({"error": f"status invalido. permitidos: {', '.join(sorted(HOTSPOT_VOUCHER_ALLOWED_STATUS))}"}), 400
+        entry['status'] = status
+        if status == 'used':
+            entry['used_at'] = entry.get('used_at') or _iso_utc_now()
+    if 'assigned_to' in data:
+        entry['assigned_to'] = str(data.get('assigned_to') or '').strip() or None
+    if 'expires_at' in data:
+        entry['expires_at'] = data.get('expires_at')
+
+    _save_cached_list(key, items, max_items=1000)
+    _audit("hotspot_voucher_update", entity_type="hotspot_voucher", entity_id=voucher_id, metadata={"changes": list(data.keys())})
+    return jsonify({"success": True, "voucher": entry}), 200
+
+
+def _default_system_settings() -> dict:
+    return {
+        "portal_maintenance_mode": False,
+        "auto_suspend_overdue": True,
+        "notifications_push_enabled": bool(current_app.config.get('WONDERPUSH_ACCESS_TOKEN')),
+        "notifications_email_enabled": bool(current_app.config.get('MAIL_SERVER')),
+        "allow_demo_login": bool(current_app.config.get('ALLOW_DEMO_LOGIN', False)),
+        "allow_self_signup": bool(current_app.config.get('ALLOW_SELF_SIGNUP', False)),
+        "allow_payment_demo": bool(current_app.config.get('ALLOW_PAYMENT_DEMO', False)),
+        "default_ticket_priority": "medium",
+        "backup_retention_days": 14,
+        "metrics_poll_interval_sec": 60,
+    }
+
+
+@main_bp.route('/admin/system/settings', methods=['GET'])
+@admin_required()
+def admin_system_settings_get():
+    tenant_id = current_tenant_id()
+    defaults = _default_system_settings()
+    overrides = _load_cached_dict(_system_settings_key(tenant_id))
+    settings = {**defaults, **overrides}
+
+    routers_query = MikroTikRouter.query
+    tickets_query = Ticket.query.filter(Ticket.status.in_(("open", "in_progress")))
+    if tenant_id is not None:
+        routers_query = routers_query.filter_by(tenant_id=tenant_id)
+        tickets_query = tickets_query.filter_by(tenant_id=tenant_id)
+    routers_down = routers_query.filter_by(is_active=False).count()
+    routers_up = routers_query.filter_by(is_active=True).count()
+
+    jobs = _load_cached_list(_system_jobs_key(tenant_id))[:20]
+    return jsonify(
+        {
+            "settings": settings,
+            "health": {
+                "routers_up": routers_up,
+                "routers_down": routers_down,
+                "tickets_open": tickets_query.count(),
+                "timestamp": _iso_utc_now(),
+            },
+            "jobs": jobs,
+        }
+    ), 200
+
+
+@main_bp.route('/admin/system/settings', methods=['POST'])
+@admin_required()
+def admin_system_settings_update():
+    tenant_id = current_tenant_id()
+    data = request.get_json() or {}
+    incoming = data.get('settings') if isinstance(data.get('settings'), dict) else data
+
+    allowed = {
+        "portal_maintenance_mode": "bool",
+        "auto_suspend_overdue": "bool",
+        "notifications_push_enabled": "bool",
+        "notifications_email_enabled": "bool",
+        "allow_demo_login": "bool",
+        "allow_self_signup": "bool",
+        "allow_payment_demo": "bool",
+        "default_ticket_priority": "str",
+        "backup_retention_days": "int",
+        "metrics_poll_interval_sec": "int",
+    }
+
+    overrides = _load_cached_dict(_system_settings_key(tenant_id))
+    for key_name, key_type in allowed.items():
+        if key_name not in incoming:
+            continue
+        raw_value = incoming.get(key_name)
+        if key_type == "bool":
+            overrides[key_name] = bool(raw_value)
+        elif key_type == "int":
+            overrides[key_name] = int(raw_value)
+        else:
+            overrides[key_name] = str(raw_value)
+
+    _save_cached_dict(_system_settings_key(tenant_id), overrides)
+    settings = {**_default_system_settings(), **overrides}
+    _audit("system_settings_update", entity_type="system_settings", metadata={"changes": list(incoming.keys())})
+    return jsonify({"success": True, "settings": settings}), 200
+
+
+@main_bp.route('/admin/system/jobs/history', methods=['GET'])
+@admin_required()
+def admin_system_jobs_history():
+    tenant_id = current_tenant_id()
+    jobs = _load_cached_list(_system_jobs_key(tenant_id))
+    try:
+        limit = int(request.args.get('limit', 50) or 50)
+    except Exception:
+        limit = 50
+    limit = max(1, min(limit, 200))
+    return jsonify({"items": jobs[:limit], "count": min(len(jobs), limit)}), 200
+
+
+@main_bp.route('/admin/system/jobs/run', methods=['POST'])
+@admin_required()
+def admin_system_jobs_run():
+    tenant_id = current_tenant_id()
+    data = request.get_json() or {}
+    job = (data.get('job') or '').strip().lower()
+    if job not in SYSTEM_ALLOWED_JOBS:
+        return jsonify({"error": f"job debe ser {' | '.join(sorted(SYSTEM_ALLOWED_JOBS))}"}), 400
+
+    entry = {
+        "id": secrets.token_hex(8),
+        "job": job,
+        "status": "started",
+        "requested_by": _current_user_id(),
+        "started_at": _iso_utc_now(),
+    }
+    key = _system_jobs_key(tenant_id)
+    jobs = _load_cached_list(key)
+    jobs.insert(0, entry)
+    _save_cached_list(key, jobs, max_items=200)
+
+    _notify_incident(f"Job administrativo solicitado: {job}", severity="info")
+    _audit("system_job_run", entity_type="system_job", entity_id=entry["id"], metadata=entry)
+    return jsonify({"success": True, "job": entry}), 202
 
 
 # ==================== TICKETS CON SLA ====================
