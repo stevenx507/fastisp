@@ -96,3 +96,21 @@ def test_production_validate_requires_stripe_webhook_secret_when_stripe_enabled(
         ProductionConfig.validate()
 
     assert 'STRIPE_WEBHOOK_SECRET' in str(excinfo.value)
+
+
+def test_production_validate_rejects_empty_backup_dir(monkeypatch):
+    monkeypatch.setenv('SECRET_KEY', 's' * 40)
+    monkeypatch.setenv('JWT_SECRET_KEY', 'j' * 40)
+    monkeypatch.setenv('DATABASE_URL', 'postgresql://ispmax:password@localhost/ispmax')
+    monkeypatch.setenv('REDIS_URL', 'redis://localhost:6379/0')
+    monkeypatch.setenv('ENCRYPTION_KEY', 'itTQ-n1WYoDTC_iw8glZpwkfxAknjNtz85t-6xeUkso=')
+    monkeypatch.setenv('MIKROTIK_DEFAULT_USERNAME', 'admin')
+    monkeypatch.setenv('MIKROTIK_DEFAULT_PASSWORD', 'adminpass')
+    monkeypatch.setenv('CORS_ORIGINS', 'https://app.example.com')
+    monkeypatch.setenv('ALLOW_GOOGLE_LOGIN', 'false')
+    monkeypatch.setenv('BACKUP_DIR', '   ')
+
+    with pytest.raises(ValueError) as excinfo:
+        ProductionConfig.validate()
+
+    assert 'BACKUP_DIR' in str(excinfo.value)

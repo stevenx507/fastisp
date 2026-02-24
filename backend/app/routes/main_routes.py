@@ -61,6 +61,53 @@ def _parse_int(value) -> int | None:
         return None
 
 
+def _backup_dir_path() -> Path:
+    configured = (
+        current_app.config.get('BACKUP_DIR')
+        or os.environ.get('BACKUP_DIR')
+        or '/app/backups'
+    )
+    backup_dir = str(configured).strip() or '/app/backups'
+    return Path(backup_dir).expanduser().resolve()
+
+
+def _ensure_backup_dir() -> Path:
+    base = _backup_dir_path()
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def _is_safe_backup_name(name: str | None) -> bool:
+    candidate = str(name or '').strip()
+    if not candidate:
+        return False
+    # Reject directory traversal and nested paths explicitly.
+    return Path(candidate).name == candidate and '/' not in candidate and '\\' not in candidate
+
+
+def _backup_sha256(file_path: Path) -> str:
+    digest = hashlib.sha256()
+    with file_path.open('rb') as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _backup_item_payload(file_path: Path, include_hash: bool = False) -> dict:
+    stat_info = file_path.stat()
+    payload = {
+        "name": file_path.name,
+        "size": stat_info.st_size,
+        "modified": datetime.utcfromtimestamp(stat_info.st_mtime).isoformat(),
+    }
+    if include_hash:
+        payload["sha256"] = _backup_sha256(file_path)
+    return payload
+
+
 def _parse_stripe_signature_header(signature_header: str) -> tuple[int | None, list[str]]:
     timestamp = None
     signatures: list[str] = []
@@ -135,6 +182,8 @@ def _extract_webhook_payment_context(event: dict) -> dict:
         "event_id": str(event_id or "").strip() or None,
         "candidate_references": candidate_references,
     }
+
+
 def _get_plan_for_request(data, tenant_id):
     plan = None
     if data.get('plan_id'):
@@ -2428,42 +2477,105 @@ def backup_router(router_id):
 @main_bp.route('/admin/backups/db', methods=['POST'])
 @admin_required()
 def backup_db():
-    """Ejecuta pg_dump y guarda en /app/backups."""
-    os.makedirs('/app/backups', exist_ok=True)
+    """Ejecuta pg_dump y guarda en el directorio configurado."""
+    base = _ensure_backup_dir()
     ts = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
-    fname = f"/app/backups/db-backup-{ts}.sql"
-    env = os.environ.copy()
+    backup_name = f"db-backup-{ts}.sql"
+    file_path = base / backup_name
+    database_url = (
+        current_app.config.get('SQLALCHEMY_DATABASE_URI')
+        or os.environ.get('DATABASE_URL')
+    )
+    if not database_url or not str(database_url).startswith('postgres'):
+        return jsonify({"error": "Backup DB requiere SQLALCHEMY_DATABASE_URI Postgres"}), 503
+
+    pg_dump_path = current_app.config.get('PG_DUMP_PATH', 'pg_dump')
     try:
-        cmd = ["pg_dump", env['DATABASE_URL']]
-        with open(fname, 'w') as f:
+        cmd = [pg_dump_path, database_url]
+        with file_path.open('w', encoding='utf-8') as f:
             subprocess.check_call(cmd, stdout=f)
-        return jsonify({"success": True, "filename": fname}), 200
+        return jsonify({"success": True, "filename": backup_name}), 200
     except Exception as e:
+        current_app.logger.error("No se pudo generar backup DB: %s", e, exc_info=True)
         return jsonify({"error": f"No se pudo generar backup DB: {e}"}), 500
 
 
 @main_bp.route('/admin/backups/list', methods=['GET'])
 @admin_required()
 def list_backups():
-    base = Path('/app/backups')
+    base = _backup_dir_path()
     files = []
     if base.exists():
-        for f in sorted(base.glob('*'), reverse=True):
-            files.append({"name": f.name, "size": f.stat().st_size, "modified": datetime.utcfromtimestamp(f.stat().st_mtime).isoformat()})
-    return jsonify({"items": files, "count": len(files)}), 200
+        for file_path in sorted(
+            (item for item in base.iterdir() if item.is_file()),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        ):
+            files.append(_backup_item_payload(file_path))
+    return jsonify({"items": files, "count": len(files), "directory": str(base)}), 200
 
 
 @main_bp.route('/admin/backups/download', methods=['GET'])
 @admin_required()
 def download_backup():
     name = request.args.get('name')
-    if not name:
+    if not _is_safe_backup_name(name):
         return jsonify({"error": "name requerido"}), 400
-    base = Path('/app/backups')
-    file_path = base / name
-    if not file_path.exists():
+    base = _backup_dir_path()
+    if not base.exists():
         return jsonify({"error": "backup no encontrado"}), 404
-    return send_from_directory(directory=str(base), path=name, as_attachment=True)
+
+    file_path = (base / name).resolve()
+    if file_path.parent != base or not file_path.exists() or not file_path.is_file() or file_path.is_symlink():
+        return jsonify({"error": "backup no encontrado"}), 404
+    return send_from_directory(directory=str(base), path=file_path.name, as_attachment=True)
+
+
+@main_bp.route('/admin/backups/verify', methods=['GET'])
+@admin_required()
+def verify_backups():
+    base = _backup_dir_path()
+    requested_name = (request.args.get('name') or '').strip()
+    if requested_name and not _is_safe_backup_name(requested_name):
+        return jsonify({"error": "name invalido"}), 400
+
+    if not base.exists():
+        if requested_name:
+            return jsonify({"error": "backup no encontrado"}), 404
+        return jsonify({"valid": True, "count": 0, "items": []}), 200
+
+    if requested_name:
+        target = (base / requested_name).resolve()
+        if target.parent != base or not target.exists() or not target.is_file() or target.is_symlink():
+            return jsonify({"error": "backup no encontrado"}), 404
+        targets = [target]
+    else:
+        targets = sorted(
+            (item for item in base.iterdir() if item.is_file() and not item.is_symlink()),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+
+    items = []
+    all_valid = True
+    for file_path in targets:
+        try:
+            payload = _backup_item_payload(file_path, include_hash=True)
+            issues = []
+            if payload["size"] <= 0:
+                issues.append("empty_file")
+            payload["valid"] = len(issues) == 0
+            payload["issues"] = issues
+        except Exception as exc:
+            payload = {
+                "name": file_path.name,
+                "valid": False,
+                "issues": [f"read_error:{exc}"],
+            }
+        items.append(payload)
+        all_valid = all_valid and bool(payload.get("valid"))
+
+    return jsonify({"valid": all_valid, "count": len(items), "items": items}), 200
 
 
 # ==================== ADMIN: STAFF / INVENTORY / NOTIFICATIONS ====================

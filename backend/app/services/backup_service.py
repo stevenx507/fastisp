@@ -13,7 +13,7 @@ from app.services.olt_script_service import OLTScriptService
 
 def run_backups() -> Dict[str, Any]:
     results: Dict[str, Any] = {"pg_dump": None, "mikrotik": [], "olt": []}
-    backup_dir = os.environ.get('BACKUP_DIR', '/app/backups')
+    backup_dir = current_app.config.get('BACKUP_DIR') or os.environ.get('BACKUP_DIR', '/app/backups')
     os.makedirs(backup_dir, exist_ok=True)
 
     # DB backup

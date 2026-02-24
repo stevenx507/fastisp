@@ -73,6 +73,7 @@ class Config:
 
     # Backups
     PG_DUMP_PATH = os.environ.get('PG_DUMP_PATH', 'pg_dump')
+    BACKUP_DIR = os.environ.get('BACKUP_DIR', '/app/backups')
     BACKUP_BUCKET = os.environ.get('BACKUP_BUCKET')  # optional external storage
 
     # Email
@@ -183,6 +184,9 @@ class ProductionConfig(Config):
             raise ValueError(
                 "STRIPE_WEBHOOK_SECRET must be set when STRIPE_SECRET_KEY is configured in production."
             )
+
+        if not str(os.environ.get('BACKUP_DIR', '/app/backups')).strip():
+            raise ValueError("BACKUP_DIR cannot be empty in production.")
 
         weak_keys = [
             key
