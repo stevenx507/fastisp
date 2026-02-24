@@ -8,7 +8,6 @@ interface SystemSettingsPayload {
   auto_suspend_overdue: boolean
   notifications_push_enabled: boolean
   notifications_email_enabled: boolean
-  allow_demo_login: boolean
   allow_self_signup: boolean
   default_ticket_priority: string
   backup_retention_days: number
@@ -160,7 +159,6 @@ const SystemSettings: React.FC = () => {
                   ['auto_suspend_overdue', 'Suspension automatica por mora'],
                   ['notifications_push_enabled', 'Notificaciones push'],
                   ['notifications_email_enabled', 'Notificaciones email'],
-                  ['allow_demo_login', 'Permitir login demo'],
                   ['allow_self_signup', 'Permitir autorregistro'],
                 ].map(([keyName, label]) => (
                   <label key={keyName} className="flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2 text-sm">

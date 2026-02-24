@@ -98,7 +98,6 @@ def _get_user_invoice_items(user: User, tenant_id) -> list[dict]:
     ]
 
 
-DEMO_USERS = {"demo1@ispmax.com", "demo2@ispmax.com"}
 STAFF_ALLOWED_ROLES = {"admin", "tech", "support", "billing", "noc", "operator"}
 STAFF_ALLOWED_STATUS = {"active", "on_leave", "inactive"}
 STAFF_ALLOWED_SHIFTS = {"day", "night", "mixed"}
@@ -647,11 +646,6 @@ def login():
     data = request.get_json()
     if not data or not data.get('email') or not data.get('password'):
         return jsonify({"error": "Email y contrasena son requeridos."}), 400
-
-    if not current_app.config.get('ALLOW_DEMO_LOGIN', False):
-        email = str(data.get('email') or '').strip().lower()
-        if email in DEMO_USERS:
-            return jsonify({"error": "Las credenciales demo estan deshabilitadas en este entorno."}), 403
 
     tenant_id = current_tenant_id()
     query = User.query.filter_by(email=data.get('email'))
@@ -3410,7 +3404,6 @@ def _default_system_settings() -> dict:
         "auto_suspend_overdue": True,
         "notifications_push_enabled": bool(current_app.config.get('WONDERPUSH_ACCESS_TOKEN')),
         "notifications_email_enabled": bool(current_app.config.get('MAIL_SERVER')),
-        "allow_demo_login": bool(current_app.config.get('ALLOW_DEMO_LOGIN', False)),
         "allow_self_signup": bool(current_app.config.get('ALLOW_SELF_SIGNUP', False)),
         "default_ticket_priority": "medium",
         "backup_retention_days": 14,
@@ -3461,7 +3454,6 @@ def admin_system_settings_update():
         "auto_suspend_overdue": "bool",
         "notifications_push_enabled": "bool",
         "notifications_email_enabled": "bool",
-        "allow_demo_login": "bool",
         "allow_self_signup": "bool",
         "default_ticket_priority": "str",
         "backup_retention_days": "int",
