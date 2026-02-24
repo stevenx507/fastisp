@@ -179,6 +179,11 @@ class ProductionConfig(Config):
                 "GOOGLE_CLIENT_ID must be set when ALLOW_GOOGLE_LOGIN=true in production."
             )
 
+        if os.environ.get('STRIPE_SECRET_KEY') and not os.environ.get('STRIPE_WEBHOOK_SECRET'):
+            raise ValueError(
+                "STRIPE_WEBHOOK_SECRET must be set when STRIPE_SECRET_KEY is configured in production."
+            )
+
         weak_keys = [
             key
             for key in ('SECRET_KEY', 'JWT_SECRET_KEY')
