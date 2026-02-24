@@ -27,6 +27,7 @@ services:
       - CACHE_REDIS_URL=
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
       - ALLOW_INSECURE_GOOGLE_LOGIN=${ALLOW_INSECURE_GOOGLE_LOGIN:-false}
+      - ALLOW_OLT_DEMO=${ALLOW_OLT_DEMO:-false}
     command: ["/bin/sh","-c","CACHE_TYPE=SimpleCache CACHE_REDIS_URL= gunicorn --bind 0.0.0.0:5000 --workers 2 wsgi:app"]
     depends_on:
       - postgres

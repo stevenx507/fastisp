@@ -1,7 +1,7 @@
 """
 OLT enterprise API endpoints (ZTE, Huawei, VSOL)
 """
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, current_app
 from flask_jwt_extended import get_jwt_identity
 
 from app.models import User, AuditLog
@@ -69,6 +69,20 @@ def _audit(action: str, entity_type: str = None, entity_id: str = None, metadata
     except Exception:
         # avoid breaking flow because of audit failure
         pass
+
+
+def _demo_mode_response(feature: str):
+    if current_app.config.get("ALLOW_OLT_DEMO", False):
+        return None
+    return (
+        jsonify(
+            {
+                "success": False,
+                "error": f"{feature} requires real OLT integration (demo mode disabled).",
+            }
+        ),
+        501,
+    )
 
 
 @olt_bp.route("/vendors", methods=["GET"])
@@ -215,6 +229,9 @@ def autofind_onu(device_id):
     """
     Simula descubrimiento de ONU para aprobación.
     """
+    guard = _demo_mode_response("autofind_onu")
+    if guard:
+        return guard
     sample = [
         {"serial": "ZTEG00000001", "vendor": "zte", "signal": -18.2, "rx_power": -19.5},
         {"serial": "48575443ABCDEF01", "vendor": "huawei", "signal": -20.0, "rx_power": -21.3},
@@ -227,6 +244,9 @@ def autofind_onu(device_id):
 @olt_bp.route("/devices/<device_id>/authorize-onu", methods=["POST"])
 @admin_required()
 def authorize_onu(device_id):
+    guard = _demo_mode_response("authorize_onu")
+    if guard:
+        return guard
     data = request.get_json() or {}
     serial = str(data.get("serial") or "").strip()
     vlan = int(data.get("vlan") or 120)
@@ -240,6 +260,9 @@ def authorize_onu(device_id):
 @olt_bp.route("/devices/<device_id>/pon-power", methods=["GET"])
 @admin_required()
 def pon_power(device_id):
+    guard = _demo_mode_response("pon_power")
+    if guard:
+        return guard
     """Monitorea potencia óptica por ONU (demo)."""
     sample = [
         {"serial": "ZTEG00000001", "rx_dbm": -19.2, "olt_port": "1/1/1", "status": "ok"},
@@ -253,6 +276,9 @@ def pon_power(device_id):
 @olt_bp.route("/devices/<device_id>/onu/suspend", methods=["POST"])
 @admin_required()
 def suspend_onu(device_id):
+    guard = _demo_mode_response("suspend_onu")
+    if guard:
+        return guard
     data = request.get_json() or {}
     serial = str(data.get("serial") or "").strip()
     if not serial:
@@ -264,6 +290,9 @@ def suspend_onu(device_id):
 @olt_bp.route("/devices/<device_id>/onu/activate", methods=["POST"])
 @admin_required()
 def activate_onu(device_id):
+    guard = _demo_mode_response("activate_onu")
+    if guard:
+        return guard
     data = request.get_json() or {}
     serial = str(data.get("serial") or "").strip()
     if not serial:
@@ -275,6 +304,9 @@ def activate_onu(device_id):
 @olt_bp.route("/devices/<device_id>/onu/reboot", methods=["POST"])
 @admin_required()
 def reboot_onu(device_id):
+    guard = _demo_mode_response("reboot_onu")
+    if guard:
+        return guard
     data = request.get_json() or {}
     serial = str(data.get("serial") or "").strip()
     if not serial:
@@ -286,6 +318,9 @@ def reboot_onu(device_id):
 @olt_bp.route("/devices/<device_id>/tr069/reprovision", methods=["POST"])
 @admin_required()
 def tr069_reprovision(device_id):
+    guard = _demo_mode_response("tr069_reprovision")
+    if guard:
+        return guard
     data = request.get_json() or {}
     host = data.get("host") or "acs.demo.local"
     ssid = data.get("ssid") or "ISPFAST_WIFI"
@@ -317,6 +352,9 @@ def tr064_test():
     """
     Prueba de conectividad TR-064/ACS (demo). En produccion se debe reemplazar por llamado real.
     """
+    guard = _demo_mode_response("tr064_test")
+    if guard:
+        return guard
     data = request.get_json() or {}
     host = str(data.get("host", "")).strip()
     if not host:
