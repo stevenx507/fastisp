@@ -89,6 +89,83 @@ def _get_user_invoice_items(user: User, tenant_id) -> list[dict]:
 CLIENT_TICKETS: list[dict] = []
 
 DEMO_USERS = {"demo1@ispmax.com", "demo2@ispmax.com"}
+STAFF_ALLOWED_ROLES = {"admin", "tech", "support", "billing", "noc", "operator"}
+STAFF_ALLOWED_STATUS = {"active", "on_leave", "inactive"}
+STAFF_ALLOWED_SHIFTS = {"day", "night", "mixed"}
+
+
+def _tenant_cache_key(prefix: str, tenant_id) -> str:
+    scoped = tenant_id if tenant_id is not None else "global"
+    return f"{prefix}:{scoped}"
+
+
+def _staff_meta_key(tenant_id) -> str:
+    return _tenant_cache_key("admin_staff_meta", tenant_id)
+
+
+def _notifications_history_key(tenant_id) -> str:
+    return _tenant_cache_key("admin_notifications_history", tenant_id)
+
+
+def _load_staff_meta(tenant_id) -> dict:
+    return cache.get(_staff_meta_key(tenant_id)) or {}
+
+
+def _save_staff_meta(tenant_id, metadata: dict) -> None:
+    cache.set(_staff_meta_key(tenant_id), metadata, timeout=86400 * 30)
+
+
+def _load_notification_history(tenant_id) -> list[dict]:
+    return cache.get(_notifications_history_key(tenant_id)) or []
+
+
+def _save_notification_history(tenant_id, history: list[dict]) -> None:
+    cache.set(_notifications_history_key(tenant_id), history[:200], timeout=86400 * 30)
+
+
+def _iso_utc_now() -> str:
+    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+
+def _ticket_assignee_counts(tenant_id) -> dict[str, int]:
+    query = Ticket.query.filter(Ticket.status.in_(("open", "in_progress")))
+    if tenant_id is not None:
+        query = query.filter_by(tenant_id=tenant_id)
+    counts: dict[str, int] = {}
+    for ticket in query.all():
+        assigned = (ticket.assigned_to or "").strip().lower()
+        if not assigned:
+            continue
+        counts[assigned] = counts.get(assigned, 0) + 1
+    return counts
+
+
+def _serialize_staff_member(user: User, metadata: dict, assigned_counts: dict[str, int]) -> dict:
+    zone = str(metadata.get("zone") or "general")
+    status = str(metadata.get("status") or "active")
+    shift = str(metadata.get("shift") or "day")
+    phone = str(metadata.get("phone") or "")
+    last_seen = metadata.get("last_seen_at") or (user.created_at.isoformat() if user.created_at else None)
+    email_key = (user.email or "").strip().lower()
+    name_key = (user.name or "").strip().lower()
+    open_tickets = assigned_counts.get(email_key, 0)
+    if name_key and name_key != email_key:
+        open_tickets += assigned_counts.get(name_key, 0)
+    return {
+        "id": user.id,
+        "name": user.name,
+        "email": user.email,
+        "role": user.role,
+        "mfa_enabled": bool(user.mfa_enabled),
+        "zone": zone,
+        "status": status if status in STAFF_ALLOWED_STATUS else "active",
+        "shift": shift if shift in STAFF_ALLOWED_SHIFTS else "day",
+        "phone": phone,
+        "open_tickets": open_tickets,
+        "last_seen_at": last_seen,
+        "created_at": user.created_at.isoformat() if user.created_at else None,
+    }
+
 
 def _audit(action: str, entity_type: str = None, entity_id: str = None, metadata=None):
     try:
@@ -1293,6 +1370,29 @@ def ticket_add_comment(ticket_id):
     return jsonify({"comment": comment.to_dict(), "success": True}), 201
 
 
+@main_bp.route('/tickets/<int:ticket_id>/comments', methods=['GET'])
+@jwt_required()
+def ticket_list_comments(ticket_id):
+    ticket = Ticket.query.get_or_404(ticket_id)
+    tenant_id = current_tenant_id()
+    if tenant_id is not None and ticket.tenant_id not in (None, tenant_id):
+        return jsonify({"error": "Acceso denegado para este tenant."}), 403
+
+    current_user_id = _current_user_id()
+    user = User.query.get(current_user_id) if current_user_id else None
+    if user and user.role != 'admin' and ticket.user_id not in (None, current_user_id):
+        return jsonify({"error": "No tienes permiso para ver los comentarios de este ticket."}), 403
+
+    comments = (
+        TicketComment.query
+        .filter_by(ticket_id=ticket_id)
+        .order_by(TicketComment.created_at.desc())
+        .limit(100)
+        .all()
+    )
+    return jsonify({"items": [c.to_dict() for c in comments], "count": len(comments)}), 200
+
+
 @main_bp.route('/client/notifications/preferences', methods=['GET', 'POST'])
 @jwt_required()
 def client_notification_preferences():
@@ -1848,6 +1948,352 @@ def download_backup():
     if not file_path.exists():
         return jsonify({"error": "backup no encontrado"}), 404
     return send_from_directory(directory=str(base), path=name, as_attachment=True)
+
+
+# ==================== ADMIN: STAFF / INVENTORY / NOTIFICATIONS ====================
+
+@main_bp.route('/admin/staff', methods=['GET'])
+@admin_required()
+def admin_staff_list():
+    tenant_id = current_tenant_id()
+    query = User.query.filter(User.role != 'client')
+    if tenant_id is not None:
+        query = query.filter_by(tenant_id=tenant_id)
+    users = query.order_by(User.name.asc()).all()
+
+    metadata_map = _load_staff_meta(tenant_id)
+    assigned_counts = _ticket_assignee_counts(tenant_id)
+
+    items = []
+    for user in users:
+        meta = metadata_map.get(str(user.id), {})
+        items.append(_serialize_staff_member(user, meta, assigned_counts))
+
+    role_filter = (request.args.get('role') or '').strip().lower()
+    status_filter = (request.args.get('status') or '').strip().lower()
+    search = (request.args.get('q') or '').strip().lower()
+
+    if role_filter:
+        items = [item for item in items if str(item.get("role", "")).lower() == role_filter]
+    if status_filter:
+        items = [item for item in items if str(item.get("status", "")).lower() == status_filter]
+    if search:
+        items = [
+            item for item in items
+            if search in str(item.get("name", "")).lower()
+            or search in str(item.get("email", "")).lower()
+            or search in str(item.get("zone", "")).lower()
+        ]
+
+    _audit("staff_list", entity_type="staff", metadata={"count": len(items), "tenant_id": tenant_id})
+    return jsonify({"items": items, "count": len(items)}), 200
+
+
+@main_bp.route('/admin/staff', methods=['POST'])
+@admin_required()
+def admin_staff_create():
+    tenant_id = current_tenant_id()
+    data = request.get_json() or {}
+    name = (data.get('name') or '').strip()
+    email = (data.get('email') or '').strip().lower()
+    role = (data.get('role') or 'tech').strip().lower()
+
+    if not name or not email:
+        return jsonify({"error": "name y email son requeridos"}), 400
+    if role not in STAFF_ALLOWED_ROLES:
+        return jsonify({"error": f"role invalido. permitidos: {', '.join(sorted(STAFF_ALLOWED_ROLES))}"}), 400
+    if User.query.filter_by(email=email).first():
+        return jsonify({"error": "Ya existe un usuario con ese email"}), 409
+
+    supplied_password = (data.get('password') or '').strip()
+    temporary_password = supplied_password or secrets.token_urlsafe(10)
+
+    user = User(
+        name=name,
+        email=email,
+        role=role,
+        tenant_id=tenant_id,
+        mfa_enabled=bool(data.get('mfa_enabled', False)),
+    )
+    if user.mfa_enabled:
+        user.mfa_secret = pyotp.random_base32()
+    user.set_password(temporary_password)
+
+    db.session.add(user)
+    db.session.commit()
+
+    status = str(data.get('status') or 'active').strip().lower()
+    shift = str(data.get('shift') or 'day').strip().lower()
+    metadata_map = _load_staff_meta(tenant_id)
+    metadata_map[str(user.id)] = {
+        "zone": str(data.get('zone') or 'general').strip() or 'general',
+        "phone": str(data.get('phone') or '').strip(),
+        "status": status if status in STAFF_ALLOWED_STATUS else "active",
+        "shift": shift if shift in STAFF_ALLOWED_SHIFTS else "day",
+        "last_seen_at": _iso_utc_now(),
+    }
+    _save_staff_meta(tenant_id, metadata_map)
+
+    item = _serialize_staff_member(user, metadata_map[str(user.id)], {})
+    response = {"staff": item, "success": True}
+    if not supplied_password:
+        response["temporary_password"] = temporary_password
+    _audit("staff_create", entity_type="staff", entity_id=user.id, metadata={"email": user.email, "role": user.role})
+    return jsonify(response), 201
+
+
+@main_bp.route('/admin/staff/<int:staff_id>', methods=['PATCH'])
+@admin_required()
+def admin_staff_update(staff_id):
+    tenant_id = current_tenant_id()
+    user = User.query.get_or_404(staff_id)
+    if tenant_id is not None and user.tenant_id not in (None, tenant_id):
+        return jsonify({"error": "Acceso denegado para este tenant."}), 403
+
+    data = request.get_json() or {}
+    if 'name' in data:
+        name = str(data.get('name') or '').strip()
+        if not name:
+            return jsonify({"error": "name no puede estar vacio"}), 400
+        user.name = name
+
+    if 'role' in data:
+        role = str(data.get('role') or '').strip().lower()
+        if role not in STAFF_ALLOWED_ROLES:
+            return jsonify({"error": f"role invalido. permitidos: {', '.join(sorted(STAFF_ALLOWED_ROLES))}"}), 400
+        user.role = role
+
+    if 'mfa_enabled' in data:
+        mfa_enabled = bool(data.get('mfa_enabled'))
+        user.mfa_enabled = mfa_enabled
+        if mfa_enabled and not user.mfa_secret:
+            user.mfa_secret = pyotp.random_base32()
+        if not mfa_enabled:
+            user.mfa_secret = None
+
+    if data.get('password'):
+        user.set_password(str(data.get('password')))
+
+    metadata_map = _load_staff_meta(tenant_id)
+    current_meta = metadata_map.get(str(user.id), {})
+    if 'zone' in data:
+        current_meta['zone'] = str(data.get('zone') or '').strip() or 'general'
+    if 'phone' in data:
+        current_meta['phone'] = str(data.get('phone') or '').strip()
+    if 'status' in data:
+        status = str(data.get('status') or '').strip().lower()
+        if status not in STAFF_ALLOWED_STATUS:
+            return jsonify({"error": f"status invalido. permitidos: {', '.join(sorted(STAFF_ALLOWED_STATUS))}"}), 400
+        current_meta['status'] = status
+    if 'shift' in data:
+        shift = str(data.get('shift') or '').strip().lower()
+        if shift not in STAFF_ALLOWED_SHIFTS:
+            return jsonify({"error": f"shift invalido. permitidos: {', '.join(sorted(STAFF_ALLOWED_SHIFTS))}"}), 400
+        current_meta['shift'] = shift
+    if data.get('touch_last_seen'):
+        current_meta['last_seen_at'] = _iso_utc_now()
+
+    metadata_map[str(user.id)] = current_meta
+    _save_staff_meta(tenant_id, metadata_map)
+
+    db.session.add(user)
+    db.session.commit()
+
+    item = _serialize_staff_member(user, current_meta, _ticket_assignee_counts(tenant_id))
+    _audit("staff_update", entity_type="staff", entity_id=user.id, metadata={"changes": list(data.keys())})
+    return jsonify({"staff": item, "success": True}), 200
+
+
+@main_bp.route('/admin/inventory/summary', methods=['GET'])
+@admin_required()
+def admin_inventory_summary():
+    tenant_id = current_tenant_id()
+
+    clients_query = Client.query.options(joinedload(Client.plan))
+    routers_query = MikroTikRouter.query
+    if tenant_id is not None:
+        clients_query = clients_query.filter_by(tenant_id=tenant_id)
+        routers_query = routers_query.filter_by(tenant_id=tenant_id)
+
+    clients = clients_query.all()
+    routers_count = routers_query.count()
+    clients_count = len(clients)
+
+    defaults = [
+        {
+            "sku": "ONU-GPON",
+            "name": "ONU GPON",
+            "category": "onu",
+            "total": max(30, clients_count + 20),
+            "assigned": clients_count,
+            "reorder_point": 15,
+            "unit": "units",
+        },
+        {
+            "sku": "CPE-DUAL",
+            "name": "Router CPE Dual Band",
+            "category": "cpe",
+            "total": max(40, clients_count + 35),
+            "assigned": clients_count,
+            "reorder_point": 20,
+            "unit": "units",
+        },
+        {
+            "sku": "ROUTER-CORE",
+            "name": "MikroTik Core Router",
+            "category": "router",
+            "total": max(8, routers_count + 3),
+            "assigned": routers_count,
+            "reorder_point": 3,
+            "unit": "units",
+        },
+        {
+            "sku": "FIBER-SM",
+            "name": "Fibra Monomodo",
+            "category": "fiber",
+            "total": max(80.0, round(clients_count * 0.11 + 40.0, 1)),
+            "assigned": round(clients_count * 0.065, 1),
+            "reorder_point": 25.0,
+            "unit": "km",
+        },
+    ]
+
+    items = []
+    alerts = []
+    for raw in defaults:
+        available = round(max(0, raw["total"] - raw["assigned"]), 1 if raw["unit"] == "km" else 0)
+        if available <= raw["reorder_point"] * 0.5:
+            level = "critical"
+        elif available <= raw["reorder_point"]:
+            level = "warning"
+        else:
+            level = "ok"
+        item = {
+            **raw,
+            "available": available,
+            "status": level,
+            "updated_at": _iso_utc_now(),
+        }
+        items.append(item)
+        if level != "ok":
+            alerts.append({
+                "sku": raw["sku"],
+                "name": raw["name"],
+                "level": level,
+                "available": available,
+                "reorder_point": raw["reorder_point"],
+            })
+
+    plan_distribution_map: dict[str, int] = {}
+    for client in clients:
+        plan_name = client.plan.name if client.plan else "Sin plan"
+        plan_distribution_map[plan_name] = plan_distribution_map.get(plan_name, 0) + 1
+    plan_distribution = [
+        {"plan": plan, "clients": count}
+        for plan, count in sorted(plan_distribution_map.items(), key=lambda item: item[1], reverse=True)[:8]
+    ]
+
+    summary = {
+        "clients_total": clients_count,
+        "routers_total": routers_count,
+        "stock_items": len(items),
+        "low_stock_items": len(alerts),
+        "available_units": round(sum(float(item["available"]) for item in items), 1),
+        "updated_at": _iso_utc_now(),
+    }
+    _audit("inventory_summary", entity_type="inventory", metadata=summary)
+    return jsonify({
+        "summary": summary,
+        "items": items,
+        "alerts": alerts,
+        "plan_distribution": plan_distribution,
+    }), 200
+
+
+@main_bp.route('/admin/notifications/history', methods=['GET'])
+@admin_required()
+def admin_notifications_history():
+    tenant_id = current_tenant_id()
+    try:
+        limit = int(request.args.get('limit', 50) or 50)
+    except Exception:
+        limit = 50
+    limit = max(1, min(limit, 200))
+    history = _load_notification_history(tenant_id)
+    return jsonify({"items": history[:limit], "count": min(len(history), limit)}), 200
+
+
+@main_bp.route('/admin/notifications/send', methods=['POST'])
+@admin_required()
+def admin_notifications_send():
+    tenant_id = current_tenant_id()
+    data = request.get_json() or {}
+    title = (data.get('title') or '').strip()
+    message = (data.get('message') or '').strip()
+    if not title or not message:
+        return jsonify({"error": "title y message son requeridos"}), 400
+
+    channel = (data.get('channel') or 'push').strip().lower()
+    if channel not in {'push', 'email', 'whatsapp', 'system'}:
+        return jsonify({"error": "channel invalido: push | email | whatsapp | system"}), 400
+
+    audience = (data.get('audience') or 'all').strip().lower()
+    if audience not in {'all', 'active', 'overdue', 'suspended'}:
+        return jsonify({"error": "audience invalido: all | active | overdue | suspended"}), 400
+
+    router_id_raw = data.get('router_id')
+    router_id = None
+    if router_id_raw not in (None, ''):
+        try:
+            router_id = int(router_id_raw)
+        except Exception:
+            return jsonify({"error": "router_id debe ser numerico"}), 400
+    plan_name = (data.get('plan') or '').strip().lower()
+
+    clients_query = Client.query.options(joinedload(Client.plan), joinedload(Client.subscriptions))
+    if tenant_id is not None:
+        clients_query = clients_query.filter_by(tenant_id=tenant_id)
+    if router_id:
+        clients_query = clients_query.filter_by(router_id=router_id)
+
+    selected_clients = []
+    for client in clients_query.all():
+        if plan_name:
+            client_plan = (client.plan.name if client.plan else "").strip().lower()
+            if client_plan != plan_name:
+                continue
+        status = "active"
+        if client.subscriptions:
+            status = (client.subscriptions[0].status or "active").strip().lower()
+        if audience == 'active' and status not in {'active', 'trial'}:
+            continue
+        if audience == 'overdue' and status != 'past_due':
+            continue
+        if audience == 'suspended' and status != 'suspended':
+            continue
+        selected_clients.append(client)
+
+    entry = {
+        "id": secrets.token_hex(8),
+        "title": title,
+        "message": message,
+        "channel": channel,
+        "audience": audience,
+        "plan": plan_name or None,
+        "router_id": router_id,
+        "target_count": len(selected_clients),
+        "status": "sent",
+        "created_by": _current_user_id(),
+        "sent_at": _iso_utc_now(),
+    }
+
+    history = _load_notification_history(tenant_id)
+    history.insert(0, entry)
+    _save_notification_history(tenant_id, history)
+    _notify_incident(f"Notificacion masiva ({channel}) enviada: {title} -> {len(selected_clients)} destinos", severity="info")
+    _audit("notification_send", entity_type="notification", entity_id=entry["id"], metadata=entry)
+
+    return jsonify({"success": True, "notification": entry}), 201
 
 
 # ==================== TICKETS CON SLA ====================
