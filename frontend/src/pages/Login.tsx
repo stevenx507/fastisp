@@ -194,13 +194,14 @@ const LoginForm: React.FC = () => {
 
 const Login: React.FC = () => {
   const navigate = useNavigate()
-  const { isAuthenticated } = useAuthStore()
+  const { isAuthenticated, user } = useAuthStore()
 
   useEffect(() => {
     if (isAuthenticated) {
-      navigate('/dashboard')
+      const nextPath = user?.role === 'platform_admin' ? '/platform' : user?.role === 'admin' ? '/admin' : '/dashboard'
+      navigate(nextPath)
     }
-  }, [isAuthenticated, navigate])
+  }, [isAuthenticated, navigate, user?.role])
 
   return (
     <div className="min-h-screen relative overflow-hidden bg-gradient-to-br from-slate-900 via-slate-900 to-slate-950 text-white">

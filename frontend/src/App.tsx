@@ -9,28 +9,31 @@ import TechApp from './pages/TechApp'
 import ClientUsage from './pages/ClientUsage'
 import ClientSupport from './pages/ClientSupport'
 import ClientProfile from './pages/ClientProfile'
+import PlatformAdmin from './pages/PlatformAdmin'
 import { useAuthStore } from './store/authStore'
 import ProtectedRoute from './components/ProtectedRoute'
 
 
 function App() {
-  const { isAuthenticated } = useAuthStore()
+  const { isAuthenticated, user } = useAuthStore()
+  const authHome = user?.role === 'platform_admin' ? '/platform' : user?.role === 'admin' ? '/admin' : '/dashboard'
 
   return (
     <ThemeProvider>
         <div className="app-shell min-h-screen">
           <Toaster position="top-right" />
           <Routes>
-            <Route path="/" element={<Navigate to={isAuthenticated ? "/dashboard" : "/login"} />} />
+            <Route path="/" element={<Navigate to={isAuthenticated ? authHome : "/login"} />} />
             <Route path="/login" element={<Login />} />
-            <Route path="/dashboard" element={<ProtectedRoute><ClientDashboard /></ProtectedRoute>} />
-            <Route path="/dashboard/billing" element={<ProtectedRoute><BillingPortal /></ProtectedRoute>} />
-            <Route path="/dashboard/usage" element={<ProtectedRoute><ClientUsage /></ProtectedRoute>} />
-            <Route path="/dashboard/support" element={<ProtectedRoute><ClientSupport /></ProtectedRoute>} />
-            <Route path="/dashboard/profile" element={<ProtectedRoute><ClientProfile /></ProtectedRoute>} />
+            <Route path="/dashboard" element={<ProtectedRoute allowedRoles={['client']}><ClientDashboard /></ProtectedRoute>} />
+            <Route path="/dashboard/billing" element={<ProtectedRoute allowedRoles={['client']}><BillingPortal /></ProtectedRoute>} />
+            <Route path="/dashboard/usage" element={<ProtectedRoute allowedRoles={['client']}><ClientUsage /></ProtectedRoute>} />
+            <Route path="/dashboard/support" element={<ProtectedRoute allowedRoles={['client']}><ClientSupport /></ProtectedRoute>} />
+            <Route path="/dashboard/profile" element={<ProtectedRoute allowedRoles={['client']}><ClientProfile /></ProtectedRoute>} />
             <Route path="/tech" element={<ProtectedRoute><TechApp /></ProtectedRoute>} />
-            <Route path="/admin" element={<ProtectedRoute adminOnly><AdminPanel /></ProtectedRoute>} />
-            <Route path="*" element={<Navigate to={isAuthenticated ? "/dashboard" : "/login"} />} />
+            <Route path="/admin" element={<ProtectedRoute allowedRoles={['admin']}><AdminPanel /></ProtectedRoute>} />
+            <Route path="/platform" element={<ProtectedRoute allowedRoles={['platform_admin']}><PlatformAdmin /></ProtectedRoute>} />
+            <Route path="*" element={<Navigate to={isAuthenticated ? authHome : "/login"} />} />
           </Routes>
         </div>
     </ThemeProvider>
