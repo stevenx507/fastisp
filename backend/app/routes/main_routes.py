@@ -138,7 +138,7 @@ def _extract_webhook_payment_context(event: dict) -> dict:
 def _get_plan_for_request(data, tenant_id):
     plan = None
     if data.get('plan_id'):
-        plan = Plan.query.get(data['plan_id'])
+        plan = db.session.get(Plan, data['plan_id'])
     elif data.get('plan_name'):
         query = Plan.query.filter_by(name=data['plan_name'])
         if tenant_id is not None:
@@ -384,7 +384,7 @@ def admin_required():
             current_user_id = _current_user_id()
             if current_user_id is None:
                 return jsonify({"error": "Token de usuario invalido."}), 401
-            user = User.query.get(current_user_id)
+            user = db.session.get(User, current_user_id)
             tenant_id = current_tenant_id()
             if not user or user.role != 'admin':
                 return jsonify({"error": "Acceso denegado. Se requiere rol de administrador."}), 403
@@ -405,7 +405,7 @@ def staff_required():
             current_user_id = _current_user_id()
             if current_user_id is None:
                 return jsonify({"error": "Token de usuario invalido."}), 401
-            user = User.query.get(current_user_id)
+            user = db.session.get(User, current_user_id)
             tenant_id = current_tenant_id()
             if not user or user.role not in STAFF_ALLOWED_ROLES:
                 return jsonify({"error": "Acceso denegado. Se requiere rol operativo."}), 403
@@ -700,7 +700,7 @@ def notifications_feed():
     if current_user_id is None:
         return jsonify({"error": "Token de usuario invalido."}), 401
 
-    user = User.query.get(current_user_id)
+    user = db.session.get(User, current_user_id)
     tenant_id = current_tenant_id()
     if not user:
         return jsonify({"error": "Token de usuario invalido."}), 401
@@ -803,11 +803,11 @@ def register():
 def change_plan(client_id):
     """Cambio de plan con prorrateo opcional y nueva factura."""
     user_id = _current_user_id()
-    user = User.query.get(user_id)
+    user = db.session.get(User, user_id)
     if not user or user.role != 'admin':
         return jsonify({"error": "Solo administradores pueden cambiar planes"}), 403
 
-    client = Client.query.get(client_id)
+    client = db.session.get(Client, client_id)
     if not client:
         return jsonify({"error": "Cliente no encontrado"}), 404
     tenant_id = current_tenant_id()
@@ -820,7 +820,7 @@ def change_plan(client_id):
     if not plan_id:
         return jsonify({"error": "plan_id es requerido"}), 400
 
-    new_plan = Plan.query.get(plan_id)
+    new_plan = db.session.get(Plan, plan_id)
     if not new_plan:
         return jsonify({"error": "Plan no encontrado"}), 404
 
@@ -904,7 +904,7 @@ def change_plan(client_id):
 def manual_payment():
     """Registra un pago manual (Yape/Nequi/transferencia) contra una factura."""
     user_id = _current_user_id()
-    user = User.query.get(user_id)
+    user = db.session.get(User, user_id)
     if not user or user.role != 'admin':
         return jsonify({"error": "Solo administradores pueden registrar pagos"}), 403
 
@@ -918,7 +918,7 @@ def manual_payment():
     if not invoice_id or amount is None:
         return jsonify({"error": "invoice_id y amount son requeridos"}), 400
 
-    invoice = Invoice.query.get(invoice_id)
+    invoice = db.session.get(Invoice, invoice_id)
     if not invoice:
         return jsonify({"error": "Factura no encontrada"}), 404
 
@@ -1331,7 +1331,7 @@ def update_subscription(subscription_id):
     db.session.commit()
 
     # Sincronizar estado con router si hay cliente asociado
-    client = sub.client or (Client.query.get(sub.client_id) if sub.client_id else None)
+    client = sub.client or (db.session.get(Client, sub.client_id) if sub.client_id else None)
     if client and client.router_id and sub.status != prev_status:
         with MikroTikService(client.router_id) as mk:
             if sub.status == 'active':
@@ -1357,7 +1357,7 @@ def charge_subscription(subscription_id):
 
     db.session.add(sub)
     db.session.commit()
-    client = sub.client or (Client.query.get(sub.client_id) if sub.client_id else None)
+    client = sub.client or (db.session.get(Client, sub.client_id) if sub.client_id else None)
     if client and client.router_id:
         with MikroTikService(client.router_id) as mk:
             mk.activate_client(client)
@@ -1383,7 +1383,7 @@ def run_subscription_reminders():
         if days_overdue >= 10 and sub.status == 'past_due':
             sub.status = 'suspended'
             updated.append(sub.to_dict())
-            client = sub.client or (Client.query.get(sub.client_id) if sub.client_id else None)
+            client = sub.client or (db.session.get(Client, sub.client_id) if sub.client_id else None)
             if client and client.router_id:
                 with MikroTikService(client.router_id) as mk:
                     mk.suspend_client(client, reason='billing')
@@ -1764,7 +1764,7 @@ def ticket_list_comments(ticket_id):
         return jsonify({"error": "Acceso denegado para este tenant."}), 403
 
     current_user_id = _current_user_id()
-    user = User.query.get(current_user_id) if current_user_id else None
+    user = db.session.get(User, current_user_id) if current_user_id else None
     if user and user.role != 'admin' and ticket.user_id not in (None, current_user_id):
         return jsonify({"error": "No tienes permiso para ver los comentarios de este ticket."}), 403
 
@@ -1978,7 +1978,7 @@ def billing_electronic_send():
     if not invoice_id:
         return jsonify({"error": "invoice_id es requerido."}), 400
 
-    invoice = Invoice.query.get(invoice_id)
+    invoice = db.session.get(Invoice, invoice_id)
     if not invoice:
         return jsonify({"error": "Factura no encontrada."}), 404
 
@@ -2014,7 +2014,7 @@ def billing_electronic_status():
     if not invoice_id:
         return jsonify({"error": "invoice_id es requerido."}), 400
 
-    invoice = Invoice.query.get(invoice_id)
+    invoice = db.session.get(Invoice, invoice_id)
     if not invoice:
         return jsonify({"error": "Factura no encontrada."}), 404
 
@@ -2094,7 +2094,7 @@ def reboot_client_cpe(client_id):
     current_user_id = _current_user_id()
     if current_user_id is None:
         return jsonify({"error": "Token de usuario invalido."}), 401
-    user = User.query.get(current_user_id)
+    user = db.session.get(User, current_user_id)
     if not user:
         return jsonify({"error": "Usuario no autenticado."}), 401
 
@@ -2270,10 +2270,10 @@ def admin_create_client():
         return jsonify({"error": "name es requerido"}), 400
     if not plan_id:
         return jsonify({"error": "plan_id es requerido"}), 400
-    plan = Plan.query.get(plan_id)
+    plan = db.session.get(Plan, plan_id)
     if not plan:
         return jsonify({"error": "Plan no encontrado"}), 404
-    router = MikroTikRouter.query.get(router_id) if router_id else None
+    router = db.session.get(MikroTikRouter, router_id) if router_id else None
     tenant_id = current_tenant_id()
     if tenant_id:
         if router and router.tenant_id not in (None, tenant_id):
@@ -2307,7 +2307,7 @@ def suspend_client(client_id):
         return jsonify({"error": "Cliente fuera del tenant"}), 403
     if not client.router_id:
         return jsonify({"error": "Cliente sin router asociado"}), 400
-    plan = client.plan or Plan.query.get(client.plan_id) if client.plan_id else None
+    plan = client.plan or db.session.get(Plan, client.plan_id) if client.plan_id else None
     with MikroTikService(client.router_id) as mikrotik:
         ok = mikrotik.suspend_client(client)
     if ok and client.subscriptions:
@@ -2325,7 +2325,7 @@ def activate_client(client_id):
     tenant_id = current_tenant_id()
     if tenant_id and client.tenant_id not in (None, tenant_id):
         return jsonify({"error": "Cliente fuera del tenant"}), 403
-    plan = client.plan or Plan.query.get(client.plan_id) if client.plan_id else None
+    plan = client.plan or db.session.get(Plan, client.plan_id) if client.plan_id else None
     if not client.router_id:
         return jsonify({"error": "Cliente sin router asociado"}), 400
     with MikroTikService(client.router_id) as mikrotik:
@@ -2361,7 +2361,7 @@ def change_client_speed(client_id):
 @admin_required()
 def get_client_scripts(client_id):
     client = Client.query.get_or_404(client_id)
-    plan = client.plan or (Plan.query.get(client.plan_id) if client.plan_id else None)
+    plan = client.plan or (db.session.get(Plan, client.plan_id) if client.plan_id else None)
     if not plan:
         return jsonify({"error": "Plan no encontrado"}), 400
     ppp_profile = f"profile_{plan.name.lower().replace(' ','_')}"
@@ -3030,7 +3030,7 @@ def admin_installations_create():
     client_name = (data.get('client_name') or '').strip()
     client = None
     if client_id:
-        client = Client.query.get(client_id)
+        client = db.session.get(Client, client_id)
         if not client:
             return jsonify({"error": "Cliente no encontrado"}), 404
         if tenant_id is not None and client.tenant_id not in (None, tenant_id):

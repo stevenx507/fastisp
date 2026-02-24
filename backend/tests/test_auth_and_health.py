@@ -141,7 +141,7 @@ def test_update_password_success(client, app):
     assert payload['success'] is True
 
     with app.app_context():
-        updated = User.query.get(user_id)
+        updated = db.session.get(User, user_id)
         assert updated is not None
         assert updated.check_password('newpassword123')
 

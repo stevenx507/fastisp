@@ -76,7 +76,9 @@ def _resolve_actor_identity() -> str:
     if current_identity is None:
         return "system"
     try:
-        user = User.query.get(current_identity)
+        from app import db
+
+        user = db.session.get(User, current_identity)
     except Exception:
         user = None
     if user:
