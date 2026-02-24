@@ -10,6 +10,7 @@ import ClientUsage from './pages/ClientUsage'
 import ClientSupport from './pages/ClientSupport'
 import ClientProfile from './pages/ClientProfile'
 import PlatformAdmin from './pages/PlatformAdmin'
+import PlatformBootstrap from './pages/PlatformBootstrap'
 import { useAuthStore } from './store/authStore'
 import ProtectedRoute from './components/ProtectedRoute'
 
@@ -33,6 +34,7 @@ function App() {
             <Route path="/tech" element={<ProtectedRoute><TechApp /></ProtectedRoute>} />
             <Route path="/admin" element={<ProtectedRoute allowedRoles={['admin']}><AdminPanel /></ProtectedRoute>} />
             <Route path="/platform" element={<ProtectedRoute allowedRoles={['platform_admin']}><PlatformAdmin /></ProtectedRoute>} />
+            <Route path="/platform/bootstrap" element={isAuthenticated ? <Navigate to={authHome} /> : <PlatformBootstrap />} />
             <Route path="*" element={<Navigate to={isAuthenticated ? authHome : "/login"} />} />
           </Routes>
         </div>

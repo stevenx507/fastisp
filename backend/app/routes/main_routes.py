@@ -640,6 +640,10 @@ def _serialize_tenant_platform_item(tenant: Tenant) -> dict:
     }
 
 
+def _platform_admin_exists() -> bool:
+    return User.query.filter_by(role=PLATFORM_ADMIN_ROLE).first() is not None
+
+
 def _build_network_alert_items(tenant_id) -> list[dict]:
     routers_q = MikroTikRouter.query
     subs_q = Subscription.query
@@ -980,6 +984,81 @@ def login():
         return jsonify({"token": access_token, "user": user.to_dict()}), 200
 
     return jsonify({"error": "Credenciales incorrectas."}), 401
+
+
+@main_bp.route('/platform/bootstrap/status', methods=['GET'])
+@limiter.limit("30/minute")
+def platform_bootstrap_status():
+    tenant_id = current_tenant_id()
+    platform_admin_exists = _platform_admin_exists()
+    token_configured = bool(str(current_app.config.get('PLATFORM_BOOTSTRAP_TOKEN') or '').strip())
+    master_context = tenant_id is None
+    bootstrap_allowed = master_context and token_configured and not platform_admin_exists
+    return jsonify(
+        {
+            "master_context": master_context,
+            "token_configured": token_configured,
+            "platform_admin_exists": platform_admin_exists,
+            "bootstrap_allowed": bootstrap_allowed,
+        }
+    ), 200
+
+
+@main_bp.route('/platform/bootstrap', methods=['POST'])
+@limiter.limit("5/minute")
+def platform_bootstrap():
+    if current_tenant_id() is not None:
+        return jsonify({"error": "Bootstrap solo disponible en host master/global."}), 403
+
+    configured_token = str(current_app.config.get('PLATFORM_BOOTSTRAP_TOKEN') or '').strip()
+    if not configured_token:
+        return jsonify({"error": "PLATFORM_BOOTSTRAP_TOKEN no configurado en servidor."}), 403
+
+    if _platform_admin_exists():
+        return jsonify({"error": "Ya existe un platform_admin. Bootstrap cerrado."}), 409
+
+    data = request.get_json() or {}
+    provided_token = str(
+        data.get('token')
+        or request.headers.get('X-Platform-Bootstrap-Token')
+        or ''
+    ).strip()
+    if not provided_token or not hmac.compare_digest(provided_token, configured_token):
+        return jsonify({"error": "Token de bootstrap invalido."}), 403
+
+    name = str(data.get('name') or '').strip()
+    email = str(data.get('email') or '').strip().lower()
+    password = str(data.get('password') or '')
+    if not name or not email or not password:
+        return jsonify({"error": "name, email y password son requeridos."}), 400
+    if len(password) < 10:
+        return jsonify({"error": "password debe tener al menos 10 caracteres."}), 400
+    if User.query.filter_by(email=email).first():
+        return jsonify({"error": "email ya existe."}), 409
+
+    user = User(
+        name=name,
+        email=email,
+        role=PLATFORM_ADMIN_ROLE,
+        tenant_id=None,
+    )
+    user.set_password(password)
+    db.session.add(user)
+    db.session.commit()
+
+    return jsonify(
+        {
+            "success": True,
+            "message": "Platform admin creado correctamente.",
+            "user": {
+                "id": user.id,
+                "name": user.name,
+                "email": user.email,
+                "role": user.role,
+                "tenant_id": user.tenant_id,
+            },
+        }
+    ), 201
 
 
 @main_bp.route('/platform/overview', methods=['GET'])

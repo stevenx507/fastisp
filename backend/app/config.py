@@ -73,6 +73,7 @@ class Config:
         os.environ.get('TENANCY_ENFORCE_HOST_MATCH'),
         default=False,
     )
+    PLATFORM_BOOTSTRAP_TOKEN = (os.environ.get('PLATFORM_BOOTSTRAP_TOKEN') or '').strip()
 
     # Observability & Alerts
     PAGERDUTY_ROUTING_KEY = os.environ.get('PAGERDUTY_ROUTING_KEY')
@@ -170,6 +171,7 @@ class ProductionConfig(Config):
         os.environ.get('TENANCY_ENFORCE_HOST_MATCH'),
         default=False,
     )
+    PLATFORM_BOOTSTRAP_TOKEN = (os.environ.get('PLATFORM_BOOTSTRAP_TOKEN') or '').strip()
 
     MIKROTIK_DEFAULT_USERNAME = os.environ.get('MIKROTIK_DEFAULT_USERNAME')
     MIKROTIK_DEFAULT_PASSWORD = os.environ.get('MIKROTIK_DEFAULT_PASSWORD')
