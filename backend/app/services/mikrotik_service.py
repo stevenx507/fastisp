@@ -5,10 +5,9 @@ Handles all MikroTik router operations for ISPMAX
 from routeros_api.exceptions import RouterOsApiError
 from typing import Dict, List, Optional, Tuple
 import logging
-import uuid
 from datetime import datetime, timedelta
 from sqlalchemy import or_
-from app.models import Client, Plan, MikroTikRouter, Invoice, Subscription
+from app.models import Client, Plan, MikroTikRouter, Invoice, Subscription, AuditLog, Ticket
 from app import db, cache
 from app.services.monitoring_service import MonitoringService
 from .mikrotik_connection_pool import mikrotik_connection_pool # Import the global pool instance
@@ -1022,16 +1021,125 @@ class MikroTikService:
 
     def get_client_event_history(self, client_id: int) -> List[Dict]:
         """
-        Simulates fetching an event log for a client.
-        In a real app, this would query a dedicated logging table in the database.
+        Build a real client event timeline from tickets, invoices and audit logs.
         """
+        client = Client.query.get(client_id)
+        if not client:
+            return []
+
         now = datetime.utcnow()
-        history = [
-            { "id": str(uuid.uuid4()), "timestamp": (now - timedelta(minutes=5)).isoformat(), "type": "success", "message": "El equipo se conectó exitosamente." },
-            { "id": str(uuid.uuid4()), "timestamp": (now - timedelta(hours=1)).isoformat(), "type": "info", "message": "Se actualizó el firmware del CPE a la v2.1." },
-            { "id": str(uuid.uuid4()), "timestamp": (now - timedelta(days=1)).isoformat(), "type": "error", "message": "El equipo se desconectó por un corte de energía." },
-        ]
-        return sorted(history, key=lambda x: x['timestamp'], reverse=True)
+        events: List[Dict] = []
+
+        if client.router:
+            router_state = 'online' if client.router.is_active else 'offline'
+            events.append(
+                {
+                    "id": f"router-{client.router.id}",
+                    "timestamp": (client.router.last_seen or now).isoformat(),
+                    "type": "success" if client.router.is_active else "warning",
+                    "message": f"Router {client.router.name} reporta estado {router_state}.",
+                }
+            )
+
+        tickets = (
+            Ticket.query
+            .filter_by(client_id=client_id)
+            .order_by(Ticket.updated_at.desc())
+            .limit(30)
+            .all()
+        )
+        ticket_ids = {ticket.id for ticket in tickets}
+        for ticket in tickets:
+            ticket_type = 'warning' if ticket.status in ('open', 'in_progress') else 'success'
+            if ticket.priority in ('high', 'urgent') and ticket.status in ('open', 'in_progress'):
+                ticket_type = 'error'
+            events.append(
+                {
+                    "id": f"ticket-{ticket.id}",
+                    "timestamp": (ticket.updated_at or ticket.created_at or now).isoformat(),
+                    "type": ticket_type,
+                    "message": f"Ticket #{ticket.id} {ticket.status} ({ticket.priority}): {ticket.subject}",
+                }
+            )
+
+        invoices = (
+            Invoice.query
+            .join(Subscription, Invoice.subscription_id == Subscription.id)
+            .filter(Subscription.client_id == client_id)
+            .order_by(Invoice.created_at.desc())
+            .limit(20)
+            .all()
+        )
+        for invoice in invoices:
+            if invoice.status in ('overdue', 'past_due', 'cancelled'):
+                invoice_type = 'error'
+            elif invoice.status in ('pending',):
+                invoice_type = 'warning'
+            else:
+                invoice_type = 'success'
+            due = invoice.due_date.isoformat() if invoice.due_date else 'sin fecha'
+            events.append(
+                {
+                    "id": f"invoice-{invoice.id}",
+                    "timestamp": (invoice.updated_at or invoice.created_at or now).isoformat(),
+                    "type": invoice_type,
+                    "message": f"Factura #{invoice.id} {invoice.status} (vence {due}).",
+                }
+            )
+
+        audit_logs = AuditLog.query.order_by(AuditLog.created_at.desc()).limit(150).all()
+        for log in audit_logs:
+            meta = log.meta if isinstance(log.meta, dict) else {}
+            entity_id = str(log.entity_id or '')
+
+            related = False
+            if log.entity_type == 'client' and entity_id == str(client_id):
+                related = True
+            elif log.entity_type == 'ticket' and entity_id.isdigit() and int(entity_id) in ticket_ids:
+                related = True
+            elif str(meta.get('client_id') or '') == str(client_id):
+                related = True
+            elif client.user_id and str(meta.get('user_id') or '') == str(client.user_id):
+                related = True
+
+            if not related:
+                continue
+
+            action = str(log.action or '').strip()
+            action_lower = action.lower()
+            if any(word in action_lower for word in ('error', 'fail', 'suspend', 'down')):
+                event_type = 'error'
+            elif any(word in action_lower for word in ('warning', 'retry', 'pending')):
+                event_type = 'warning'
+            else:
+                event_type = 'info'
+
+            events.append(
+                {
+                    "id": f"audit-{log.id}",
+                    "timestamp": (log.created_at or now).isoformat(),
+                    "type": event_type,
+                    "message": action.replace('_', ' '),
+                }
+            )
+
+        if not events:
+            events.append(
+                {
+                    "id": f"client-{client_id}-bootstrap",
+                    "timestamp": now.isoformat(),
+                    "type": "info",
+                    "message": "Sin eventos operativos recientes para este cliente.",
+                }
+            )
+
+        def _event_ts(event: Dict) -> datetime:
+            try:
+                return datetime.fromisoformat(str(event.get('timestamp') or '').replace('Z', '+00:00'))
+            except Exception:
+                return now
+
+        return sorted(events, key=_event_ts, reverse=True)[:60]
 
     def reboot_client_cpe(self, client: Client) -> Tuple[bool, str]:
         """
@@ -1402,4 +1510,5 @@ class MikroTikService:
         except Exception as e:
             logger.error(f"Backup failed: {e}")
             return None
+
 

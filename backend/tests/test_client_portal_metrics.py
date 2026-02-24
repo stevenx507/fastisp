@@ -131,3 +131,31 @@ def test_client_diagnostics_reports_down_session_without_router(client, app):
     assert payload["ping_internet_ms"] >= 0
     assert isinstance(payload["recommendations"], list)
     assert payload["recommendations"]
+
+
+def test_client_history_returns_operational_timeline(client, app):
+    with app.app_context():
+        admin = User(email="history-admin@test.local", role="admin", name="History Admin")
+        admin.set_password("supersecret")
+        db.session.add(admin)
+        db.session.flush()
+
+        customer_user = User(email="history-client@test.local", role="client", name="History Client")
+        customer_user.set_password("supersecret")
+        db.session.add(customer_user)
+        db.session.flush()
+
+        customer = Client(full_name="Cliente Historial", user_id=customer_user.id, connection_type="dhcp")
+        db.session.add(customer)
+        db.session.commit()
+
+        admin_id = admin.id
+        client_id = customer.id
+
+    response = client.get(f"/api/clients/{client_id}/history", headers=_auth_headers(app, admin_id))
+    assert response.status_code == 200
+
+    payload = response.get_json()
+    assert isinstance(payload, list)
+    assert payload
+    assert all("message" in item and "timestamp" in item for item in payload)

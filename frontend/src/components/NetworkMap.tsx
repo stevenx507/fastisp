@@ -13,6 +13,7 @@ import {
 } from '@heroicons/react/24/solid'
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet'
 import toast from 'react-hot-toast'
+import { apiClient } from '../lib/apiClient'
 
 // Arreglo para el problema de los marcadores por defecto en React-Leaflet con Webpack
 delete (L.Icon.Default.prototype as any)._getIconUrl
@@ -297,23 +298,12 @@ const NetworkMap: React.FC = () => {
       setIsLoading(true)
       setError(null)
       try {
-        // Asumimos que tienes un endpoint /api/clients que devuelve los datos necesarios
-        const response = await fetch('/api/clients/map-data') // Endpoint hipotético
-        if (!response.ok) {
-          throw new Error('No se pudieron cargar los datos de los clientes.')
-        }
-        const data: Client[] = await response.json()
+        const data = await apiClient.get('/clients/map-data') as Client[]
         setClients(data)
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Ocurrió un error desconocido.')
-        // En caso de error, se puede cargar data de ejemplo para demo
+        setError(err instanceof Error ? err.message : 'Ocurrio un error desconocido.')
         console.error(err)
-        // Datos de ejemplo enriquecidos para el modal
-        setClients([
-          { id: 1, name: 'Juan Pérez (Ejemplo)', lat: 19.4326, lng: -99.1332, status: 'active', ip_address: '192.168.1.10', plan_name: 'Gamer 100M', last_seen: 'Ahora', connection_type: 'PPPoE' },
-          { id: 2, name: 'Ana Gómez (Ejemplo)', lat: 19.435, lng: -99.135, status: 'warning', ip_address: '192.168.1.12', plan_name: 'Básico 20M', last_seen: 'Hace 5 min', connection_type: 'DHCP' },
-          { id: 4, name: 'María Rodríguez (Ejemplo)', lat: 19.428, lng: -99.138, status: 'offline', ip_address: '192.168.1.15', plan_name: 'Pro 50M', last_seen: 'Ayer', connection_type: 'DHCP' },
-        ])
+        setClients([])
       } finally {
         setIsLoading(false)
       }
@@ -333,18 +323,8 @@ const NetworkMap: React.FC = () => {
   const handleRebootClient = async (client: Client) => {
     const toastId = toast.loading('Iniciando reinicio del equipo...')
     try {
-      const response = await fetch(`/api/clients/${client.id}/reboot-cpe`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
-        // Aquí podrías incluir headers de autenticación si son necesarios
-      })
-
-      if (!response.ok) {
-        const errorData = await response.json()
-        throw new Error(errorData.error || 'No se pudo reiniciar el equipo.')
-      }
-
-      toast.success(`El equipo de ${client.name} se está reiniciando.`, { id: toastId })
+      await apiClient.post(`/clients/${client.id}/reboot-cpe`)
+      toast.success(`El equipo de ${client.name} se esta reiniciando.`, { id: toastId })
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Error desconocido.', { id: toastId })
     }
@@ -354,11 +334,7 @@ const NetworkMap: React.FC = () => {
     setHistoryClient(client)
     setIsHistoryLoading(true)
     try {
-      const response = await fetch(`/api/clients/${client.id}/history`)
-      if (!response.ok) {
-        throw new Error('No se pudo cargar el historial.')
-      }
-      const data: Event[] = await response.json()
+      const data = await apiClient.get(`/clients/${client.id}/history`) as Event[]
       setHistoryEvents(data)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Error desconocido.')
@@ -440,3 +416,5 @@ const NetworkMap: React.FC = () => {
 }
 
 export default NetworkMap
+
+
