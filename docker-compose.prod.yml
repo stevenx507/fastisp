@@ -4,7 +4,7 @@ services:
     environment:
       - POSTGRES_DB=ispmax
       - POSTGRES_USER=ispmax
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-FjGaVL3VVbTpRYvAAN4tFA}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
     volumes:
       - pgdata:/var/lib/postgresql/data
     networks:
@@ -12,7 +12,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-FjGaVL3VVbTpRYvAAN4tFA}"]
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD is required}"]
     networks:
       - ispmax-network
 
@@ -25,6 +25,8 @@ services:
     environment:
       - CACHE_TYPE=SimpleCache
       - CACHE_REDIS_URL=
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - ALLOW_INSECURE_GOOGLE_LOGIN=${ALLOW_INSECURE_GOOGLE_LOGIN:-false}
     command: ["/bin/sh","-c","CACHE_TYPE=SimpleCache CACHE_REDIS_URL= gunicorn --bind 0.0.0.0:5000 --workers 2 wsgi:app"]
     depends_on:
       - postgres
@@ -107,7 +109,7 @@ services:
   traefik:
     image: traefik:v2.10
     command:
-      - --api.insecure=true
+      - --api.insecure=false
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
       - --providers.docker.network=ispmax-network
@@ -140,7 +142,7 @@ services:
       - "traefik.http.middlewares.secure-headers.headers.stsSeconds=63072000"
       - "traefik.http.middlewares.secure-headers.headers.stsIncludeSubdomains=true"
       - "traefik.http.middlewares.secure-headers.headers.stsPreload=true"
-      - "traefik.http.middlewares.ipwhitelist.ipwhitelist.sourcerange=${WAF_IP_ALLOWLIST:-0.0.0.0/0}"
+      - "traefik.http.middlewares.ipwhitelist.ipwhitelist.sourcerange=${WAF_IP_ALLOWLIST:?WAF_IP_ALLOWLIST is required}"
       - "traefik.http.middlewares.geoip2.plugin.geoip2.databasePath=/geoip/GeoLite2-Country.mmdb"
       - "traefik.http.middlewares.geoip2.plugin.geoip2.header=X-Country-Code"
 

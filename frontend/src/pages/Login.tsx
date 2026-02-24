@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { EyeIcon, EyeSlashIcon, EnvelopeIcon, LockClosedIcon } from '@heroicons/react/24/outline'
@@ -68,36 +68,23 @@ const LoginForm: React.FC = () => {
     }
   }
 
-  const decodeJwtPayload = (jwt: string) => {
-    try {
-      const payload = jwt.split('.')[1]
-      const normalized = payload.replace(/-/g, '+').replace(/_/g, '/')
-      const json = atob(normalized)
-      return JSON.parse(json)
-    } catch (err) {
-      console.error('[Google] Error decoding token', err)
-      return null
-    }
-  }
-
-  const handleGoogleCredential = async (credential: string) => {
-    const data = decodeJwtPayload(credential)
-    if (!data?.email) {
-      toast.error('No se pudo obtener el correo de Google.')
+  const handleGoogleCredential = useCallback(async (credential: string) => {
+    if (!credential) {
+      toast.error('No se recibio token de Google.')
       return
     }
     try {
       const resp = await apiClient.post('/auth/google', {
-        email: data.email,
-        name: data.name || data.given_name || data.email.split('@')[0],
+        credential,
       })
       useAuthStore.setState({ user: resp.user, token: resp.token, isAuthenticated: true })
-      toast.success('Inicio de sesión con Google exitoso')
+      toast.success('Inicio de sesion con Google exitoso')
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Error iniciando con Google.'
       toast.error(msg)
     }
-  }
+  }, [])
+
 
   useEffect(() => {
     if (!config.GOOGLE_CLIENT_ID) return
@@ -120,7 +107,7 @@ const LoginForm: React.FC = () => {
     script.onload = initGoogle
     script.onerror = () => console.warn('[Google] No se pudo cargar el script de Google Identity')
     document.body.appendChild(script)
-  }, [])
+  }, [handleGoogleCredential])
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">

@@ -60,6 +60,10 @@ class Config:
     ALLOW_DEMO_LOGIN = _as_bool(os.environ.get('ALLOW_DEMO_LOGIN'), default=False)
     ALLOW_PAYMENT_DEMO = _as_bool(os.environ.get('ALLOW_PAYMENT_DEMO'), default=True)
     ALLOW_GOOGLE_LOGIN = _as_bool(os.environ.get('ALLOW_GOOGLE_LOGIN'), default=True)
+    ALLOW_INSECURE_GOOGLE_LOGIN = _as_bool(
+        os.environ.get('ALLOW_INSECURE_GOOGLE_LOGIN'), default=False
+    )
+    GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID', '')
     GEOIP_ALLOWLIST = _split_csv(os.environ.get('GEOIP_ALLOWLIST', ''))
 
     # Observability & Alerts
@@ -142,6 +146,10 @@ class ProductionConfig(Config):
     ALLOW_DEMO_LOGIN = _as_bool(os.environ.get('ALLOW_DEMO_LOGIN'), default=False)
     ALLOW_PAYMENT_DEMO = _as_bool(os.environ.get('ALLOW_PAYMENT_DEMO'), default=False)
     ALLOW_GOOGLE_LOGIN = _as_bool(os.environ.get('ALLOW_GOOGLE_LOGIN'), default=True)
+    ALLOW_INSECURE_GOOGLE_LOGIN = _as_bool(
+        os.environ.get('ALLOW_INSECURE_GOOGLE_LOGIN'), default=False
+    )
+    GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID', '')
 
     MIKROTIK_DEFAULT_USERNAME = os.environ.get('MIKROTIK_DEFAULT_USERNAME')
     MIKROTIK_DEFAULT_PASSWORD = os.environ.get('MIKROTIK_DEFAULT_PASSWORD')
@@ -168,6 +176,11 @@ class ProductionConfig(Config):
         if not cors_origins:
             raise ValueError(
                 "CORS_ORIGINS must be set in production and contain at least one origin."
+            )
+
+        if _as_bool(os.environ.get('ALLOW_GOOGLE_LOGIN'), default=True) and not os.environ.get('GOOGLE_CLIENT_ID'):
+            raise ValueError(
+                "GOOGLE_CLIENT_ID must be set when ALLOW_GOOGLE_LOGIN=true in production."
             )
 
         weak_keys = [

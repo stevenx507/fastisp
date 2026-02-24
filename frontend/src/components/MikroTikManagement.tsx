@@ -1,5 +1,5 @@
 // frontend/src/components/MikroTikManagement.tsx
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   ServerIcon,
   WifiIcon,
@@ -41,11 +41,11 @@ const MikroTikManagement: React.FC = () => {
   const [sidePanel, setSidePanel] = useState<'none' | 'logs' | 'dhcp' | 'wifi'>('none');
 
   // Helper Functions
-  const addToast = (type: Toast['type'], message: string) => {
+  const addToast = useCallback((type: Toast['type'], message: string) => {
     const id = Date.now() + Math.floor(Math.random() * 1000);
     setToasts((t) => [...t, { id, type, message }]);
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3500);
-  };
+  }, []);
 
   const openConfirm = (message: string, onConfirm: () => void) => {
     setConfirmMessage(message);
@@ -54,22 +54,22 @@ const MikroTikManagement: React.FC = () => {
   };
   
   // API Fetching
-  const authHeaders = () => {
+  const authHeaders = useCallback(() => {
     const token = safeStorage.getItem('token');
     return token ? { Authorization: `Bearer ${token}` } : {};
-  };
+  }, []);
 
   const API_BASE = (import.meta as any).env?.VITE_API_BASE_URL || '';
 
-  const safeJson = async (res: Response) => {
+  const safeJson = useCallback(async (res: Response) => {
     try {
       return await res.json();
     } catch {
       return null;
     }
-  };
+  }, []);
 
-  const apiFetch = (path: string, options: RequestInit = {}) => {
+  const apiFetch = useCallback((path: string, options: RequestInit = {}) => {
     const headers: Record<string, string> = {
       ...(authHeaders() as Record<string, string>),
       ...((options.headers as Record<string, string>) || {}),
@@ -83,41 +83,25 @@ const MikroTikManagement: React.FC = () => {
       }
       return res;
     });
-  };
-
-  // Effects
-  useEffect(() => {
-    loadRouters();
-  }, []);
-
-  useEffect(() => {
-    if (selectedRouter) {
-      loadRouterStats(selectedRouter.id);
-      // Clear AI analysis on router change
-      setAiAnalysis(null);
-      setAiError(null);
-    }
-  }, [selectedRouter]);
+  }, [API_BASE, authHeaders]);
 
   // Data Loading Functions
-  const loadRouters = async () => {
+  const loadRouters = useCallback(async () => {
     try {
       const response = await apiFetch('/api/mikrotik/routers');
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = (await safeJson(response)) || { success: false, routers: [] };
       if (data.success && Array.isArray(data.routers)) {
         setRouters(data.routers as RouterItem[]);
-        if (data.routers.length > 0 && !selectedRouter) {
-          setSelectedRouter(data.routers[0] as RouterItem);
-        }
+        if (data.routers.length > 0) setSelectedRouter((prev) => prev || (data.routers[0] as RouterItem));
       }
     } catch (error) {
       console.error('Error loading routers:', error);
       addToast('error', 'No se pudieron cargar los routers.');
     }
-  };
+  }, [addToast, apiFetch, safeJson]);
 
-  const loadRouterStats = async (routerId: string) => {
+  const loadRouterStats = useCallback(async (routerId: string) => {
     setIsLoading(true);
     try {
       const [healthRes, queuesRes, connectionsRes] = await Promise.all([
@@ -144,7 +128,21 @@ const MikroTikManagement: React.FC = () => {
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [addToast, apiFetch, safeJson]);
+
+  // Effects
+  useEffect(() => {
+    loadRouters();
+  }, [loadRouters]);
+
+  useEffect(() => {
+    if (selectedRouter) {
+      loadRouterStats(selectedRouter.id);
+      // Clear AI analysis on router change
+      setAiAnalysis(null);
+      setAiError(null);
+    }
+  }, [loadRouterStats, selectedRouter]);
 
   // Action Handlers
   const rebootRouter = async () => {

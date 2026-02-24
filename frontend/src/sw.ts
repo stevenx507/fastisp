@@ -1,21 +1,20 @@
 /// <reference lib="webworker" />
 import { precacheAndRoute } from 'workbox-precaching'
 
-declare let self: ServiceWorkerGlobalScope & { __WB_MANIFEST: any }
+declare let self: ServiceWorkerGlobalScope & {
+  __WB_MANIFEST: any
+  WonderPush?: Array<unknown>
+}
 
 const WONDERPUSH_WEB_KEY = import.meta.env.VITE_WONDERPUSH_WEBKEY as string | undefined
 
 // WonderPush SDK inside our custom SW (remote notifications)
 if (WONDERPUSH_WEB_KEY) {
   try {
-    // eslint-disable-next-line no-undef
     importScripts('https://cdn.by.wonderpush.com/sdk/1.1/wonderpush-loader.min.js')
-    // @ts-ignore
     self.WonderPush = self.WonderPush || []
-    // @ts-ignore
     self.WonderPush.push(['init', { webKey: WONDERPUSH_WEB_KEY }])
   } catch (err) {
-    // eslint-disable-next-line no-console
     console.error('[sw] WonderPush init failed', err)
   }
 }

@@ -85,7 +85,7 @@ const AdminPanel: React.FC = () => {
 
   const unreadNotificationsCount = notifications.filter(n => !n.read).length
 
-  const menuItems = [
+  const menuItems = React.useMemo(() => ([
     { id: 'dashboard', name: 'Dashboard', icon: ChartBarIcon },
     { id: 'clients', name: 'Clientes', icon: UserGroupIcon },
     { id: 'clients-search', name: 'Buscar Clientes', icon: MagnifyingGlassIcon },
@@ -110,8 +110,11 @@ const AdminPanel: React.FC = () => {
     { id: 'tickets', name: 'Tickets', icon: BellAlertIcon },
     { id: 'backups', name: 'Backups', icon: ServerIcon },
     { id: 'settings', name: 'Configuración', icon: CogIcon }
-  ]
-  const coreMenuIds = new Set(['dashboard','clients','network','maps','billing','monitoring','noc','alerts','tickets','backups','settings'])
+  ]), [])
+  const coreMenuIds = React.useMemo(
+    () => new Set(['dashboard','clients','network','maps','billing','monitoring','noc','alerts','tickets','backups','settings']),
+    []
+  )
   const groups = React.useMemo(() => {
     const core = { id: 'core', label: 'Principal', items: menuItems.filter(m => coreMenuIds.has(m.id)) }
     if (!showAdvancedMenu) return [core]
@@ -125,7 +128,7 @@ const AdminPanel: React.FC = () => {
       { id: 'almacen', label: 'Almacén', items: menuItems.filter(m => ['inventory'].includes(m.id)) },
       { id: 'staff', label: 'Staff', items: menuItems.filter(m => ['staff'].includes(m.id)) },
     ]
-  }, [showAdvancedMenu])
+  }, [showAdvancedMenu, coreMenuIds, menuItems])
 
   useEffect(() => {
     // reset open groups when toggling advanced modules
