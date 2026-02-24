@@ -42,7 +42,7 @@ class MikroTikService:
 
         try:
             self.router_id = normalized_router_id
-            self.router = MikroTikRouter.query.get(normalized_router_id)
+            self.router = db.session.get(MikroTikRouter, normalized_router_id)
             if not self.router:
                 logger.error(f"Router {normalized_router_id} not found in database.")
                 return False
@@ -1023,7 +1023,7 @@ class MikroTikService:
         """
         Build a real client event timeline from tickets, invoices and audit logs.
         """
-        client = Client.query.get(client_id)
+        client = db.session.get(Client, client_id)
         if not client:
             return []
 

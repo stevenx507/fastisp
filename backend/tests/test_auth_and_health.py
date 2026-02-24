@@ -7,7 +7,7 @@ import time
 from flask_jwt_extended import create_access_token, decode_token
 
 from app import db
-from app.models import Invoice, PaymentRecord, Subscription, Tenant, User
+from app.models import Client, Invoice, PaymentRecord, Subscription, Tenant, User
 
 
 def _token_for_user(app, user_id: int) -> str:
@@ -203,18 +203,128 @@ def test_stripe_checkout_requires_configured_secret(client, app):
         user = User(email='payment-client@test.local', role='client', name='Payment Client')
         user.set_password('clientpass123')
         db.session.add(user)
+        db.session.flush()
+
+        customer = Client(full_name='Payment Customer', user_id=user.id, connection_type='dhcp')
+        db.session.add(customer)
+        db.session.flush()
+
+        subscription = Subscription(
+            customer=customer.full_name,
+            email=user.email,
+            plan='Mensual',
+            cycle_months=1,
+            amount=25.0,
+            status='active',
+            currency='USD',
+            next_charge=date.today(),
+            method='manual',
+            client_id=customer.id,
+        )
+        db.session.add(subscription)
+        db.session.flush()
+
+        invoice = Invoice(
+            subscription_id=subscription.id,
+            amount=25.0,
+            currency='USD',
+            tax_percent=0,
+            total_amount=25.0,
+            status='pending',
+            due_date=date.today(),
+        )
+        db.session.add(invoice)
         db.session.commit()
         token = _token_for_user(app, user.id)
+        invoice_id = invoice.id
 
     response = client.post(
         '/api/payments/checkout',
-        json={'amount': 25.0, 'currency': 'USD', 'method': 'stripe'},
+        json={'amount': 25.0, 'currency': 'USD', 'method': 'stripe', 'invoice_id': invoice_id},
         headers={'Authorization': f'Bearer {token}'},
     )
 
     assert response.status_code == 503
     payload = response.get_json()
     assert 'Stripe no configurado' in payload['error']
+
+
+def test_checkout_rejects_invoice_from_another_client(client, app):
+    with app.app_context():
+        owner = User(email='invoice-owner@test.local', role='client', name='Invoice Owner')
+        owner.set_password('ownerpass123')
+        db.session.add(owner)
+        db.session.flush()
+
+        owner_client = Client(full_name='Owner Customer', user_id=owner.id, connection_type='dhcp')
+        db.session.add(owner_client)
+        db.session.flush()
+
+        owner_sub = Subscription(
+            customer=owner_client.full_name,
+            email=owner.email,
+            plan='Mensual',
+            cycle_months=1,
+            amount=30.0,
+            status='active',
+            currency='USD',
+            next_charge=date.today(),
+            method='manual',
+            client_id=owner_client.id,
+        )
+        db.session.add(owner_sub)
+        db.session.flush()
+
+        owner_invoice = Invoice(
+            subscription_id=owner_sub.id,
+            amount=30.0,
+            currency='USD',
+            tax_percent=0,
+            total_amount=30.0,
+            status='pending',
+            due_date=date.today(),
+        )
+        db.session.add(owner_invoice)
+
+        outsider = User(email='outsider@test.local', role='client', name='Outsider')
+        outsider.set_password('outsiderpass123')
+        db.session.add(outsider)
+        db.session.flush()
+
+        outsider_client = Client(full_name='Outsider Customer', user_id=outsider.id, connection_type='dhcp')
+        db.session.add(outsider_client)
+        db.session.commit()
+
+        outsider_token = _token_for_user(app, outsider.id)
+        owner_invoice_id = owner_invoice.id
+
+    response = client.post(
+        '/api/payments/checkout',
+        json={'amount': 30.0, 'currency': 'USD', 'method': 'stripe', 'invoice_id': owner_invoice_id},
+        headers={'Authorization': f'Bearer {outsider_token}'},
+    )
+
+    assert response.status_code == 403
+    payload = response.get_json()
+    assert 'permiso' in payload['error']
+
+
+def test_checkout_requires_invoice_id_for_stripe(client, app):
+    with app.app_context():
+        user = User(email='invoice-required@test.local', role='client', name='Invoice Required')
+        user.set_password('requiredpass123')
+        db.session.add(user)
+        db.session.commit()
+        token = _token_for_user(app, user.id)
+
+    response = client.post(
+        '/api/payments/checkout',
+        json={'amount': 10.0, 'currency': 'USD', 'method': 'stripe'},
+        headers={'Authorization': f'Bearer {token}'},
+    )
+
+    assert response.status_code == 400
+    assert 'invoice_id' in response.get_json()['error']
 
 
 def test_billing_electronic_status_requires_invoice_id(client, app):

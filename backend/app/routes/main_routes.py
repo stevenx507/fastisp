@@ -1813,23 +1813,51 @@ def run_background_job():
 @jwt_required()
 def payments_checkout():
     data = request.get_json() or {}
+    current_user_id = _current_user_id()
+    if current_user_id is None:
+        return jsonify({"error": "Token de usuario invalido."}), 401
+    user = db.session.get(User, current_user_id)
+    if not user:
+        return jsonify({"error": "Usuario no autenticado."}), 401
+
     amount = float(data.get('amount') or 0)
     currency = (data.get('currency') or 'USD').upper()
     method = (data.get('method') or 'stripe').lower()
     description = data.get('description') or 'Pago ISPFAST'
-    invoice_id = data.get('invoice_id')
+    invoice_id = _parse_int(data.get('invoice_id'))
     stripe_secret = current_app.config.get('STRIPE_SECRET_KEY')
     frontend_url = current_app.config.get('FRONTEND_URL') or request.headers.get('Origin') or 'http://localhost:3000'
 
-    if amount <= 0:
+    if method in {'stripe', 'yape', 'nequi', 'transfer'} and not invoice_id:
+        return jsonify({"error": "invoice_id es requerido para este metodo de pago"}), 400
+
+    if not invoice_id and amount <= 0:
         return jsonify({"error": "Monto inválido"}), 400
 
+    invoice = None
     if invoice_id:
-        invoice = db.session.get(Invoice, _parse_int(invoice_id))
+        invoice = db.session.get(Invoice, invoice_id)
         if not invoice:
             return jsonify({"error": "Factura no encontrada"}), 404
+        tenant_id = current_tenant_id()
+        sub_tenant = invoice.subscription.tenant_id if invoice.subscription else None
+        if tenant_id is not None and sub_tenant not in (None, tenant_id):
+            return jsonify({"error": "Acceso denegado para este tenant."}), 403
+        if user.role != 'admin':
+            user_client_id = user.client.id if user.client else None
+            sub_client_id = invoice.subscription.client_id if invoice.subscription else None
+            sub_email = (invoice.subscription.email if invoice.subscription else '') or ''
+            if user_client_id and sub_client_id == user_client_id:
+                pass
+            elif sub_email.strip().lower() == (user.email or '').strip().lower():
+                pass
+            else:
+                return jsonify({"error": "No tienes permiso para pagar esta factura"}), 403
         amount = float(invoice.total_amount)
         currency = invoice.currency
+
+    if amount <= 0:
+        return jsonify({"error": "Monto inválido"}), 400
 
     if method == 'stripe':
         if not stripe_secret:
@@ -1856,7 +1884,6 @@ def payments_checkout():
                 metadata={"invoice_id": invoice_id or "", "tenant_id": current_tenant_id() or "public"},
             )
             pay_rec = PaymentRecord(invoice_id=invoice_id, method='stripe', amount=amount, currency=currency, status='pending', reference=session.id)
-            from app import db
             db.session.add(pay_rec)
             db.session.commit()
             return jsonify({"success": True, "session_id": session.id, "payment_url": session.url}), 200
@@ -1874,7 +1901,6 @@ def payments_checkout():
             reference=data.get('reference'),
             meta={"note": "Pago por transferencia registrado, pendiente de conciliacion."},
         )
-        from app import db
         db.session.add(pay_rec)
         db.session.commit()
         return jsonify({"success": True, "mode": method, "message": "Pago registrado, pendiente de confirmación."}), 201
