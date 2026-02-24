@@ -27,6 +27,8 @@ interface JobEntry {
   status: string
   requested_by?: number | null
   started_at: string
+  finished_at?: string
+  result?: Record<string, unknown>
 }
 
 const jobs = ['backup', 'cleanup_leases', 'rotate_passwords', 'recalc_balances'] as const
@@ -77,9 +79,11 @@ const SystemSettings: React.FC = () => {
     setRunningJob(job)
     try {
       const response = await apiClient.post('/admin/system/jobs/run', { job })
-      const started = response.job as JobEntry
-      setJobHistory((prev) => [started, ...prev])
-      toast.success(`Job ${job} iniciado`)
+      const completedJob = response.job as JobEntry
+      setJobHistory((prev) => [completedJob, ...prev.filter((item) => item.id !== completedJob.id)])
+      const status = String(completedJob.status || 'completed')
+      const human = status === 'completed_with_errors' ? 'completado con errores' : status
+      toast.success(`Job ${job}: ${human}`)
     } catch (err) {
       const msg = err instanceof Error ? err.message : `No se pudo ejecutar ${job}`
       toast.error(msg)
@@ -94,6 +98,42 @@ const SystemSettings: React.FC = () => {
     if (health.routers_down > 0 || health.tickets_open >= 8) return 'warning'
     return 'ok'
   }, [health])
+
+  const renderJobResult = (job: JobEntry) => {
+    const result = job.result || {}
+    if (job.job === 'rotate_passwords') {
+      const rotated = Number(result.rotated || 0)
+      const failed = Number(result.failed || 0)
+      const dryRun = Boolean(result.dry_run)
+      return `${dryRun ? 'dry-run' : 'rotados'}: ${rotated}, fallidos: ${failed}`
+    }
+    if (job.job === 'recalc_balances') {
+      const updated = Number(result.updated || 0)
+      const scanned = Number(result.scanned || 0)
+      return `facturas actualizadas: ${updated}/${scanned}`
+    }
+    if (job.job === 'cleanup_leases') {
+      const changed = Number(result.count || 0)
+      return `suscripciones cambiadas: ${changed}`
+    }
+    if (job.job === 'backup') {
+      const dbBackup = result.pg_dump
+      if (typeof dbBackup === 'string' && dbBackup.length > 0) {
+        return `db: ${dbBackup}`
+      }
+    }
+    if (typeof result.message === 'string' && result.message) {
+      return result.message
+    }
+    return ''
+  }
+
+  const statusBadgeClass = (status: string) => {
+    if (status === 'completed') return 'border-emerald-200 bg-emerald-50 text-emerald-700'
+    if (status === 'skipped') return 'border-slate-200 bg-slate-50 text-slate-700'
+    if (status === 'completed_with_errors') return 'border-amber-200 bg-amber-50 text-amber-700'
+    return 'border-red-200 bg-red-50 text-red-700'
+  }
 
   return (
     <div className="space-y-5">
@@ -243,10 +283,17 @@ const SystemSettings: React.FC = () => {
             <div className="max-h-52 space-y-2 overflow-y-auto">
               {jobHistory.map((job) => (
                 <div key={job.id} className="rounded-md border border-gray-200 px-3 py-2 text-xs">
-                  <p className="font-semibold text-gray-800">{job.job}</p>
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="font-semibold text-gray-800">{job.job}</p>
+                    <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase ${statusBadgeClass(job.status)}`}>
+                      {job.status}
+                    </span>
+                  </div>
                   <p className="text-gray-500">
-                    {job.status} - {job.started_at?.replace('T', ' ').slice(0, 16)}
+                    inicio: {job.started_at?.replace('T', ' ').slice(0, 16)}
                   </p>
+                  {job.finished_at && <p className="text-gray-500">fin: {job.finished_at.replace('T', ' ').slice(0, 16)}</p>}
+                  {renderJobResult(job) && <p className="mt-1 text-gray-700">{renderJobResult(job)}</p>}
                 </div>
               ))}
               {!jobHistory.length && <p className="text-xs text-gray-500">Sin jobs recientes.</p>}
