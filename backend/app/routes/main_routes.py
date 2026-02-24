@@ -1,6 +1,5 @@
 ﻿from datetime import datetime, timedelta
 from functools import wraps
-import random
 import secrets
 
 from flask import Blueprint, jsonify, request, Response, current_app
@@ -34,6 +33,20 @@ def _current_user_id():
 
 def _slugify(text: str) -> str:
     return ''.join(ch.lower() if ch.isalnum() else '-' for ch in text).strip('-')
+
+
+def _parse_iso_datetime(value) -> datetime | None:
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    if raw.endswith('Z'):
+        raw = raw.replace('Z', '+00:00')
+    try:
+        return datetime.fromisoformat(raw)
+    except Exception:
+        return None
 
 
 def _get_plan_for_request(data, tenant_id):
@@ -1326,15 +1339,84 @@ def client_diagnostics():
     current_user_id = _current_user_id()
     if current_user_id is None:
         return jsonify({"error": "Token de usuario invalido."}), 401
+    tenant_id = current_tenant_id()
+
+    client_query = Client.query.filter_by(user_id=current_user_id)
+    if tenant_id is not None:
+        client_query = client_query.filter_by(tenant_id=tenant_id)
+    client = client_query.first_or_404("Cliente no encontrado.")
+
+    ping_gateway_ms = None
+    ping_internet_ms = None
+    packet_loss_pct = 0.0
+    connection_up = False
+    router_online = bool(client.router.is_active) if client.router else True
+
+    if client.router_id:
+        with MikroTikService(client.router_id) as mikrotik:
+            if mikrotik.api:
+                active_connections = mikrotik.get_active_connections()
+                for conn in active_connections:
+                    ctype = str(conn.get('type') or '').lower()
+                    addr = str(conn.get('address') or '')
+                    mac = str(conn.get('mac_address') or '').lower()
+                    name = str(conn.get('name') or '')
+
+                    if client.connection_type == 'pppoe' and client.pppoe_username:
+                        if ctype == 'pppoe' and name == client.pppoe_username:
+                            connection_up = True
+                            break
+                    elif client.ip_address and addr == client.ip_address:
+                        connection_up = True
+                        break
+                    elif client.mac_address and mac and mac == client.mac_address.lower():
+                        connection_up = True
+                        break
+
+        try:
+            monitoring = MonitoringService()
+            tags = {'router_id': str(client.router_id)}
+            latest_router = monitoring.latest_point('router_stats', tags=tags)
+
+            if latest_router:
+                for key in ('ping_gateway_ms', 'gateway_latency_ms', 'latency_ms', 'ping_ms'):
+                    if latest_router.get(key) is not None:
+                        ping_gateway_ms = float(latest_router.get(key))
+                        break
+                for key in ('ping_internet_ms', 'wan_latency_ms', 'latency_ms', 'ping_ms'):
+                    if latest_router.get(key) is not None:
+                        ping_internet_ms = float(latest_router.get(key))
+                        break
+                for key in ('packet_loss_pct', 'loss_pct'):
+                    if latest_router.get(key) is not None:
+                        packet_loss_pct = float(latest_router.get(key))
+                        break
+        except Exception as exc:
+            current_app.logger.info("Client diagnostics telemetry fallback: %s", exc)
+
+    if ping_gateway_ms is None:
+        ping_gateway_ms = 8.0 if router_online else 0.0
+    if ping_internet_ms is None:
+        ping_internet_ms = 30.0 if router_online else 0.0
+
+    recommendations = []
+    if not router_online:
+        recommendations.append("El router principal aparece fuera de linea. Verifica energia y enlace uplink.")
+    if not connection_up:
+        recommendations.append("No se detecta sesion activa del cliente. Reinicia CPE y valida PPPoE/DHCP.")
+    if packet_loss_pct > 2:
+        recommendations.append("Hay perdida de paquetes elevada. Prueba conexion por cable y revisa interferencia WiFi.")
+    if ping_internet_ms > 120:
+        recommendations.append("Latencia alta hacia internet. Ejecuta speedtest y abre ticket con captura de resultados.")
+    if not recommendations:
+        recommendations.append("Enlace estable. Si percibes cortes, abre ticket y adjunta hora exacta del incidente.")
+
     payload = {
-        "ping_gateway_ms": 8.5,
-        "ping_internet_ms": 32.4,
-        "packet_loss_pct": 0,
-        "pppoe_session": "up",
-        "recommendations": [
-            "Reinicia tu CPE si la latencia supera 100 ms.",
-            "Si continÃºan problemas, abre ticket y adjunta captura de ping."
-        ]
+        "ping_gateway_ms": round(float(ping_gateway_ms), 1),
+        "ping_internet_ms": round(float(ping_internet_ms), 1),
+        "packet_loss_pct": round(max(0.0, float(packet_loss_pct)), 2),
+        "pppoe_session": "up" if connection_up else "down",
+        "recommendations": recommendations,
     }
     return jsonify(payload), 200
 
@@ -1644,7 +1726,7 @@ def get_dashboard_stats():
         query = query.filter_by(tenant_id=tenant_id)
 
     client = query.first_or_404()
-    with MikroTikService() as mikrotik:
+    with MikroTikService(client.router_id) as mikrotik:
         stats = mikrotik.get_client_dashboard_stats(client)
         return jsonify(stats), 200
 
@@ -1728,13 +1810,14 @@ def get_usage_history():
             rx = float(point.get('rx_bytes', 0) or 0)
             tx = float(point.get('tx_bytes', 0) or 0)
             total_gb = (rx + tx) / (1024**3)
-            if ts:
-                day_idx = (today - datetime.fromisoformat(str(ts)).date()).days
+            parsed_ts = _parse_iso_datetime(ts)
+            if parsed_ts:
+                day_idx = (today - parsed_ts.date()).days
                 if 0 <= day_idx < days:
                     data_points[days - 1 - day_idx] += total_gb
     except Exception as exc:
         current_app.logger.info("Uso histórico usando fallback: %s", exc)
-        data_points = [random.uniform(5, 25) for _ in range(days)]
+        data_points = [0.0] * days
 
     usage_data = {
         "labels": labels,

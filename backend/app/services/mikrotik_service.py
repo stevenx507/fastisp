@@ -5,11 +5,12 @@ Handles all MikroTik router operations for ISPMAX
 from routeros_api.exceptions import RouterOsApiError
 from typing import Dict, List, Optional, Tuple
 import logging
-import random
 import uuid
 from datetime import datetime, timedelta
-from app.models import Client, Plan, MikroTikRouter
+from sqlalchemy import or_
+from app.models import Client, Plan, MikroTikRouter, Invoice, Subscription
 from app import db, cache
+from app.services.monitoring_service import MonitoringService
 from .mikrotik_connection_pool import mikrotik_connection_pool # Import the global pool instance
 
 logger = logging.getLogger(__name__)
@@ -896,22 +897,121 @@ class MikroTikService:
 
     def get_client_dashboard_stats(self, client: Client) -> Dict:
         """
-        Simulates fetching real-time stats for a client's dashboard.
+        Return client dashboard stats using available telemetry, plan and billing data.
+        This avoids synthetic random values in production dashboards.
         """
-        # In a real scenario, you would query the router for this info.
-        # For now, we generate random but realistic data.
         try:
-            # This is a placeholder. A real implementation would be more complex.
-            # self.connect_to_router(client.router_id)
-            # queue_stats = self.api.get_resource('/queue/simple').get(name=f"client_{client.id}")
-            # etc...
+            plan_down = float(client.plan.download_speed) if client.plan and client.plan.download_speed else 0.0
+            plan_up = float(client.plan.upload_speed) if client.plan and client.plan.upload_speed else 0.0
+
+            download_mbps = 0.0
+            upload_mbps = 0.0
+            ping_ms: Optional[float] = None
+            monthly_usage_gb = 0.0
+            connection_up = False
+
+            if client.router_id and (self.router_id != client.router_id or not self.api):
+                self.connect_to_router(client.router_id)
+
+            if self.api:
+                active_connections = self.get_active_connections()
+                for conn in active_connections:
+                    ctype = str(conn.get('type') or '').lower()
+                    addr = str(conn.get('address') or '')
+                    mac = str(conn.get('mac_address') or '').lower()
+                    name = str(conn.get('name') or '')
+
+                    if client.connection_type == 'pppoe' and client.pppoe_username:
+                        if ctype == 'pppoe' and name == client.pppoe_username:
+                            connection_up = True
+                            break
+                    elif client.ip_address and addr == client.ip_address:
+                        connection_up = True
+                        break
+                    elif client.mac_address and mac and mac == client.mac_address.lower():
+                        connection_up = True
+                        break
+
+            telemetry_tags = {'router_id': str(client.router_id)} if client.router_id else None
+            try:
+                monitoring = MonitoringService()
+
+                latest_traffic = monitoring.latest_point('interface_traffic', tags=telemetry_tags)
+                if latest_traffic:
+                    rx_bytes = float(latest_traffic.get('rx_bytes', 0) or 0)
+                    tx_bytes = float(latest_traffic.get('tx_bytes', 0) or 0)
+                    download_mbps = max(0.0, rx_bytes * 8 / 1_000_000)
+                    upload_mbps = max(0.0, tx_bytes * 8 / 1_000_000)
+
+                latest_router = monitoring.latest_point('router_stats', tags=telemetry_tags)
+                if latest_router:
+                    for key in ('ping_ms', 'latency_ms', 'wan_latency_ms'):
+                        if latest_router.get(key) is not None:
+                            ping_ms = float(latest_router.get(key))
+                            break
+
+                monthly_series = monitoring.query_metrics('interface_traffic', time_range='-30d', tags=telemetry_tags)
+                for point in monthly_series:
+                    rx = float(point.get('rx_bytes', 0) or 0)
+                    tx = float(point.get('tx_bytes', 0) or 0)
+                    monthly_usage_gb += (rx + tx) / (1024 ** 3)
+            except Exception as telemetry_exc:
+                logger.info("Dashboard stats using telemetry fallback for client %s: %s", client.id, telemetry_exc)
+
+            if plan_down > 0:
+                download_mbps = min(download_mbps, plan_down)
+            if plan_up > 0:
+                upload_mbps = min(upload_mbps, plan_up)
+
+            cap_gb = max(120.0, (plan_down + plan_up) * 4.0) if (plan_down + plan_up) > 0 else 500.0
+            monthly_usage_pct = min(100.0, (monthly_usage_gb / cap_gb) * 100.0) if cap_gb > 0 else 0.0
+
+            invoice_query = Invoice.query.join(Subscription, Invoice.subscription_id == Subscription.id)
+            if client.tenant_id is not None:
+                invoice_query = invoice_query.filter(Subscription.tenant_id == client.tenant_id)
+
+            filters = [Subscription.client_id == client.id]
+            if client.user and client.user.email:
+                filters.append(Subscription.email == client.user.email)
+
+            next_invoice = (
+                invoice_query
+                .filter(or_(*filters))
+                .filter(Invoice.status.in_(('pending', 'overdue', 'past_due')))
+                .order_by(Invoice.due_date.asc())
+                .first()
+            )
+
+            next_bill_amount = "0.00 USD"
+            next_bill_due = "Sin factura pendiente"
+            if next_invoice:
+                currency = next_invoice.currency or 'USD'
+                next_bill_amount = f"{float(next_invoice.total_amount):.2f} {currency}"
+                if next_invoice.due_date:
+                    delta_days = (next_invoice.due_date - datetime.utcnow().date()).days
+                    if delta_days > 1:
+                        next_bill_due = f"Vence en {delta_days} dias"
+                    elif delta_days == 1:
+                        next_bill_due = "Vence manana"
+                    elif delta_days == 0:
+                        next_bill_due = "Vence hoy"
+                    else:
+                        next_bill_due = f"Vencida hace {abs(delta_days)} dias"
+
+            if ping_ms is None:
+                ping_ms = 10.0 if connection_up else 0.0
+
+            router_online = bool(client.router.is_active) if client.router else True
+            if not router_online:
+                connection_up = False
+
             return {
-                "currentSpeed": f"{random.randint(80, 100)}/{random.randint(18, 22)} Mbps",
-                "ping": f"{random.randint(9, 15)}ms",
-                "monthlyUsage": f"{random.randint(40, 60)}%",
-                "nextBillAmount": "$29.99", # This would come from a billing service
-                "nextBillDue": "Vence en 15 días",
-                "deviceCount": random.randint(8, 15)
+                "currentSpeed": f"{download_mbps:.1f}/{upload_mbps:.1f} Mbps",
+                "ping": f"{ping_ms:.1f} ms",
+                "monthlyUsage": f"{monthly_usage_pct:.0f}%",
+                "nextBillAmount": next_bill_amount,
+                "nextBillDue": next_bill_due,
+                "deviceCount": 1 if connection_up else 0,
             }
         except RouterOsApiError as e:
             logger.error(f"MikroTik API error getting dashboard stats for client {client.id}: {e}")
@@ -1302,3 +1402,4 @@ class MikroTikService:
         except Exception as e:
             logger.error(f"Backup failed: {e}")
             return None
+
