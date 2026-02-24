@@ -1880,11 +1880,13 @@ def client_notification_preferences():
 @main_bp.route('/ops/run-job', methods=['POST'])
 @admin_required()
 def run_background_job():
+    tenant_id = current_tenant_id()
     data = request.get_json() or {}
     job = (data.get('job') or '').strip().lower()
     if job not in SYSTEM_ALLOWED_JOBS:
         return jsonify({"error": "job debe ser backup | cleanup_leases | rotate_passwords | recalc_balances"}), 400
-    return jsonify({"success": True, "job": job, "started_at": datetime.utcnow().isoformat() + "Z"}), 200
+    payload, code = _run_system_job_request(job, tenant_id, _current_user_id())
+    return jsonify(payload), code
 
 
 @main_bp.route('/payments/checkout', methods=['POST'])
@@ -3733,6 +3735,88 @@ def _default_system_settings() -> dict:
     }
 
 
+def _recalculate_invoice_balances(tenant_id) -> dict:
+    invoices_q = Invoice.query.options(
+        joinedload(Invoice.payments),
+        joinedload(Invoice.subscription),
+    )
+    if tenant_id is not None:
+        invoices_q = invoices_q.join(Subscription, Invoice.subscription_id == Subscription.id).filter(
+            Subscription.tenant_id == tenant_id
+        )
+
+    scanned = 0
+    updated = 0
+    for invoice in invoices_q.all():
+        if str(invoice.status or '').lower() == 'cancelled':
+            continue
+
+        paid_total = 0.0
+        for payment in invoice.payments:
+            if str(payment.status or '').lower() == 'paid':
+                paid_total += float(payment.amount or 0)
+
+        expected_status = 'paid' if paid_total >= float(invoice.total_amount or 0) else 'pending'
+        if invoice.status != expected_status:
+            invoice.status = expected_status
+            updated += 1
+        scanned += 1
+
+    db.session.commit()
+    return {"scanned": scanned, "updated": updated, "timestamp": _iso_utc_now()}
+
+
+def _execute_system_job(job: str, tenant_id) -> tuple[str, dict]:
+    try:
+        if job == 'backup':
+            from app.services.backup_service import run_backups as run_full_backups
+            return 'completed', run_full_backups()
+        if job == 'cleanup_leases':
+            from app.tasks import enforce_billing_status
+            result = enforce_billing_status()
+            if isinstance(result, dict):
+                return 'completed', result
+            return 'completed', {"result": str(result)}
+        if job == 'recalc_balances':
+            return 'completed', _recalculate_invoice_balances(tenant_id)
+        if job == 'rotate_passwords':
+            return 'skipped', {
+                "message": "Rotacion de passwords requiere integracion por proveedor y queda desactivada de forma segura."
+            }
+        return 'failed', {"error": f"job no soportado: {job}"}
+    except Exception as exc:
+        current_app.logger.error("System job execution failed for %s: %s", job, exc, exc_info=True)
+        return 'failed', {"error": str(exc)}
+
+
+def _run_system_job_request(job: str, tenant_id, requested_by) -> tuple[dict, int]:
+    entry = {
+        "id": secrets.token_hex(8),
+        "job": job,
+        "status": "started",
+        "requested_by": requested_by,
+        "started_at": _iso_utc_now(),
+    }
+
+    status, result = _execute_system_job(job, tenant_id)
+    entry["status"] = status
+    entry["finished_at"] = _iso_utc_now()
+    entry["result"] = result
+
+    key = _system_jobs_key(tenant_id)
+    jobs = _load_cached_list(key)
+    jobs.insert(0, entry)
+    _save_cached_list(key, jobs, max_items=200)
+
+    severity = "info" if status in {"completed", "skipped"} else "critical"
+    _notify_incident(f"Job administrativo ejecutado: {job} -> {status}", severity=severity)
+    _audit("system_job_run", entity_type="system_job", entity_id=entry["id"], metadata=entry)
+
+    if status == 'failed':
+        return {"success": False, "job": entry}, 500
+    return {"success": True, "job": entry}, 200
+
+
 @main_bp.route('/admin/system/settings', methods=['GET'])
 @admin_required()
 def admin_system_settings_get():
@@ -3840,22 +3924,8 @@ def admin_system_jobs_run():
     job = (data.get('job') or '').strip().lower()
     if job not in SYSTEM_ALLOWED_JOBS:
         return jsonify({"error": f"job debe ser {' | '.join(sorted(SYSTEM_ALLOWED_JOBS))}"}), 400
-
-    entry = {
-        "id": secrets.token_hex(8),
-        "job": job,
-        "status": "started",
-        "requested_by": _current_user_id(),
-        "started_at": _iso_utc_now(),
-    }
-    key = _system_jobs_key(tenant_id)
-    jobs = _load_cached_list(key)
-    jobs.insert(0, entry)
-    _save_cached_list(key, jobs, max_items=200)
-
-    _notify_incident(f"Job administrativo solicitado: {job}", severity="info")
-    _audit("system_job_run", entity_type="system_job", entity_id=entry["id"], metadata=entry)
-    return jsonify({"success": True, "job": entry}), 202
+    payload, code = _run_system_job_request(job, tenant_id, _current_user_id())
+    return jsonify(payload), code
 
 
 # ==================== TICKETS CON SLA ====================
