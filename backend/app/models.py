@@ -22,6 +22,14 @@ class Tenant(db.Model):
     slug = db.Column(db.String(80), unique=True, nullable=False, index=True)
     name = db.Column(db.String(120), nullable=False)
     is_active = db.Column(db.Boolean, default=True, nullable=False)
+    plan_code = db.Column(db.String(40), nullable=False, default='starter')
+    billing_status = db.Column(db.String(20), nullable=False, default='active')
+    billing_cycle = db.Column(db.String(20), nullable=False, default='monthly')
+    monthly_price = db.Column(db.Numeric(10, 2), nullable=False, default=0)
+    max_admins = db.Column(db.Integer, nullable=False, default=3)
+    max_routers = db.Column(db.Integer, nullable=False, default=3)
+    max_clients = db.Column(db.Integer, nullable=False, default=300)
+    trial_ends_at = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
 
     users = db.relationship('User', back_populates='tenant')
@@ -36,6 +44,14 @@ class Tenant(db.Model):
             'slug': self.slug,
             'name': self.name,
             'is_active': self.is_active,
+            'plan_code': self.plan_code,
+            'billing_status': self.billing_status,
+            'billing_cycle': self.billing_cycle,
+            'monthly_price': float(self.monthly_price or 0),
+            'max_admins': self.max_admins,
+            'max_routers': self.max_routers,
+            'max_clients': self.max_clients,
+            'trial_ends_at': self.trial_ends_at.isoformat() if self.trial_ends_at else None,
         }
 
 

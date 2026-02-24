@@ -361,6 +361,34 @@ def _get_user_invoice_items(user: User, tenant_id) -> list[dict]:
 
 STAFF_ALLOWED_ROLES = {"admin", "tech", "support", "billing", "noc", "operator"}
 PLATFORM_ADMIN_ROLE = "platform_admin"
+TENANT_BILLING_ALLOWED_STATUS = {"trial", "active", "past_due", "suspended", "cancelled"}
+TENANT_BILLING_ALLOWED_CYCLES = {"monthly", "quarterly", "yearly"}
+TENANT_PLAN_TEMPLATES = {
+    "starter": {
+        "monthly_price": 39.0,
+        "max_admins": 2,
+        "max_routers": 5,
+        "max_clients": 400,
+    },
+    "growth": {
+        "monthly_price": 89.0,
+        "max_admins": 5,
+        "max_routers": 20,
+        "max_clients": 2000,
+    },
+    "pro": {
+        "monthly_price": 179.0,
+        "max_admins": 10,
+        "max_routers": 60,
+        "max_clients": 8000,
+    },
+    "enterprise": {
+        "monthly_price": 399.0,
+        "max_admins": 30,
+        "max_routers": 250,
+        "max_clients": 50000,
+    },
+}
 STAFF_ALLOWED_STATUS = {"active", "on_leave", "inactive"}
 STAFF_ALLOWED_SHIFTS = {"day", "night", "mixed"}
 INSTALLATION_ALLOWED_STATUS = {"pending", "scheduled", "in_progress", "completed", "cancelled"}
@@ -624,12 +652,23 @@ def _serialize_tenant_platform_item(tenant: Tenant) -> dict:
     subs_total = Subscription.query.filter_by(tenant_id=tenant.id).count()
     active_subs = Subscription.query.filter_by(tenant_id=tenant.id, status='active').count()
     suspended_subs = Subscription.query.filter_by(tenant_id=tenant.id, status='suspended').count()
+    root_domain = str(current_app.config.get('TENANCY_ROOT_DOMAIN') or '').strip().lower()
+    tenant_host = f"{tenant.slug}.{root_domain}" if root_domain else tenant.slug
     return {
         "id": tenant.id,
         "slug": tenant.slug,
         "name": tenant.name,
         "is_active": bool(tenant.is_active),
         "created_at": tenant.created_at.isoformat() if tenant.created_at else None,
+        "host": tenant_host,
+        "plan_code": tenant.plan_code,
+        "billing_status": tenant.billing_status,
+        "billing_cycle": tenant.billing_cycle,
+        "monthly_price": float(tenant.monthly_price or 0),
+        "max_admins": int(tenant.max_admins or 0),
+        "max_routers": int(tenant.max_routers or 0),
+        "max_clients": int(tenant.max_clients or 0),
+        "trial_ends_at": tenant.trial_ends_at.isoformat() if tenant.trial_ends_at else None,
         "users_total": users_total,
         "admins_total": admin_total,
         "clients_total": clients_total,
@@ -642,6 +681,52 @@ def _serialize_tenant_platform_item(tenant: Tenant) -> dict:
 
 def _platform_admin_exists() -> bool:
     return User.query.filter_by(role=PLATFORM_ADMIN_ROLE).first() is not None
+
+
+def _normalize_tenant_plan_code(value: str | None) -> str | None:
+    candidate = str(value or '').strip().lower()
+    if not candidate:
+        return None
+    if candidate in TENANT_PLAN_TEMPLATES:
+        return candidate
+    return None
+
+
+def _normalize_tenant_billing_status(value: str | None) -> str | None:
+    candidate = str(value or '').strip().lower()
+    if not candidate:
+        return None
+    if candidate in TENANT_BILLING_ALLOWED_STATUS:
+        return candidate
+    return None
+
+
+def _normalize_tenant_billing_cycle(value: str | None) -> str | None:
+    candidate = str(value or '').strip().lower()
+    if not candidate:
+        return None
+    if candidate in TENANT_BILLING_ALLOWED_CYCLES:
+        return candidate
+    return None
+
+
+def _parse_limit_int(value, min_value: int, max_value: int) -> int | None:
+    if value is None or str(value).strip() == '':
+        return None
+    parsed = _parse_int(value)
+    if parsed is None:
+        return None
+    return max(min_value, min(max_value, parsed))
+
+
+def _parse_money_value(value) -> float | None:
+    if value is None or str(value).strip() == '':
+        return None
+    try:
+        parsed = round(float(value), 2)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, parsed)
 
 
 def _build_network_alert_items(tenant_id) -> list[dict]:
@@ -1067,23 +1152,49 @@ def platform_overview():
     tenants_total = Tenant.query.count()
     tenants_active = Tenant.query.filter_by(is_active=True).count()
     tenants_inactive = max(0, tenants_total - tenants_active)
+    tenants_trial = Tenant.query.filter_by(billing_status='trial').count()
+    tenants_past_due = Tenant.query.filter_by(billing_status='past_due').count()
+    tenants_suspended = Tenant.query.filter_by(billing_status='suspended').count()
     users_total = User.query.count()
     clients_total = Client.query.count()
     routers_total = MikroTikRouter.query.count()
     subscriptions_total = Subscription.query.count()
     subscriptions_active = Subscription.query.filter_by(status='active').count()
+    subscriptions_overdue = Subscription.query.filter(
+        Subscription.status.in_(['past_due', 'suspended'])
+    ).count()
+    mrr_total = round(
+        sum(
+            float(tenant.monthly_price or 0)
+            for tenant in Tenant.query.filter(
+                Tenant.billing_status.in_(['trial', 'active', 'past_due'])
+            ).all()
+        ),
+        2,
+    )
 
     payload = {
         "tenants_total": tenants_total,
         "tenants_active": tenants_active,
         "tenants_inactive": tenants_inactive,
+        "tenants_trial": tenants_trial,
+        "tenants_past_due": tenants_past_due,
+        "tenants_suspended": tenants_suspended,
         "users_total": users_total,
         "clients_total": clients_total,
         "routers_total": routers_total,
         "subscriptions_total": subscriptions_total,
         "subscriptions_active": subscriptions_active,
+        "subscriptions_overdue": subscriptions_overdue,
+        "mrr_total": mrr_total,
     }
     return jsonify(payload), 200
+
+
+@main_bp.route('/platform/plans/templates', methods=['GET'])
+@platform_admin_required()
+def platform_plan_templates():
+    return jsonify({"items": TENANT_PLAN_TEMPLATES}), 200
 
 
 @main_bp.route('/platform/tenants', methods=['GET'])
@@ -1112,11 +1223,45 @@ def platform_create_tenant():
     if duplicate:
         return jsonify({"error": "slug ya existe"}), 409
 
+    plan_code = _normalize_tenant_plan_code(data.get('plan_code'))
+    if 'plan_code' in data and not plan_code:
+        return jsonify({"error": "plan_code invalido"}), 400
+    plan_code = plan_code or 'starter'
+    template = TENANT_PLAN_TEMPLATES[plan_code]
+
     is_active = _parse_bool(data.get('is_active'))
+    billing_status = _normalize_tenant_billing_status(data.get('billing_status'))
+    if 'billing_status' in data and not billing_status:
+        return jsonify({"error": "billing_status invalido"}), 400
+    billing_status = billing_status or 'active'
+
+    billing_cycle = _normalize_tenant_billing_cycle(data.get('billing_cycle'))
+    if 'billing_cycle' in data and not billing_cycle:
+        return jsonify({"error": "billing_cycle invalido"}), 400
+    billing_cycle = billing_cycle or 'monthly'
+    monthly_price = _parse_money_value(data.get('monthly_price'))
+    max_admins = _parse_limit_int(data.get('max_admins'), min_value=1, max_value=100)
+    max_routers = _parse_limit_int(data.get('max_routers'), min_value=1, max_value=100000)
+    max_clients = _parse_limit_int(data.get('max_clients'), min_value=10, max_value=1000000)
+
+    raw_trial_ends_at = data.get('trial_ends_at')
+    trial_ends_at = _parse_iso_datetime(raw_trial_ends_at)
+    raw_trial_token = str(raw_trial_ends_at or '').strip()
+    if raw_trial_token and trial_ends_at is None:
+        return jsonify({"error": "trial_ends_at invalido. Use formato ISO 8601."}), 400
+
     tenant = Tenant(
         slug=slug,
         name=name,
         is_active=True if is_active is None else bool(is_active),
+        plan_code=plan_code,
+        billing_status=billing_status,
+        billing_cycle=billing_cycle,
+        monthly_price=monthly_price if monthly_price is not None else template['monthly_price'],
+        max_admins=max_admins if max_admins is not None else template['max_admins'],
+        max_routers=max_routers if max_routers is not None else template['max_routers'],
+        max_clients=max_clients if max_clients is not None else template['max_clients'],
+        trial_ends_at=trial_ends_at,
     )
     db.session.add(tenant)
     db.session.flush()
@@ -1128,6 +1273,9 @@ def platform_create_tenant():
         if User.query.filter_by(email=admin_email).first():
             db.session.rollback()
             return jsonify({"error": "admin_email ya existe"}), 409
+        if int(tenant.max_admins or 0) < 1:
+            db.session.rollback()
+            return jsonify({"error": "El plan del tenant no permite crear admins"}), 409
         admin_password = str(data.get('admin_password') or '').strip() or secrets.token_urlsafe(12)
         admin_user = User(
             name=admin_name,
@@ -1188,6 +1336,64 @@ def platform_update_tenant(tenant_id):
         tenant.is_active = parsed
         changed = True
 
+    if 'plan_code' in data:
+        plan_code = _normalize_tenant_plan_code(data.get('plan_code'))
+        if not plan_code:
+            return jsonify({"error": "plan_code invalido"}), 400
+        tenant.plan_code = plan_code
+        changed = True
+
+    if 'billing_status' in data:
+        billing_status = _normalize_tenant_billing_status(data.get('billing_status'))
+        if not billing_status:
+            return jsonify({"error": "billing_status invalido"}), 400
+        tenant.billing_status = billing_status
+        changed = True
+
+    if 'billing_cycle' in data:
+        billing_cycle = _normalize_tenant_billing_cycle(data.get('billing_cycle'))
+        if not billing_cycle:
+            return jsonify({"error": "billing_cycle invalido"}), 400
+        tenant.billing_cycle = billing_cycle
+        changed = True
+
+    if 'monthly_price' in data:
+        monthly_price = _parse_money_value(data.get('monthly_price'))
+        if monthly_price is None:
+            return jsonify({"error": "monthly_price invalido"}), 400
+        tenant.monthly_price = monthly_price
+        changed = True
+
+    if 'max_admins' in data:
+        max_admins = _parse_limit_int(data.get('max_admins'), min_value=1, max_value=100)
+        if max_admins is None:
+            return jsonify({"error": "max_admins invalido"}), 400
+        tenant.max_admins = max_admins
+        changed = True
+
+    if 'max_routers' in data:
+        max_routers = _parse_limit_int(data.get('max_routers'), min_value=1, max_value=100000)
+        if max_routers is None:
+            return jsonify({"error": "max_routers invalido"}), 400
+        tenant.max_routers = max_routers
+        changed = True
+
+    if 'max_clients' in data:
+        max_clients = _parse_limit_int(data.get('max_clients'), min_value=10, max_value=1000000)
+        if max_clients is None:
+            return jsonify({"error": "max_clients invalido"}), 400
+        tenant.max_clients = max_clients
+        changed = True
+
+    if 'trial_ends_at' in data:
+        raw_trial_ends_at = data.get('trial_ends_at')
+        parsed_trial_ends_at = _parse_iso_datetime(raw_trial_ends_at)
+        raw_value = str(raw_trial_ends_at or '').strip()
+        if raw_value and parsed_trial_ends_at is None:
+            return jsonify({"error": "trial_ends_at invalido. Use formato ISO 8601."}), 400
+        tenant.trial_ends_at = parsed_trial_ends_at
+        changed = True
+
     if changed:
         db.session.add(tenant)
         db.session.commit()
@@ -1201,6 +1407,10 @@ def platform_create_tenant_admin(tenant_id):
     tenant = db.session.get(Tenant, tenant_id)
     if not tenant:
         return jsonify({"error": "Tenant no encontrado"}), 404
+
+    current_admins = User.query.filter_by(tenant_id=tenant.id, role='admin').count()
+    if current_admins >= int(tenant.max_admins or 0):
+        return jsonify({"error": "Limite de admins alcanzado para este tenant"}), 409
 
     data = request.get_json() or {}
     email = str(data.get('email') or '').strip().lower()

@@ -18,11 +18,16 @@ interface PlatformOverview {
   tenants_total: number
   tenants_active: number
   tenants_inactive: number
+  tenants_trial: number
+  tenants_past_due: number
+  tenants_suspended: number
   users_total: number
   clients_total: number
   routers_total: number
   subscriptions_total: number
   subscriptions_active: number
+  subscriptions_overdue: number
+  mrr_total: number
 }
 
 interface PlatformTenantItem {
@@ -31,6 +36,15 @@ interface PlatformTenantItem {
   name: string
   is_active: boolean
   created_at: string | null
+  host: string
+  plan_code: string
+  billing_status: 'trial' | 'active' | 'past_due' | 'suspended' | 'cancelled'
+  billing_cycle: 'monthly' | 'quarterly' | 'yearly'
+  monthly_price: number
+  max_admins: number
+  max_routers: number
+  max_clients: number
+  trial_ends_at: string | null
   users_total: number
   admins_total: number
   clients_total: number
@@ -44,31 +58,64 @@ interface PlatformTenantsResponse {
   items?: PlatformTenantItem[]
 }
 
+interface TenantPlanTemplate {
+  monthly_price: number
+  max_admins: number
+  max_routers: number
+  max_clients: number
+}
+
+interface TenantPlanTemplatesResponse {
+  items?: Record<string, TenantPlanTemplate>
+}
+
+const defaultPlanTemplates: Record<string, TenantPlanTemplate> = {
+  starter: { monthly_price: 39, max_admins: 2, max_routers: 5, max_clients: 400 },
+  growth: { monthly_price: 89, max_admins: 5, max_routers: 20, max_clients: 2000 },
+  pro: { monthly_price: 179, max_admins: 10, max_routers: 60, max_clients: 8000 },
+  enterprise: { monthly_price: 399, max_admins: 30, max_routers: 250, max_clients: 50000 },
+}
+
 const defaultOverview: PlatformOverview = {
   tenants_total: 0,
   tenants_active: 0,
   tenants_inactive: 0,
+  tenants_trial: 0,
+  tenants_past_due: 0,
+  tenants_suspended: 0,
   users_total: 0,
   clients_total: 0,
   routers_total: 0,
   subscriptions_total: 0,
   subscriptions_active: 0,
+  subscriptions_overdue: 0,
+  mrr_total: 0,
 }
 
 const PlatformAdmin: React.FC = () => {
   const { user, logout } = useAuthStore()
   const [overview, setOverview] = useState<PlatformOverview>(defaultOverview)
   const [tenants, setTenants] = useState<PlatformTenantItem[]>([])
+  const [planTemplates, setPlanTemplates] = useState<Record<string, TenantPlanTemplate>>(defaultPlanTemplates)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
 
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('all')
+  const [billingFilter, setBillingFilter] = useState<'all' | 'trial' | 'active' | 'past_due' | 'suspended' | 'cancelled'>('all')
 
   const [tenantForm, setTenantForm] = useState({
     name: '',
     slug: '',
     is_active: true,
+    plan_code: 'starter',
+    billing_status: 'active',
+    billing_cycle: 'monthly',
+    monthly_price: '',
+    max_admins: '',
+    max_routers: '',
+    max_clients: '',
+    trial_ends_at: '',
     admin_email: '',
     admin_name: 'Admin ISP',
     admin_password: '',
@@ -82,15 +129,54 @@ const PlatformAdmin: React.FC = () => {
   const [editingTenant, setEditingTenant] = useState<PlatformTenantItem | null>(null)
   const [editForm, setEditForm] = useState({ name: '', slug: '' })
 
+  const [billingTarget, setBillingTarget] = useState<PlatformTenantItem | null>(null)
+  const [billingForm, setBillingForm] = useState({
+    plan_code: 'starter',
+    billing_status: 'active',
+    billing_cycle: 'monthly',
+    monthly_price: '',
+    max_admins: '',
+    max_routers: '',
+    max_clients: '',
+    trial_ends_at: '',
+  })
+
   const [adminTarget, setAdminTarget] = useState<PlatformTenantItem | null>(null)
   const [adminForm, setAdminForm] = useState({ email: '', name: 'Admin ISP', password: '' })
+
+  const parseOptionalNumber = (raw: string, field: string): number | undefined => {
+    const token = raw.trim()
+    if (!token) return undefined
+    const parsed = Number(token)
+    if (!Number.isFinite(parsed)) {
+      throw new Error(`${field} invalido`)
+    }
+    return parsed
+  }
+
+  const parseOptionalInt = (raw: string, field: string): number | undefined => {
+    const value = parseOptionalNumber(raw, field)
+    if (value === undefined) return undefined
+    if (!Number.isInteger(value)) {
+      throw new Error(`${field} debe ser entero`)
+    }
+    return value
+  }
+
+  const toLocalDateTimeInput = (isoDate: string | null | undefined): string => {
+    if (!isoDate) return ''
+    const parsed = new Date(isoDate)
+    if (Number.isNaN(parsed.getTime())) return ''
+    return parsed.toISOString().slice(0, 16)
+  }
 
   const loadPlatformData = useCallback(async () => {
     setLoading(true)
     try {
-      const [overviewResponse, tenantsResponse] = await Promise.all([
+      const [overviewResponse, tenantsResponse, templatesResponse] = await Promise.all([
         apiClient.get('/platform/overview') as Promise<PlatformOverview>,
         apiClient.get('/platform/tenants') as Promise<PlatformTenantsResponse>,
+        apiClient.get('/platform/plans/templates') as Promise<TenantPlanTemplatesResponse>,
       ])
       setOverview({
         ...defaultOverview,
@@ -98,6 +184,11 @@ const PlatformAdmin: React.FC = () => {
       })
       const list = Array.isArray(tenantsResponse.items) ? tenantsResponse.items : []
       setTenants(list)
+      const templates =
+        templatesResponse && templatesResponse.items && Object.keys(templatesResponse.items).length
+          ? templatesResponse.items
+          : defaultPlanTemplates
+      setPlanTemplates(templates)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error cargando admin total'
       toast.error(message)
@@ -110,15 +201,44 @@ const PlatformAdmin: React.FC = () => {
     void loadPlatformData()
   }, [loadPlatformData])
 
+  const planCodes = useMemo(() => Object.keys(planTemplates), [planTemplates])
+
   const filteredTenants = useMemo(() => {
     const query = search.trim().toLowerCase()
     return tenants.filter((tenant) => {
       if (statusFilter === 'active' && !tenant.is_active) return false
       if (statusFilter === 'inactive' && tenant.is_active) return false
+      if (billingFilter !== 'all' && tenant.billing_status !== billingFilter) return false
       if (!query) return true
       return tenant.name.toLowerCase().includes(query) || tenant.slug.toLowerCase().includes(query)
     })
-  }, [search, statusFilter, tenants])
+  }, [billingFilter, search, statusFilter, tenants])
+
+  const applyPlanTemplateToCreate = (planCode: string) => {
+    const template = planTemplates[planCode]
+    if (!template) return
+    setTenantForm((prev) => ({
+      ...prev,
+      plan_code: planCode,
+      monthly_price: String(template.monthly_price),
+      max_admins: String(template.max_admins),
+      max_routers: String(template.max_routers),
+      max_clients: String(template.max_clients),
+    }))
+  }
+
+  const applyPlanTemplateToBilling = (planCode: string) => {
+    const template = planTemplates[planCode]
+    if (!template) return
+    setBillingForm((prev) => ({
+      ...prev,
+      plan_code: planCode,
+      monthly_price: String(template.monthly_price),
+      max_admins: String(template.max_admins),
+      max_routers: String(template.max_routers),
+      max_clients: String(template.max_clients),
+    }))
+  }
 
   const submitCreateTenant = async (event: React.FormEvent) => {
     event.preventDefault()
@@ -129,10 +249,32 @@ const PlatformAdmin: React.FC = () => {
 
     setBusy(true)
     try {
+      const monthlyPrice = parseOptionalNumber(tenantForm.monthly_price, 'monthly_price')
+      const maxAdmins = parseOptionalInt(tenantForm.max_admins, 'max_admins')
+      const maxRouters = parseOptionalInt(tenantForm.max_routers, 'max_routers')
+      const maxClients = parseOptionalInt(tenantForm.max_clients, 'max_clients')
+
+      let trialEndsAt: string | undefined
+      if (tenantForm.trial_ends_at.trim()) {
+        const parsed = new Date(tenantForm.trial_ends_at)
+        if (Number.isNaN(parsed.getTime())) {
+          throw new Error('trial_ends_at invalido')
+        }
+        trialEndsAt = parsed.toISOString()
+      }
+
       const payload = {
         name: tenantForm.name.trim(),
         slug: tenantForm.slug.trim() || undefined,
         is_active: tenantForm.is_active,
+        plan_code: tenantForm.plan_code,
+        billing_status: tenantForm.billing_status,
+        billing_cycle: tenantForm.billing_cycle,
+        monthly_price: monthlyPrice,
+        max_admins: maxAdmins,
+        max_routers: maxRouters,
+        max_clients: maxClients,
+        trial_ends_at: trialEndsAt,
         admin_email: tenantForm.admin_email.trim() || undefined,
         admin_name: tenantForm.admin_name.trim() || undefined,
         admin_password: tenantForm.admin_password.trim() || undefined,
@@ -157,6 +299,14 @@ const PlatformAdmin: React.FC = () => {
         ...prev,
         name: '',
         slug: '',
+        plan_code: 'starter',
+        billing_status: 'active',
+        billing_cycle: 'monthly',
+        monthly_price: '',
+        max_admins: '',
+        max_routers: '',
+        max_clients: '',
+        trial_ends_at: '',
         admin_email: '',
         admin_password: '',
       }))
@@ -207,6 +357,61 @@ const PlatformAdmin: React.FC = () => {
       await loadPlatformData()
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error actualizando tenant'
+      toast.error(message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const openBillingEditor = (tenant: PlatformTenantItem) => {
+    setBillingTarget(tenant)
+    setBillingForm({
+      plan_code: tenant.plan_code || 'starter',
+      billing_status: tenant.billing_status || 'active',
+      billing_cycle: tenant.billing_cycle || 'monthly',
+      monthly_price: String(tenant.monthly_price ?? ''),
+      max_admins: String(tenant.max_admins ?? ''),
+      max_routers: String(tenant.max_routers ?? ''),
+      max_clients: String(tenant.max_clients ?? ''),
+      trial_ends_at: toLocalDateTimeInput(tenant.trial_ends_at),
+    })
+  }
+
+  const submitBillingUpdate = async (event: React.FormEvent) => {
+    event.preventDefault()
+    if (!billingTarget) return
+
+    setBusy(true)
+    try {
+      const monthlyPrice = parseOptionalNumber(billingForm.monthly_price, 'monthly_price')
+      const maxAdmins = parseOptionalInt(billingForm.max_admins, 'max_admins')
+      const maxRouters = parseOptionalInt(billingForm.max_routers, 'max_routers')
+      const maxClients = parseOptionalInt(billingForm.max_clients, 'max_clients')
+
+      let trialEndsAt: string | null = null
+      if (billingForm.trial_ends_at.trim()) {
+        const parsed = new Date(billingForm.trial_ends_at)
+        if (Number.isNaN(parsed.getTime())) {
+          throw new Error('trial_ends_at invalido')
+        }
+        trialEndsAt = parsed.toISOString()
+      }
+
+      await apiClient.patch(`/platform/tenants/${billingTarget.id}`, {
+        plan_code: billingForm.plan_code,
+        billing_status: billingForm.billing_status,
+        billing_cycle: billingForm.billing_cycle,
+        monthly_price: monthlyPrice,
+        max_admins: maxAdmins,
+        max_routers: maxRouters,
+        max_clients: maxClients,
+        trial_ends_at: trialEndsAt,
+      })
+      toast.success('Suscripcion del tenant actualizada')
+      setBillingTarget(null)
+      await loadPlatformData()
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Error actualizando suscripcion'
       toast.error(message)
     } finally {
       setBusy(false)
@@ -280,12 +485,13 @@ const PlatformAdmin: React.FC = () => {
 
       <main className="mx-auto grid w-full max-w-7xl grid-cols-1 gap-6 px-6 py-6 xl:grid-cols-[1.8fr,1fr]">
         <section className="space-y-6">
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-5">
             {[
               { label: 'Tenants', value: overview.tenants_total, icon: BuildingOffice2Icon, tone: 'from-cyan-500/30 to-blue-500/10' },
               { label: 'Clientes', value: overview.clients_total, icon: UsersIcon, tone: 'from-emerald-500/30 to-green-500/10' },
               { label: 'Routers', value: overview.routers_total, icon: ServerStackIcon, tone: 'from-amber-500/30 to-orange-500/10' },
               { label: 'Subs Activas', value: overview.subscriptions_active, icon: CheckBadgeIcon, tone: 'from-violet-500/30 to-indigo-500/10' },
+              { label: 'MRR', value: `$${overview.mrr_total.toFixed(2)}`, icon: BoltIcon, tone: 'from-cyan-500/30 to-emerald-500/10' },
             ].map((card) => (
               <div
                 key={card.label}
@@ -296,9 +502,7 @@ const PlatformAdmin: React.FC = () => {
                   <card.icon className="h-5 w-5 text-white/80" />
                 </div>
                 <p className="mt-3 text-3xl font-black text-white">{card.value}</p>
-                <p className="mt-1 text-xs text-slate-300">
-                  Activos: {overview.tenants_active} | Inactivos: {overview.tenants_inactive}
-                </p>
+                <p className="mt-1 text-xs text-slate-300">Activos: {overview.tenants_active} | Mora: {overview.tenants_past_due}</p>
               </div>
             ))}
           </div>
@@ -319,7 +523,7 @@ const PlatformAdmin: React.FC = () => {
               </button>
             </div>
 
-            <div className="mb-4 grid grid-cols-1 gap-2 md:grid-cols-[1fr,180px]">
+            <div className="mb-4 grid grid-cols-1 gap-2 md:grid-cols-[1fr,170px,180px]">
               <input
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
@@ -334,6 +538,20 @@ const PlatformAdmin: React.FC = () => {
                 <option value="all">Todos</option>
                 <option value="active">Activos</option>
                 <option value="inactive">Inactivos</option>
+              </select>
+              <select
+                value={billingFilter}
+                onChange={(event) =>
+                  setBillingFilter(event.target.value as 'all' | 'trial' | 'active' | 'past_due' | 'suspended' | 'cancelled')
+                }
+                className="rounded-xl border border-white/15 bg-slate-950/40 px-3 py-2 text-sm text-slate-100 focus:border-cyan-400 focus:outline-none"
+              >
+                <option value="all">Facturacion</option>
+                <option value="trial">Trial</option>
+                <option value="active">Activa</option>
+                <option value="past_due">Vencida</option>
+                <option value="suspended">Suspendida</option>
+                <option value="cancelled">Cancelada</option>
               </select>
             </div>
 
@@ -350,8 +568,14 @@ const PlatformAdmin: React.FC = () => {
                           <span className={`rounded-full px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.1em] ${tenant.is_active ? 'bg-emerald-500/20 text-emerald-200' : 'bg-rose-500/20 text-rose-200'}`}>
                             {tenant.is_active ? 'activo' : 'inactivo'}
                           </span>
+                          <span className="rounded-full bg-cyan-500/20 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.1em] text-cyan-100">
+                            {tenant.plan_code}
+                          </span>
+                          <span className="rounded-full bg-violet-500/20 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.1em] text-violet-100">
+                            {tenant.billing_status}
+                          </span>
                         </div>
-                        <p className="text-xs text-slate-300">{tenant.slug}.fastisp.cloud</p>
+                        <p className="text-xs text-slate-300">{tenant.host || `${tenant.slug}.fastisp.cloud`}</p>
                       </div>
                       <div className="flex flex-wrap gap-2">
                         <button
@@ -370,6 +594,13 @@ const PlatformAdmin: React.FC = () => {
                           Editar
                         </button>
                         <button
+                          onClick={() => openBillingEditor(tenant)}
+                          disabled={busy}
+                          className="inline-flex items-center gap-1 rounded-lg border border-violet-400/40 bg-violet-500/20 px-3 py-1.5 text-xs font-semibold text-violet-100 hover:bg-violet-500/30 disabled:opacity-60"
+                        >
+                          Suscripcion
+                        </button>
+                        <button
                           onClick={() => openCreateAdmin(tenant)}
                           disabled={busy}
                           className="inline-flex items-center gap-1 rounded-lg border border-emerald-400/40 bg-emerald-500/20 px-3 py-1.5 text-xs font-semibold text-emerald-100 hover:bg-emerald-500/30 disabled:opacity-60"
@@ -381,10 +612,12 @@ const PlatformAdmin: React.FC = () => {
                     </div>
                     <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-200 md:grid-cols-5">
                       <p><span className="text-slate-400">Usuarios:</span> {tenant.users_total}</p>
-                      <p><span className="text-slate-400">Admins:</span> {tenant.admins_total}</p>
-                      <p><span className="text-slate-400">Clientes:</span> {tenant.clients_total}</p>
-                      <p><span className="text-slate-400">Routers:</span> {tenant.routers_total}</p>
+                      <p><span className="text-slate-400">Admins:</span> {tenant.admins_total}/{tenant.max_admins}</p>
+                      <p><span className="text-slate-400">Clientes:</span> {tenant.clients_total}/{tenant.max_clients}</p>
+                      <p><span className="text-slate-400">Routers:</span> {tenant.routers_total}/{tenant.max_routers}</p>
                       <p><span className="text-slate-400">Subs:</span> {tenant.subscriptions_total}</p>
+                      <p><span className="text-slate-400">Ciclo:</span> {tenant.billing_cycle}</p>
+                      <p><span className="text-slate-400">Precio:</span> ${Number(tenant.monthly_price || 0).toFixed(2)}</p>
                     </div>
                   </article>
                 ))}
@@ -416,6 +649,73 @@ const PlatformAdmin: React.FC = () => {
                 onChange={(event) => setTenantForm((prev) => ({ ...prev, slug: event.target.value }))}
                 placeholder="Slug (opcional)"
                 className="w-full rounded-xl border border-white/15 bg-slate-950/45 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-400 focus:border-cyan-400 focus:outline-none"
+              />
+              <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+                <select
+                  value={tenantForm.plan_code}
+                  onChange={(event) => applyPlanTemplateToCreate(event.target.value)}
+                  className="rounded-xl border border-white/15 bg-slate-950/45 px-3 py-2 text-sm text-slate-100 focus:border-cyan-400 focus:outline-none"
+                >
+                  {planCodes.map((planCode) => (
+                    <option key={planCode} value={planCode}>
+                      Plan {planCode}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={tenantForm.billing_status}
+                  onChange={(event) => setTenantForm((prev) => ({ ...prev, billing_status: event.target.value }))}
+                  className="rounded-xl border border-white/15 bg-slate-950/45 px-3 py-2 text-sm text-slate-100 focus:border-cyan-400 focus:outline-none"
+                >
+                  <option value="trial">Trial</option>
+                  <option value="active">Activa</option>
+                  <option value="past_due">Vencida</option>
+                  <option value="suspended">Suspendida</option>
+                  <option value="cancelled">Cancelada</option>
+                </select>
+              </div>
+              <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+                <select
+                  value={tenantForm.billing_cycle}
+                  onChange={(event) => setTenantForm((prev) => ({ ...prev, billing_cycle: event.target.value }))}
+                  className="rounded-xl border border-white/15 bg-slate-950/45 px-3 py-2 text-sm text-slate-100 focus:border-cyan-400 focus:outline-none"
+                >
+                  <option value="monthly">Ciclo mensual</option>
+                  <option value="quarterly">Ciclo trimestral</option>
+                  <option value="yearly">Ciclo anual</option>
+                </select>
+                <input
+                  value={tenantForm.monthly_price}
+                  onChange={(event) => setTenantForm((prev) => ({ ...prev, monthly_price: event.target.value }))}
+                  placeholder="Precio mensual (opcional)"
+                  className="rounded-xl border border-white/15 bg-slate-950/45 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-400 focus:border-cyan-400 focus:outline-none"
+                />
+              </div>
+              <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+                <input
+                  value={tenantForm.max_admins}
+                  onChange={(event) => setTenantForm((prev) => ({ ...prev, max_admins: event.target.value }))}
+                  placeholder="Max admins"
+                  className="rounded-xl border border-white/15 bg-slate-950/45 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-400 focus:border-cyan-400 focus:outline-none"
+                />
+                <input
+                  value={tenantForm.max_routers}
+                  onChange={(event) => setTenantForm((prev) => ({ ...prev, max_routers: event.target.value }))}
+                  placeholder="Max routers"
+                  className="rounded-xl border border-white/15 bg-slate-950/45 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-400 focus:border-cyan-400 focus:outline-none"
+                />
+                <input
+                  value={tenantForm.max_clients}
+                  onChange={(event) => setTenantForm((prev) => ({ ...prev, max_clients: event.target.value }))}
+                  placeholder="Max clientes"
+                  className="rounded-xl border border-white/15 bg-slate-950/45 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-400 focus:border-cyan-400 focus:outline-none"
+                />
+              </div>
+              <input
+                type="datetime-local"
+                value={tenantForm.trial_ends_at}
+                onChange={(event) => setTenantForm((prev) => ({ ...prev, trial_ends_at: event.target.value }))}
+                className="w-full rounded-xl border border-white/15 bg-slate-950/45 px-3 py-2 text-sm text-slate-100 focus:border-cyan-400 focus:outline-none"
               />
               <label className="flex items-center gap-2 text-xs text-slate-300">
                 <input
@@ -496,6 +796,91 @@ const PlatformAdmin: React.FC = () => {
                 </button>
                 <button type="submit" disabled={busy} className="rounded-lg bg-cyan-500 px-3 py-2 text-sm font-semibold text-white hover:bg-cyan-400 disabled:opacity-60">
                   Guardar cambios
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {billingTarget && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/70 p-4">
+          <div className="w-full max-w-xl rounded-2xl border border-white/15 bg-slate-900 p-5">
+            <h3 className="text-lg font-bold text-white">Suscripcion de {billingTarget.name}</h3>
+            <form onSubmit={submitBillingUpdate} className="mt-4 space-y-3">
+              <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+                <select
+                  value={billingForm.plan_code}
+                  onChange={(event) => applyPlanTemplateToBilling(event.target.value)}
+                  className="rounded-xl border border-white/15 bg-slate-950/45 px-3 py-2 text-sm text-slate-100 focus:border-cyan-400 focus:outline-none"
+                >
+                  {planCodes.map((planCode) => (
+                    <option key={planCode} value={planCode}>
+                      Plan {planCode}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={billingForm.billing_status}
+                  onChange={(event) => setBillingForm((prev) => ({ ...prev, billing_status: event.target.value }))}
+                  className="rounded-xl border border-white/15 bg-slate-950/45 px-3 py-2 text-sm text-slate-100 focus:border-cyan-400 focus:outline-none"
+                >
+                  <option value="trial">Trial</option>
+                  <option value="active">Activa</option>
+                  <option value="past_due">Vencida</option>
+                  <option value="suspended">Suspendida</option>
+                  <option value="cancelled">Cancelada</option>
+                </select>
+              </div>
+              <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+                <select
+                  value={billingForm.billing_cycle}
+                  onChange={(event) => setBillingForm((prev) => ({ ...prev, billing_cycle: event.target.value }))}
+                  className="rounded-xl border border-white/15 bg-slate-950/45 px-3 py-2 text-sm text-slate-100 focus:border-cyan-400 focus:outline-none"
+                >
+                  <option value="monthly">Ciclo mensual</option>
+                  <option value="quarterly">Ciclo trimestral</option>
+                  <option value="yearly">Ciclo anual</option>
+                </select>
+                <input
+                  value={billingForm.monthly_price}
+                  onChange={(event) => setBillingForm((prev) => ({ ...prev, monthly_price: event.target.value }))}
+                  placeholder="Precio mensual"
+                  className="rounded-xl border border-white/15 bg-slate-950/45 px-3 py-2 text-sm text-slate-100 focus:border-cyan-400 focus:outline-none"
+                />
+              </div>
+              <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+                <input
+                  value={billingForm.max_admins}
+                  onChange={(event) => setBillingForm((prev) => ({ ...prev, max_admins: event.target.value }))}
+                  placeholder="Max admins"
+                  className="rounded-xl border border-white/15 bg-slate-950/45 px-3 py-2 text-sm text-slate-100 focus:border-cyan-400 focus:outline-none"
+                />
+                <input
+                  value={billingForm.max_routers}
+                  onChange={(event) => setBillingForm((prev) => ({ ...prev, max_routers: event.target.value }))}
+                  placeholder="Max routers"
+                  className="rounded-xl border border-white/15 bg-slate-950/45 px-3 py-2 text-sm text-slate-100 focus:border-cyan-400 focus:outline-none"
+                />
+                <input
+                  value={billingForm.max_clients}
+                  onChange={(event) => setBillingForm((prev) => ({ ...prev, max_clients: event.target.value }))}
+                  placeholder="Max clientes"
+                  className="rounded-xl border border-white/15 bg-slate-950/45 px-3 py-2 text-sm text-slate-100 focus:border-cyan-400 focus:outline-none"
+                />
+              </div>
+              <input
+                type="datetime-local"
+                value={billingForm.trial_ends_at}
+                onChange={(event) => setBillingForm((prev) => ({ ...prev, trial_ends_at: event.target.value }))}
+                className="w-full rounded-xl border border-white/15 bg-slate-950/45 px-3 py-2 text-sm text-slate-100 focus:border-cyan-400 focus:outline-none"
+              />
+              <div className="flex justify-end gap-2">
+                <button type="button" onClick={() => setBillingTarget(null)} className="rounded-lg border border-white/20 px-3 py-2 text-sm text-slate-200 hover:bg-white/10">
+                  Cancelar
+                </button>
+                <button type="submit" disabled={busy} className="rounded-lg bg-violet-500 px-3 py-2 text-sm font-semibold text-white hover:bg-violet-400 disabled:opacity-60">
+                  Guardar suscripcion
                 </button>
               </div>
             </form>
