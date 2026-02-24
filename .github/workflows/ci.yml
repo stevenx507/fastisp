@@ -4,10 +4,19 @@ on:
   push:
     branches: ["main", "master"]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   frontend:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: frontend
@@ -37,7 +46,9 @@ jobs:
 
   backend:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.10", "3.11"]
     defaults:
@@ -68,7 +79,9 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     needs: frontend
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: frontend
@@ -96,8 +109,18 @@ jobs:
       - name: E2E (Playwright)
         run: npm run test:e2e
 
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: frontend/playwright-report
+          if-no-files-found: ignore
+
   loadtest:
     runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
