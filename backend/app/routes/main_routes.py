@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import secrets
+import string
 import time
 
 from flask import Blueprint, jsonify, request, Response, current_app
@@ -74,6 +75,51 @@ def _parse_bool(value) -> bool | None:
     if token in {'0', 'false', 'no', 'n', 'off'}:
         return False
     return None
+
+
+def _password_rotation_dry_run_enabled() -> bool:
+    parsed = _parse_bool(current_app.config.get('ROTATE_PASSWORDS_DRY_RUN'))
+    if parsed is None:
+        return False
+    return parsed
+
+
+def _password_rotation_length() -> int:
+    default_length = 24
+    try:
+        configured = int(current_app.config.get('PASSWORD_ROTATION_LENGTH', default_length))
+    except (TypeError, ValueError):
+        configured = default_length
+    return max(16, min(configured, 64))
+
+
+def _generate_router_password(length: int | None = None) -> str:
+    target_length = length or _password_rotation_length()
+    target_length = max(16, target_length)
+
+    lowercase = string.ascii_lowercase
+    uppercase = string.ascii_uppercase
+    digits = string.digits
+    symbols = '-_@%#'
+    all_chars = lowercase + uppercase + digits + symbols
+
+    password_chars = [
+        secrets.choice(lowercase),
+        secrets.choice(uppercase),
+        secrets.choice(digits),
+        secrets.choice(symbols),
+    ]
+    for _ in range(target_length - len(password_chars)):
+        password_chars.append(secrets.choice(all_chars))
+    secrets.SystemRandom().shuffle(password_chars)
+    return ''.join(password_chars)
+
+
+def _mask_secret(value: str | None) -> str:
+    token = str(value or '')
+    if len(token) <= 4:
+        return '*' * len(token)
+    return f"{token[:2]}***{token[-2:]}"
 
 
 def _backup_dir_path() -> Path:
@@ -3792,6 +3838,107 @@ def _recalculate_invoice_balances(tenant_id) -> dict:
     return {"scanned": scanned, "updated": updated, "timestamp": _iso_utc_now()}
 
 
+def _rotate_mikrotik_passwords(tenant_id) -> tuple[str, dict]:
+    routers_q = MikroTikRouter.query.filter_by(is_active=True)
+    if tenant_id is not None:
+        routers_q = routers_q.filter_by(tenant_id=tenant_id)
+    routers = routers_q.order_by(MikroTikRouter.id.asc()).all()
+
+    if not routers:
+        return 'skipped', {
+            "message": "No hay routers activos para rotar password.",
+            "total": 0,
+            "rotated": 0,
+            "failed": 0,
+            "items": [],
+        }
+
+    dry_run = _password_rotation_dry_run_enabled()
+    results = []
+    rotated = 0
+    failed = 0
+    length = _password_rotation_length()
+    default_username = str(current_app.config.get('MIKROTIK_DEFAULT_USERNAME') or '').strip()
+
+    for router in routers:
+        username = str(router.username or default_username).strip()
+        if not username:
+            failed += 1
+            results.append(
+                {
+                    "router_id": router.id,
+                    "router_name": router.name,
+                    "status": "failed",
+                    "error": "username no configurado",
+                }
+            )
+            continue
+
+        new_password = _generate_router_password(length)
+        if dry_run:
+            rotated += 1
+            results.append(
+                {
+                    "router_id": router.id,
+                    "router_name": router.name,
+                    "username": username,
+                    "status": "dry_run",
+                    "preview": _mask_secret(new_password),
+                }
+            )
+            continue
+
+        try:
+            with MikroTikService(router.id) as service:
+                outcome = service.rotate_api_password(username=username, new_password=new_password)
+        except Exception as exc:
+            outcome = {"success": False, "error": str(exc)}
+
+        if outcome.get("success"):
+            router.password = new_password
+            db.session.add(router)
+            db.session.commit()
+            rotated += 1
+            results.append(
+                {
+                    "router_id": router.id,
+                    "router_name": router.name,
+                    "username": username,
+                    "status": "rotated",
+                }
+            )
+        else:
+            db.session.rollback()
+            failed += 1
+            results.append(
+                {
+                    "router_id": router.id,
+                    "router_name": router.name,
+                    "username": username,
+                    "status": "failed",
+                    "error": str(outcome.get("error") or "unknown_error"),
+                }
+            )
+
+    summary = {
+        "total": len(routers),
+        "rotated": rotated,
+        "failed": failed,
+        "dry_run": dry_run,
+        "items": results,
+    }
+
+    if dry_run:
+        summary["message"] = "Rotacion ejecutada en modo dry_run. No se aplicaron cambios."
+        return 'skipped', summary
+
+    if failed > 0 and rotated == 0:
+        return 'failed', summary
+    if failed > 0:
+        return 'completed_with_errors', summary
+    return 'completed', summary
+
+
 def _execute_system_job(job: str, tenant_id) -> tuple[str, dict]:
     try:
         if job == 'backup':
@@ -3806,9 +3953,7 @@ def _execute_system_job(job: str, tenant_id) -> tuple[str, dict]:
         if job == 'recalc_balances':
             return 'completed', _recalculate_invoice_balances(tenant_id)
         if job == 'rotate_passwords':
-            return 'skipped', {
-                "message": "Rotacion de passwords requiere integracion por proveedor y queda desactivada de forma segura."
-            }
+            return _rotate_mikrotik_passwords(tenant_id)
         return 'failed', {"error": f"job no soportado: {job}"}
     except Exception as exc:
         current_app.logger.error("System job execution failed for %s: %s", job, exc, exc_info=True)
@@ -3834,7 +3979,13 @@ def _run_system_job_request(job: str, tenant_id, requested_by) -> tuple[dict, in
     jobs.insert(0, entry)
     _save_cached_list(key, jobs, max_items=200)
 
-    severity = "info" if status in {"completed", "skipped"} else "critical"
+    severity_map = {
+        "completed": "info",
+        "skipped": "info",
+        "completed_with_errors": "warning",
+        "failed": "critical",
+    }
+    severity = severity_map.get(status, "warning")
     _notify_incident(f"Job administrativo ejecutado: {job} -> {status}", severity=severity)
     _audit("system_job_run", entity_type="system_job", entity_id=entry["id"], metadata=entry)
 

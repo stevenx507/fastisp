@@ -99,6 +99,8 @@ class Config:
     # MikroTik
     MIKROTIK_DEFAULT_USERNAME = os.environ.get('MIKROTIK_DEFAULT_USERNAME', 'admin')
     MIKROTIK_DEFAULT_PASSWORD = os.environ.get('MIKROTIK_DEFAULT_PASSWORD', '')
+    ROTATE_PASSWORDS_DRY_RUN = _as_bool(os.environ.get('ROTATE_PASSWORDS_DRY_RUN'), default=False)
+    PASSWORD_ROTATION_LENGTH = os.environ.get('PASSWORD_ROTATION_LENGTH', '24')
     
     # Logging
     LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO')
@@ -187,6 +189,14 @@ class ProductionConfig(Config):
 
         if not str(os.environ.get('BACKUP_DIR', '/app/backups')).strip():
             raise ValueError("BACKUP_DIR cannot be empty in production.")
+
+        rotation_raw = os.environ.get('PASSWORD_ROTATION_LENGTH', '24')
+        try:
+            rotation_length = int(rotation_raw)
+        except (TypeError, ValueError):
+            raise ValueError("PASSWORD_ROTATION_LENGTH must be an integer in production.")
+        if rotation_length < 16 or rotation_length > 64:
+            raise ValueError("PASSWORD_ROTATION_LENGTH must be between 16 and 64 in production.")
 
         weak_keys = [
             key

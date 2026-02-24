@@ -1320,6 +1320,37 @@ class MikroTikService:
         except Exception as e:
             logger.error(f"Unexpected error rebooting router: {e}")
             return False
+
+    def rotate_api_password(self, username: str, new_password: str) -> Dict:
+        """Rotate password for an existing RouterOS user."""
+        try:
+            if not self.api:
+                return {'success': False, 'error': 'No active router connection.'}
+
+            user_token = str(username or '').strip()
+            secret = str(new_password or '')
+            if not user_token:
+                return {'success': False, 'error': 'username is required'}
+            if len(secret) < 8:
+                return {'success': False, 'error': 'new password is too short'}
+
+            user_api = self.api.get_resource('/user')
+            users = user_api.get(name=user_token)
+            if not users:
+                return {'success': False, 'error': f'Router user not found: {user_token}'}
+
+            user_id = users[0].get('.id') or users[0].get('id')
+            if not user_id:
+                return {'success': False, 'error': f'Unable to resolve router user id: {user_token}'}
+
+            user_api.set(id=user_id, password=secret)
+            return {'success': True, 'username': user_token}
+        except RouterOsApiError as e:
+            logger.error(f"MikroTik API error rotating router password: {e}")
+            return {'success': False, 'error': f"MikroTik API Error: {e}"}
+        except Exception as e:
+            logger.error(f"Unexpected error rotating router password: {e}")
+            return {'success': False, 'error': f"Unexpected Error: {e}"}
     
     def execute_script(self, script_content: str) -> Dict:
         """Execute script on router"""
