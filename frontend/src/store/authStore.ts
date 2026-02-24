@@ -10,6 +10,7 @@ interface User {
   role: 'admin' | 'client'
   plan?: string
   client_id?: number
+  mfa_enabled?: boolean
 }
 
 interface AuthState {

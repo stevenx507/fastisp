@@ -1,4 +1,4 @@
-from flask_jwt_extended import decode_token
+from flask_jwt_extended import create_access_token, decode_token
 
 from app import db
 from app.models import Tenant, User
@@ -99,3 +99,51 @@ def test_login_rejects_tenant_mismatch(client, app):
     )
 
     assert response.status_code == 401
+
+
+def test_update_password_success(client, app):
+    with app.app_context():
+        user = User(email='password@test.local', role='admin', name='Password Admin')
+        user.set_password('oldpassword123')
+        db.session.add(user)
+        db.session.commit()
+        user_id = user.id
+
+    with app.app_context():
+        auth_token = create_access_token(identity=str(user_id))
+
+    response = client.post(
+        '/api/auth/password',
+        json={'current_password': 'oldpassword123', 'new_password': 'newpassword123'},
+        headers={'Authorization': f'Bearer {auth_token}'},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['success'] is True
+
+    with app.app_context():
+        updated = User.query.get(user_id)
+        assert updated is not None
+        assert updated.check_password('newpassword123')
+
+
+def test_update_password_rejects_wrong_current_password(client, app):
+    with app.app_context():
+        user = User(email='password-fail@test.local', role='admin', name='Password Fail')
+        user.set_password('correctpassword')
+        db.session.add(user)
+        db.session.commit()
+        user_id = user.id
+        auth_token = create_access_token(identity=str(user_id))
+
+    response = client.post(
+        '/api/auth/password',
+        json={'current_password': 'wrongpassword', 'new_password': 'anothernewpassword'},
+        headers={'Authorization': f'Bearer {auth_token}'},
+    )
+
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert 'incorrecta' in payload['error']
+

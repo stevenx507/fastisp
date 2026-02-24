@@ -765,6 +765,38 @@ def update_profile():
     return jsonify({"user": user.to_dict(), "success": True}), 200
 
 
+@main_bp.route('/auth/password', methods=['POST'])
+@jwt_required()
+def update_password():
+    current_user_id = _current_user_id()
+    if current_user_id is None:
+        return jsonify({"error": "Token de usuario invalido."}), 401
+
+    data = request.get_json() or {}
+    current_password = str(data.get('current_password') or '')
+    new_password = str(data.get('new_password') or '')
+
+    if not current_password or not new_password:
+        return jsonify({"error": "Contraseña actual y nueva contraseña son requeridas."}), 400
+    if len(new_password) < 8:
+        return jsonify({"error": "La nueva contraseña debe tener al menos 8 caracteres."}), 400
+
+    user = User.query.get_or_404(current_user_id)
+    tenant_id = current_tenant_id()
+    if tenant_id is not None and user.tenant_id not in (None, tenant_id):
+        return jsonify({"error": "Acceso denegado para este tenant."}), 403
+
+    if not user.check_password(current_password):
+        return jsonify({"error": "La contraseña actual es incorrecta."}), 400
+    if user.check_password(new_password):
+        return jsonify({"error": "La nueva contraseña debe ser diferente a la actual."}), 400
+
+    user.set_password(new_password)
+    db.session.add(user)
+    db.session.commit()
+    return jsonify({"success": True}), 200
+
+
 @main_bp.route('/auth/mfa/setup', methods=['GET'])
 @jwt_required()
 def mfa_setup():
