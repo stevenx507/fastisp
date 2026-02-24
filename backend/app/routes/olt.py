@@ -1,34 +1,69 @@
 """
-OLT enterprise API endpoints (ZTE, Huawei, VSOL)
+OLT enterprise API endpoints (ZTE, Huawei, VSOL).
 """
-from flask import Blueprint, jsonify, request, current_app
+from __future__ import annotations
+
+import socket
+import time
+
+from flask import Blueprint, current_app, jsonify, request
 from flask_jwt_extended import get_jwt_identity
 
-from app.models import User, AuditLog
+from app.models import AuditLog, User
 from app.routes.main_routes import admin_required
 from app.services.olt_script_service import OLTScriptService
 from app.tenancy import current_tenant_id
 
 olt_bp = Blueprint("olt", __name__)
 
-# Plantillas de servicio por vendor (demo)
+# Service profile templates used by authorize-onu flows.
 SERVICE_TEMPLATES = {
     "zte": [
-        {"id": "zte-line-100m", "label": "ZTE 100M", "line_profile": "LINE-100M", "srv_profile": "SRV-INTERNET"},
-        {"id": "zte-line-200m", "label": "ZTE 200M", "line_profile": "LINE-200M", "srv_profile": "SRV-INTERNET"},
+        {
+            "id": "zte-line-100m",
+            "label": "ZTE 100M",
+            "line_profile": "LINE-100M",
+            "srv_profile": "SRV-INTERNET",
+        },
+        {
+            "id": "zte-line-200m",
+            "label": "ZTE 200M",
+            "line_profile": "LINE-200M",
+            "srv_profile": "SRV-INTERNET",
+        },
     ],
     "huawei": [
-        {"id": "hw-100m", "label": "Huawei 100M", "line_profile": "line-profile_100M", "srv_profile": "srv-profile_internet"},
-        {"id": "hw-300m", "label": "Huawei 300M", "line_profile": "line-profile_300M", "srv_profile": "srv-profile_internet"},
+        {
+            "id": "hw-100m",
+            "label": "Huawei 100M",
+            "line_profile": "line-profile_100M",
+            "srv_profile": "srv-profile_internet",
+        },
+        {
+            "id": "hw-300m",
+            "label": "Huawei 300M",
+            "line_profile": "line-profile_300M",
+            "srv_profile": "srv-profile_internet",
+        },
     ],
     "vsol": [
-        {"id": "vsol-50m", "label": "VSOL 50M", "line_profile": "VSOL50M", "srv_profile": "Internet"},
-        {"id": "vsol-100m", "label": "VSOL 100M", "line_profile": "VSOL100M", "srv_profile": "Internet"},
+        {
+            "id": "vsol-50m",
+            "label": "VSOL 50M",
+            "line_profile": "VSOL50M",
+            "srv_profile": "Internet",
+        },
+        {
+            "id": "vsol-100m",
+            "label": "VSOL 100M",
+            "line_profile": "VSOL100M",
+            "srv_profile": "Internet",
+        },
     ],
 }
 
 
-def _as_bool(value):
+def _as_bool(value) -> bool:
     if isinstance(value, bool):
         return value
     if value is None:
@@ -36,7 +71,7 @@ def _as_bool(value):
     return str(value).strip().lower() in ("1", "true", "yes", "y", "on")
 
 
-def _resolve_actor_identity():
+def _resolve_actor_identity() -> str:
     current_identity = get_jwt_identity()
     if current_identity is None:
         return "system"
@@ -49,7 +84,7 @@ def _resolve_actor_identity():
     return f"user:{current_identity}"
 
 
-def _audit(action: str, entity_type: str = None, entity_id: str = None, metadata=None):
+def _audit(action: str, entity_type: str | None = None, entity_id: str | None = None, metadata=None):
     try:
         tenant_id = current_tenant_id()
         user_id = get_jwt_identity()
@@ -67,7 +102,7 @@ def _audit(action: str, entity_type: str = None, entity_id: str = None, metadata
         db.session.add(log)
         db.session.commit()
     except Exception:
-        # avoid breaking flow because of audit failure
+        # Auditing should not break user flows.
         pass
 
 
@@ -83,6 +118,80 @@ def _demo_mode_response(feature: str):
         ),
         501,
     )
+
+
+def _parse_run_mode(data, default: str = "simulate") -> str:
+    run_mode = str((data or {}).get("run_mode", default)).strip().lower()
+    if run_mode not in {"simulate", "dry-run", "live"}:
+        return "simulate"
+    return run_mode
+
+
+def _validate_live_confirm(run_mode: str, data):
+    if run_mode != "live":
+        return None
+    if _as_bool((data or {}).get("live_confirm")):
+        return None
+    return jsonify({"success": False, "error": "live_confirm is required for live mode"}), 400
+
+
+def _build_onu_payload(data) -> dict:
+    data = data or {}
+    payload: dict = {}
+
+    for field in ("frame", "slot", "pon", "onu", "vlan"):
+        value = data.get(field)
+        if value in (None, ""):
+            continue
+        try:
+            payload[field] = int(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{field} must be integer")
+
+    for field in ("serial", "line_profile", "srv_profile"):
+        value = data.get(field)
+        if value in (None, ""):
+            continue
+        payload[field] = str(value).strip()
+
+    profile = data.get("profile")
+    if profile and "line_profile" not in payload:
+        payload["line_profile"] = str(profile).strip()
+
+    return payload
+
+
+def _run_vendor_action(device_id: str, action: str, payload: dict, run_mode: str):
+    service = OLTScriptService()
+    generated = service.generate_script(device_id=device_id, action=action, payload=payload)
+    if not generated.get("success"):
+        return generated, 400
+
+    commands = generated.get("commands", [])
+    result = service.execute_script(
+        device_id=device_id,
+        commands=commands,
+        run_mode=run_mode,
+        actor=_resolve_actor_identity(),
+        source_ip=request.remote_addr,
+    )
+
+    response = {
+        "success": bool(result.get("success")),
+        "device_id": device_id,
+        "device": generated.get("device"),
+        "action": action,
+        "run_mode": run_mode,
+        "payload": payload,
+        "commands": commands,
+        "execution": result,
+        "message": result.get("message"),
+    }
+    if not result.get("success"):
+        response["error"] = result.get("error") or "execution_failed"
+
+    status = 200 if result.get("success") else (502 if run_mode == "live" else 400)
+    return response, status
 
 
 @olt_bp.route("/vendors", methods=["GET"])
@@ -125,12 +234,21 @@ def test_connection():
     device_id = str(data.get("device_id", "")).strip()
     if not device_id:
         return jsonify({"success": False, "error": "device_id is required"}), 400
-    timeout = float(data.get("timeout", 2.5) or 2.5)
+
+    try:
+        timeout = float(data.get("timeout", 2.5) or 2.5)
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "timeout must be numeric"}), 400
     timeout = max(0.5, min(timeout, 10.0))
 
     service = OLTScriptService()
     result = service.test_connection(device_id=device_id, timeout_seconds=timeout)
-    _audit("olt_test_connection", entity_type="olt", entity_id=device_id, metadata={"success": result.get("success"), "latency_ms": result.get("latency_ms")})
+    _audit(
+        "olt_test_connection",
+        entity_type="olt",
+        entity_id=device_id,
+        metadata={"success": result.get("success"), "latency_ms": result.get("latency_ms")},
+    )
     return jsonify(result), (200 if result.get("success") else 502)
 
 
@@ -145,7 +263,12 @@ def generate_script(device_id):
 
     service = OLTScriptService()
     result = service.generate_script(device_id=device_id, action=action, payload=payload)
-    _audit("olt_generate_script", entity_type="olt", entity_id=device_id, metadata={"action": action, "success": result.get("success")})
+    _audit(
+        "olt_generate_script",
+        entity_type="olt",
+        entity_id=device_id,
+        metadata={"action": action, "success": result.get("success")},
+    )
     return jsonify(result), (200 if result.get("success") else 400)
 
 
@@ -156,17 +279,11 @@ def execute_script(device_id):
     commands = data.get("commands")
     if not isinstance(commands, list):
         return jsonify({"success": False, "error": "commands must be an array"}), 400
-    run_mode = str(data.get("run_mode", "simulate")).strip().lower()
-    if run_mode == "live" and not _as_bool(data.get("live_confirm")):
-        return (
-            jsonify(
-                {
-                    "success": False,
-                    "error": "live_confirm is required for live mode",
-                }
-            ),
-            400,
-        )
+
+    run_mode = _parse_run_mode(data)
+    live_guard = _validate_live_confirm(run_mode, data)
+    if live_guard:
+        return live_guard
 
     service = OLTScriptService()
     result = service.execute_script(
@@ -176,7 +293,12 @@ def execute_script(device_id):
         actor=_resolve_actor_identity(),
         source_ip=request.remote_addr,
     )
-    _audit("olt_execute_script", entity_type="olt", entity_id=device_id, metadata={"run_mode": run_mode, "success": result.get("success"), "commands": len(commands)})
+    _audit(
+        "olt_execute_script",
+        entity_type="olt",
+        entity_id=device_id,
+        metadata={"run_mode": run_mode, "success": result.get("success"), "commands": len(commands)},
+    )
     if result.get("success"):
         return jsonify(result), 200
     return jsonify(result), (502 if run_mode == "live" else 400)
@@ -226,93 +348,180 @@ def quick_connect_script(device_id):
 @olt_bp.route("/devices/<device_id>/autofind-onu", methods=["GET"])
 @admin_required()
 def autofind_onu(device_id):
-    """
-    Simula descubrimiento de ONU para aprobación.
-    """
-    guard = _demo_mode_response("autofind_onu")
-    if guard:
-        return guard
-    sample = [
-        {"serial": "ZTEG00000001", "vendor": "zte", "signal": -18.2, "rx_power": -19.5},
-        {"serial": "48575443ABCDEF01", "vendor": "huawei", "signal": -20.0, "rx_power": -21.3},
-        {"serial": "VSOL00000001", "vendor": "vsol", "signal": -17.5, "rx_power": -18.7},
-    ]
-    _audit("olt_autofind_onu", entity_type="olt", entity_id=device_id, metadata={"count": len(sample)})
-    return jsonify({"success": True, "device_id": device_id, "pending_onu": sample}), 200
+    params = request.args.to_dict()
+    run_mode = _parse_run_mode(params)
+    live_guard = _validate_live_confirm(run_mode, params)
+    if live_guard:
+        return live_guard
+
+    serial = str(params.get("serial") or "").strip()
+    action = "find_onu" if serial else "show_onu_list"
+    try:
+        payload = _build_onu_payload(params)
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+
+    response, status = _run_vendor_action(device_id=device_id, action=action, payload=payload, run_mode=run_mode)
+    if run_mode in {"simulate", "dry-run"} and current_app.config.get("ALLOW_OLT_DEMO", False):
+        response["pending_onu"] = [
+            {"serial": "ZTEG00000001", "vendor": "zte", "signal": -18.2, "rx_power": -19.5},
+            {"serial": "48575443ABCDEF01", "vendor": "huawei", "signal": -20.0, "rx_power": -21.3},
+            {"serial": "VSOL00000001", "vendor": "vsol", "signal": -17.5, "rx_power": -18.7},
+        ]
+
+    _audit(
+        "olt_autofind_onu",
+        entity_type="olt",
+        entity_id=device_id,
+        metadata={"success": response.get("success"), "action": action, "run_mode": run_mode},
+    )
+    return jsonify(response), status
 
 
 @olt_bp.route("/devices/<device_id>/authorize-onu", methods=["POST"])
 @admin_required()
 def authorize_onu(device_id):
-    guard = _demo_mode_response("authorize_onu")
-    if guard:
-        return guard
     data = request.get_json() or {}
+    run_mode = _parse_run_mode(data)
+    live_guard = _validate_live_confirm(run_mode, data)
+    if live_guard:
+        return live_guard
+
     serial = str(data.get("serial") or "").strip()
-    vlan = int(data.get("vlan") or 120)
-    profile = data.get("profile") or "LINE-100M"
     if not serial:
         return jsonify({"success": False, "error": "serial requerido"}), 400
-    _audit("olt_authorize_onu", entity_type="onu", entity_id=serial, metadata={"device_id": device_id, "vlan": vlan})
-    return jsonify({"success": True, "device_id": device_id, "serial": serial, "vlan": vlan, "profile": profile, "message": "ONU autorizada (demo)"}), 200
+
+    try:
+        payload = _build_onu_payload(data)
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+
+    response, status = _run_vendor_action(
+        device_id=device_id, action="authorize_onu", payload=payload, run_mode=run_mode
+    )
+    _audit(
+        "olt_authorize_onu",
+        entity_type="onu",
+        entity_id=serial,
+        metadata={"device_id": device_id, "run_mode": run_mode, "success": response.get("success")},
+    )
+    return jsonify(response), status
 
 
 @olt_bp.route("/devices/<device_id>/pon-power", methods=["GET"])
 @admin_required()
 def pon_power(device_id):
-    guard = _demo_mode_response("pon_power")
-    if guard:
-        return guard
-    """Monitorea potencia óptica por ONU (demo)."""
-    sample = [
-        {"serial": "ZTEG00000001", "rx_dbm": -19.2, "olt_port": "1/1/1", "status": "ok"},
-        {"serial": "48575443ABCDEF01", "rx_dbm": -23.4, "olt_port": "1/1/2", "status": "low"},
-        {"serial": "VSOL00000001", "rx_dbm": -16.8, "olt_port": "1/1/3", "status": "ok"},
-    ]
-    _audit("olt_pon_power", entity_type="olt", entity_id=device_id, metadata={"count": len(sample)})
-    return jsonify({"success": True, "device_id": device_id, "onus": sample, "thresholds": {"low": -23, "critical": -27}}), 200
+    params = request.args.to_dict()
+    run_mode = _parse_run_mode(params)
+    live_guard = _validate_live_confirm(run_mode, params)
+    if live_guard:
+        return live_guard
+
+    try:
+        payload = _build_onu_payload(params)
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+
+    response, status = _run_vendor_action(
+        device_id=device_id, action="show_optical_power", payload=payload, run_mode=run_mode
+    )
+    _audit(
+        "olt_pon_power",
+        entity_type="olt",
+        entity_id=device_id,
+        metadata={"run_mode": run_mode, "success": response.get("success")},
+    )
+    return jsonify(response), status
 
 
 @olt_bp.route("/devices/<device_id>/onu/suspend", methods=["POST"])
 @admin_required()
 def suspend_onu(device_id):
-    guard = _demo_mode_response("suspend_onu")
-    if guard:
-        return guard
     data = request.get_json() or {}
+    run_mode = _parse_run_mode(data)
+    live_guard = _validate_live_confirm(run_mode, data)
+    if live_guard:
+        return live_guard
+
     serial = str(data.get("serial") or "").strip()
     if not serial:
         return jsonify({"success": False, "error": "serial requerido"}), 400
-    _audit("olt_suspend_onu", entity_type="onu", entity_id=serial, metadata={"device_id": device_id})
-    return jsonify({"success": True, "device_id": device_id, "serial": serial, "message": "ONU suspendida (demo)"}), 200
+
+    try:
+        payload = _build_onu_payload(data)
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+
+    response, status = _run_vendor_action(
+        device_id=device_id, action="deauthorize_onu", payload=payload, run_mode=run_mode
+    )
+    _audit(
+        "olt_suspend_onu",
+        entity_type="onu",
+        entity_id=serial,
+        metadata={"device_id": device_id, "run_mode": run_mode, "success": response.get("success")},
+    )
+    return jsonify(response), status
 
 
 @olt_bp.route("/devices/<device_id>/onu/activate", methods=["POST"])
 @admin_required()
 def activate_onu(device_id):
-    guard = _demo_mode_response("activate_onu")
-    if guard:
-        return guard
     data = request.get_json() or {}
+    run_mode = _parse_run_mode(data)
+    live_guard = _validate_live_confirm(run_mode, data)
+    if live_guard:
+        return live_guard
+
     serial = str(data.get("serial") or "").strip()
     if not serial:
         return jsonify({"success": False, "error": "serial requerido"}), 400
-    _audit("olt_activate_onu", entity_type="onu", entity_id=serial, metadata={"device_id": device_id})
-    return jsonify({"success": True, "device_id": device_id, "serial": serial, "message": "ONU reactivada (demo)"}), 200
+
+    try:
+        payload = _build_onu_payload(data)
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+
+    response, status = _run_vendor_action(
+        device_id=device_id, action="authorize_onu", payload=payload, run_mode=run_mode
+    )
+    _audit(
+        "olt_activate_onu",
+        entity_type="onu",
+        entity_id=serial,
+        metadata={"device_id": device_id, "run_mode": run_mode, "success": response.get("success")},
+    )
+    return jsonify(response), status
 
 
 @olt_bp.route("/devices/<device_id>/onu/reboot", methods=["POST"])
 @admin_required()
 def reboot_onu(device_id):
-    guard = _demo_mode_response("reboot_onu")
-    if guard:
-        return guard
     data = request.get_json() or {}
+    run_mode = _parse_run_mode(data)
+    live_guard = _validate_live_confirm(run_mode, data)
+    if live_guard:
+        return live_guard
+
     serial = str(data.get("serial") or "").strip()
     if not serial:
         return jsonify({"success": False, "error": "serial requerido"}), 400
-    _audit("olt_reboot_onu", entity_type="onu", entity_id=serial, metadata={"device_id": device_id})
-    return jsonify({"success": True, "device_id": device_id, "serial": serial, "message": "ONU reiniciada (demo)"}), 200
+
+    try:
+        payload = _build_onu_payload(data)
+    except ValueError as exc:
+        return jsonify({"success": False, "error": str(exc)}), 400
+
+    response, status = _run_vendor_action(
+        device_id=device_id, action="reboot_onu", payload=payload, run_mode=run_mode
+    )
+    _audit(
+        "olt_reboot_onu",
+        entity_type="onu",
+        entity_id=serial,
+        metadata={"device_id": device_id, "run_mode": run_mode, "success": response.get("success")},
+    )
+    return jsonify(response), status
 
 
 @olt_bp.route("/devices/<device_id>/tr069/reprovision", methods=["POST"])
@@ -321,23 +530,34 @@ def tr069_reprovision(device_id):
     guard = _demo_mode_response("tr069_reprovision")
     if guard:
         return guard
+
     data = request.get_json() or {}
     host = data.get("host") or "acs.demo.local"
     ssid = data.get("ssid") or "ISPFAST_WIFI"
     key = data.get("key") or "ClaveFuerte2026"
     _audit("olt_tr069_reprovision", entity_type="olt", entity_id=device_id, metadata={"acs": host})
-    return jsonify({"success": True, "device_id": device_id, "acs": host, "ssid": ssid, "key": key, "message": "TR-069 reprovision enviado (demo)"}), 200
+    return (
+        jsonify(
+            {
+                "success": True,
+                "device_id": device_id,
+                "acs": host,
+                "ssid": ssid,
+                "key": key,
+                "message": "TR-069 reprovision enviado (demo)",
+            }
+        ),
+        200,
+    )
 
 
 @olt_bp.route("/devices/<device_id>/quick-login", methods=["GET"])
 @admin_required()
 def quick_login(device_id):
-    """
-    Devuelve un comando de conexion rapida (ssh/telnet) para Windows/Linux.
-    """
     platform = str(request.args.get("platform", "windows")).strip().lower()
     if platform not in ("windows", "linux"):
         platform = "windows"
+
     service = OLTScriptService()
     try:
         connect = service.quick_login_command(device_id=device_id, platform=platform)
@@ -349,17 +569,52 @@ def quick_login(device_id):
 @olt_bp.route("/tr064/test", methods=["POST"])
 @admin_required()
 def tr064_test():
-    """
-    Prueba de conectividad TR-064/ACS (demo). En produccion se debe reemplazar por llamado real.
-    """
-    guard = _demo_mode_response("tr064_test")
-    if guard:
-        return guard
     data = request.get_json() or {}
     host = str(data.get("host", "")).strip()
     if not host:
         return jsonify({"success": False, "message": "Host requerido"}), 400
-    port = int(data.get("port") or 7547)
-    vendor = (data.get("vendor") or "huawei").lower()
-    # Demo: siempre responde OK con latencia simulada
-    return jsonify({"success": True, "message": f"TR-064 OK ({vendor}) {host}:{port}", "latency_ms": 12}), 200
+
+    try:
+        port = int(data.get("port") or 7547)
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "message": "Port invalido"}), 400
+    if port < 1 or port > 65535:
+        return jsonify({"success": False, "message": "Port invalido"}), 400
+
+    try:
+        timeout = float(data.get("timeout") or 2.5)
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "message": "Timeout invalido"}), 400
+    timeout = max(0.5, min(timeout, 10.0))
+
+    started = time.perf_counter()
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            latency_ms = round((time.perf_counter() - started) * 1000, 2)
+            return (
+                jsonify(
+                    {
+                        "success": True,
+                        "message": "TR-064 reachable",
+                        "host": host,
+                        "port": port,
+                        "latency_ms": latency_ms,
+                    }
+                ),
+                200,
+            )
+    except Exception as exc:
+        latency_ms = round((time.perf_counter() - started) * 1000, 2)
+        return (
+            jsonify(
+                {
+                    "success": False,
+                    "message": "TR-064 unreachable",
+                    "host": host,
+                    "port": port,
+                    "latency_ms": latency_ms,
+                    "error": str(exc),
+                }
+            ),
+            502,
+        )
