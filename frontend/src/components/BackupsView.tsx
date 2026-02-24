@@ -9,12 +9,15 @@ import { ArrowDownTrayIcon, ArrowPathIcon } from '@heroicons/react/24/outline'
 type BackupFile = { name: string; size: number; modified: string }
 type VerifyItem = { name: string; valid: boolean; issues?: string[]; sha256?: string }
 type VerifyResponse = { valid: boolean; count: number; items: VerifyItem[] }
+type PruneResponse = { success: boolean; prune: { removed: number; retention_days: number } }
 
 const BackupsView: React.FC = () => {
   const [items, setItems] = useState<BackupFile[]>([])
   const [verificationByName, setVerificationByName] = useState<Record<string, VerifyItem>>({})
   const [loading, setLoading] = useState(false)
   const [verifyingName, setVerifyingName] = useState<string | null>(null)
+  const [pruning, setPruning] = useState(false)
+  const [retentionDays, setRetentionDays] = useState<number>(14)
   const token = useAuthStore((state) => state.token)
 
   const apiBase = config.API_BASE_URL.endsWith('/')
@@ -30,9 +33,10 @@ const BackupsView: React.FC = () => {
   const load = async () => {
     setLoading(true)
     try {
-      const resp = await apiClient.get('/admin/backups/list') as { items?: BackupFile[] }
+      const resp = await apiClient.get('/admin/backups/list') as { items?: BackupFile[]; retention_days?: number }
       const loadedItems = resp.items || []
       setItems(loadedItems)
+      setRetentionDays(Number(resp.retention_days || 14))
       setVerificationByName((prev) => {
         const next: Record<string, VerifyItem> = {}
         loadedItems.forEach((item) => {
@@ -53,11 +57,32 @@ const BackupsView: React.FC = () => {
 
   const triggerDb = async () => {
     try {
-      await apiClient.post('/admin/backups/db')
-      toast.success('Backup de DB generado')
+      const response = await apiClient.post('/admin/backups/db') as { filename?: string; prune?: { removed?: number } }
+      const removed = Number(response?.prune?.removed || 0)
+      toast.success(removed > 0 ? `Backup generado y ${removed} backups antiguos eliminados` : 'Backup de DB generado')
       load()
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'No se pudo generar backup')
+    }
+  }
+
+  const pruneBackups = async () => {
+    setPruning(true)
+    try {
+      const response = await apiClient.post('/admin/backups/prune') as PruneResponse
+      const removed = Number(response?.prune?.removed || 0)
+      const days = Number(response?.prune?.retention_days || retentionDays)
+      setRetentionDays(days)
+      toast.success(
+        removed > 0
+          ? `Limpieza completada: ${removed} backups eliminados`
+          : 'Limpieza completada: no hubo backups para eliminar',
+      )
+      load()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'No se pudo limpiar backups')
+    } finally {
+      setPruning(false)
     }
   }
 
@@ -134,11 +159,21 @@ const BackupsView: React.FC = () => {
       <div className="flex items-center justify-between">
         <h2 className="text-2xl font-bold text-white">Backups</h2>
         <div className="flex gap-2">
+          <span className="inline-flex items-center rounded-lg border border-white/20 px-3 py-2 text-xs font-medium text-slate-200">
+            Retencion: {retentionDays} dias
+          </span>
           <button
             onClick={triggerDb}
             className="px-4 py-2 rounded-lg bg-cyan-500 text-white text-sm font-semibold hover:bg-cyan-400"
           >
             Backup DB ahora
+          </button>
+          <button
+            onClick={pruneBackups}
+            disabled={pruning}
+            className="px-4 py-2 rounded-lg bg-amber-600 text-white text-sm font-semibold hover:bg-amber-500 disabled:opacity-50"
+          >
+            {pruning ? 'Limpiando...' : 'Limpiar antiguos'}
           </button>
           <button
             onClick={() => verifyBackup()}

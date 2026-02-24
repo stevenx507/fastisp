@@ -74,6 +74,7 @@ class Config:
     # Backups
     PG_DUMP_PATH = os.environ.get('PG_DUMP_PATH', 'pg_dump')
     BACKUP_DIR = os.environ.get('BACKUP_DIR', '/app/backups')
+    BACKUP_RETENTION_DAYS = os.environ.get('BACKUP_RETENTION_DAYS', '14')
     BACKUP_BUCKET = os.environ.get('BACKUP_BUCKET')  # optional external storage
 
     # Email
@@ -189,6 +190,14 @@ class ProductionConfig(Config):
 
         if not str(os.environ.get('BACKUP_DIR', '/app/backups')).strip():
             raise ValueError("BACKUP_DIR cannot be empty in production.")
+
+        retention_raw = os.environ.get('BACKUP_RETENTION_DAYS', '14')
+        try:
+            retention_days = int(retention_raw)
+        except (TypeError, ValueError):
+            raise ValueError("BACKUP_RETENTION_DAYS must be an integer in production.")
+        if retention_days < 1 or retention_days > 365:
+            raise ValueError("BACKUP_RETENTION_DAYS must be between 1 and 365 in production.")
 
         rotation_raw = os.environ.get('PASSWORD_ROTATION_LENGTH', '24')
         try:

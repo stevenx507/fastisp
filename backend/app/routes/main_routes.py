@@ -169,6 +169,71 @@ def _backup_item_payload(file_path: Path, include_hash: bool = False) -> dict:
     return payload
 
 
+def _normalized_retention_days(raw_value, default_days: int = 14) -> int:
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        parsed = default_days
+    return max(1, min(parsed, 365))
+
+
+def _retention_days_for_tenant(tenant_id) -> int:
+    defaults = {"backup_retention_days": 14}
+    try:
+        defaults = _default_system_settings()
+    except Exception:
+        pass
+    overrides = _load_cached_dict(_system_settings_key(tenant_id))
+    raw_value = overrides.get('backup_retention_days', defaults.get('backup_retention_days', 14))
+    return _normalized_retention_days(raw_value, default_days=int(defaults.get('backup_retention_days', 14)))
+
+
+def _prune_backup_directory(retention_days: int, base: Path | None = None) -> dict:
+    safe_days = _normalized_retention_days(retention_days)
+    backup_dir = base or _backup_dir_path()
+    if not backup_dir.exists():
+        return {
+            "retention_days": safe_days,
+            "cutoff": (datetime.utcnow() - timedelta(days=safe_days)).isoformat(),
+            "scanned": 0,
+            "removed": 0,
+            "failed": 0,
+            "removed_files": [],
+            "errors": [],
+        }
+
+    cutoff = datetime.utcnow() - timedelta(days=safe_days)
+    scanned = 0
+    removed = 0
+    failed = 0
+    removed_files = []
+    errors = []
+
+    for file_path in backup_dir.iterdir():
+        if not file_path.is_file() or file_path.is_symlink():
+            continue
+        scanned += 1
+        try:
+            modified = datetime.utcfromtimestamp(file_path.stat().st_mtime)
+            if modified < cutoff:
+                file_path.unlink()
+                removed += 1
+                removed_files.append(file_path.name)
+        except Exception as exc:
+            failed += 1
+            errors.append({"name": file_path.name, "error": str(exc)})
+
+    return {
+        "retention_days": safe_days,
+        "cutoff": cutoff.isoformat(),
+        "scanned": scanned,
+        "removed": removed,
+        "failed": failed,
+        "removed_files": removed_files,
+        "errors": errors,
+    }
+
+
 def _parse_stripe_signature_header(signature_header: str) -> tuple[int | None, list[str]]:
     timestamp = None
     signatures: list[str] = []
@@ -2572,6 +2637,7 @@ def backup_router(router_id):
 @admin_required()
 def backup_db():
     """Ejecuta pg_dump y guarda en el directorio configurado."""
+    tenant_id = current_tenant_id()
     base = _ensure_backup_dir()
     ts = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
     backup_name = f"db-backup-{ts}.sql"
@@ -2588,7 +2654,16 @@ def backup_db():
         cmd = [pg_dump_path, database_url]
         with file_path.open('w', encoding='utf-8') as f:
             subprocess.check_call(cmd, stdout=f)
-        return jsonify({"success": True, "filename": backup_name}), 200
+        retention_days = _retention_days_for_tenant(tenant_id)
+        prune_result = _prune_backup_directory(retention_days, base=base)
+        return jsonify(
+            {
+                "success": True,
+                "filename": backup_name,
+                "retention_days": retention_days,
+                "prune": prune_result,
+            }
+        ), 200
     except Exception as e:
         current_app.logger.error("No se pudo generar backup DB: %s", e, exc_info=True)
         return jsonify({"error": f"No se pudo generar backup DB: {e}"}), 500
@@ -2597,6 +2672,7 @@ def backup_db():
 @main_bp.route('/admin/backups/list', methods=['GET'])
 @admin_required()
 def list_backups():
+    tenant_id = current_tenant_id()
     base = _backup_dir_path()
     files = []
     if base.exists():
@@ -2606,7 +2682,36 @@ def list_backups():
             reverse=True,
         ):
             files.append(_backup_item_payload(file_path))
-    return jsonify({"items": files, "count": len(files), "directory": str(base)}), 200
+    retention_days = _retention_days_for_tenant(tenant_id)
+    return jsonify(
+        {
+            "items": files,
+            "count": len(files),
+            "directory": str(base),
+            "retention_days": retention_days,
+        }
+    ), 200
+
+
+@main_bp.route('/admin/backups/prune', methods=['POST'])
+@admin_required()
+def prune_backups():
+    tenant_id = current_tenant_id()
+    data = request.get_json(silent=True) or {}
+    requested_days = data.get('retention_days')
+
+    if requested_days is None:
+        retention_days = _retention_days_for_tenant(tenant_id)
+    else:
+        try:
+            retention_days = int(requested_days)
+        except (TypeError, ValueError):
+            return jsonify({"error": "retention_days debe ser entero"}), 400
+        if retention_days < 1 or retention_days > 365:
+            return jsonify({"error": "retention_days debe estar entre 1 y 365"}), 400
+
+    result = _prune_backup_directory(retention_days)
+    return jsonify({"success": True, "prune": result}), 200
 
 
 @main_bp.route('/admin/backups/download', methods=['GET'])
