@@ -1041,7 +1041,9 @@ def update_profile():
     if not name or not email:
         return jsonify({"error": "Nombre y correo son requeridos."}), 400
 
-    user = User.query.get_or_404(current_user_id)
+    user = db.session.get(User, current_user_id)
+    if not user:
+        return jsonify({"error": "Usuario no encontrado."}), 404
     tenant_id = current_tenant_id()
     if tenant_id is not None and user.tenant_id not in (None, tenant_id):
         return jsonify({"error": "Acceso denegado para este tenant."}), 403
@@ -1078,7 +1080,9 @@ def update_password():
     if len(new_password) < 8:
         return jsonify({"error": "La nueva contraseña debe tener al menos 8 caracteres."}), 400
 
-    user = User.query.get_or_404(current_user_id)
+    user = db.session.get(User, current_user_id)
+    if not user:
+        return jsonify({"error": "Usuario no encontrado."}), 404
     tenant_id = current_tenant_id()
     if tenant_id is not None and user.tenant_id not in (None, tenant_id):
         return jsonify({"error": "Acceso denegado para este tenant."}), 403
@@ -1100,7 +1104,9 @@ def mfa_setup():
     current_user_id = _current_user_id()
     if current_user_id is None:
         return jsonify({"error": "Token de usuario invalido."}), 401
-    user = User.query.get_or_404(current_user_id)
+    user = db.session.get(User, current_user_id)
+    if not user:
+        return jsonify({"error": "Usuario no encontrado."}), 404
     secret = user.mfa_secret or pyotp.random_base32()
     issuer = "ISPFAST"
     provisioning_uri = pyotp.totp.TOTP(secret).provisioning_uri(name=user.email, issuer_name=issuer)
@@ -1121,7 +1127,9 @@ def mfa_enable():
     totp = pyotp.TOTP(secret)
     if not totp.verify(code, valid_window=1):
         return jsonify({"error": "Codigo invalido."}), 400
-    user = User.query.get_or_404(current_user_id)
+    user = db.session.get(User, current_user_id)
+    if not user:
+        return jsonify({"error": "Usuario no encontrado."}), 404
     tenant_id = current_tenant_id()
     if tenant_id is not None and user.tenant_id not in (None, tenant_id):
         return jsonify({"error": "Acceso denegado para este tenant."}), 403
@@ -1141,7 +1149,9 @@ def mfa_disable():
         return jsonify({"error": "Token de usuario invalido."}), 401
     data = request.get_json() or {}
     code = str(data.get('code') or '').strip()
-    user = User.query.get_or_404(current_user_id)
+    user = db.session.get(User, current_user_id)
+    if not user:
+        return jsonify({"error": "Usuario no encontrado."}), 404
     if user.mfa_enabled:
         totp = pyotp.TOTP(user.mfa_secret)
         if not code or not totp.verify(code, valid_window=1):
