@@ -3943,6 +3943,55 @@ def _recalculate_invoice_balances(tenant_id) -> dict:
     return {"scanned": scanned, "updated": updated, "timestamp": _iso_utc_now()}
 
 
+def _cleanup_leases_for_tenant(tenant_id) -> dict:
+    today = date.today()
+    subscriptions_q = Subscription.query
+    if tenant_id is not None:
+        subscriptions_q = subscriptions_q.filter_by(tenant_id=tenant_id)
+
+    scanned = 0
+    updated = 0
+    failed = 0
+    changes = []
+
+    for sub in subscriptions_q.all():
+        scanned += 1
+        original_status = sub.status
+
+        if sub.next_charge and sub.next_charge < today and sub.status == 'active':
+            sub.status = 'past_due'
+
+        client = sub.client or (db.session.get(Client, sub.client_id) if sub.client_id else None)
+        if sub.status in ('past_due', 'suspended') and client and client.router_id:
+            try:
+                with MikroTikService(client.router_id) as service:
+                    service.suspend_client(client)
+                sub.status = 'suspended'
+            except Exception:
+                failed += 1
+        elif sub.status == 'active' and client and client.router_id:
+            try:
+                with MikroTikService(client.router_id) as service:
+                    service.activate_client(client)
+            except Exception:
+                failed += 1
+
+        if sub.status != original_status:
+            updated += 1
+            changes.append({"subscription_id": sub.id, "from": original_status, "to": sub.status})
+        db.session.add(sub)
+
+    db.session.commit()
+    return {
+        "tenant_id": tenant_id,
+        "scanned": scanned,
+        "updated": updated,
+        "failed": failed,
+        "changes": changes[:200],
+        "timestamp": _iso_utc_now(),
+    }
+
+
 def _rotate_mikrotik_passwords(tenant_id) -> tuple[str, dict]:
     routers_q = MikroTikRouter.query.filter_by(is_active=True)
     if tenant_id is not None:
@@ -4050,11 +4099,7 @@ def _execute_system_job(job: str, tenant_id) -> tuple[str, dict]:
             from app.services.backup_service import run_backups as run_full_backups
             return 'completed', run_full_backups()
         if job == 'cleanup_leases':
-            from app.tasks import enforce_billing_status
-            result = enforce_billing_status()
-            if isinstance(result, dict):
-                return 'completed', result
-            return 'completed', {"result": str(result)}
+            return 'completed', _cleanup_leases_for_tenant(tenant_id)
         if job == 'recalc_balances':
             return 'completed', _recalculate_invoice_balances(tenant_id)
         if job == 'rotate_passwords':

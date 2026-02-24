@@ -1,9 +1,9 @@
-from datetime import date
+from datetime import date, timedelta
 
 from flask_jwt_extended import create_access_token
 
 from app import db
-from app.models import Invoice, MikroTikRouter, PaymentRecord, Subscription, User
+from app.models import Invoice, MikroTikRouter, PaymentRecord, Subscription, Tenant, User
 
 
 def _admin_token(app, email: str) -> str:
@@ -259,3 +259,69 @@ def test_system_jobs_history_supports_filters_and_offset(client, app):
     assert paged_payload['limit'] == 1
     assert paged_payload['offset'] == 1
     assert paged_payload['count'] <= 1
+
+
+def test_cleanup_leases_job_is_scoped_to_current_tenant(client, app):
+    with app.app_context():
+        tenant_a = Tenant(slug='tenant-a', name='Tenant A')
+        tenant_b = Tenant(slug='tenant-b', name='Tenant B')
+        db.session.add_all([tenant_a, tenant_b])
+        db.session.flush()
+
+        admin = User(email='tenant-cleanup-admin@test.local', role='admin', name='Tenant Cleanup', tenant_id=tenant_a.id)
+        admin.set_password('adminpass123')
+        db.session.add(admin)
+        db.session.flush()
+
+        sub_a = Subscription(
+            customer='Tenant A Customer',
+            email='a@example.com',
+            plan='Mensual',
+            cycle_months=1,
+            amount=30.0,
+            status='active',
+            currency='USD',
+            next_charge=date.today() - timedelta(days=1),
+            method='manual',
+            tenant_id=tenant_a.id,
+        )
+        sub_b = Subscription(
+            customer='Tenant B Customer',
+            email='b@example.com',
+            plan='Mensual',
+            cycle_months=1,
+            amount=30.0,
+            status='active',
+            currency='USD',
+            next_charge=date.today() - timedelta(days=1),
+            method='manual',
+            tenant_id=tenant_b.id,
+        )
+        db.session.add_all([sub_a, sub_b])
+        db.session.commit()
+
+        token = create_access_token(identity=str(admin.id), additional_claims={'tenant_id': tenant_a.id})
+        sub_a_id = sub_a.id
+        sub_b_id = sub_b.id
+        tenant_a_id = tenant_a.id
+
+    response = client.post(
+        '/api/admin/system/jobs/run',
+        json={'job': 'cleanup_leases'},
+        headers={'Authorization': f'Bearer {token}', 'X-Tenant-ID': str(tenant_a_id)},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['success'] is True
+    assert payload['job']['status'] == 'completed'
+    assert payload['job']['result']['tenant_id'] == tenant_a_id
+    assert payload['job']['result']['updated'] >= 1
+
+    with app.app_context():
+        updated_a = db.session.get(Subscription, sub_a_id)
+        updated_b = db.session.get(Subscription, sub_b_id)
+        assert updated_a is not None
+        assert updated_b is not None
+        assert updated_a.status == 'past_due'
+        assert updated_b.status == 'active'
