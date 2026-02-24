@@ -1,139 +1,295 @@
-import React, { useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { motion } from 'framer-motion'
-import { 
-  UserGroupIcon, 
-  CurrencyDollarIcon, 
+import {
+  UserGroupIcon,
+  CurrencyDollarIcon,
   ServerIcon,
-  SparklesIcon
+  SparklesIcon,
 } from '@heroicons/react/24/outline'
+import toast from 'react-hot-toast'
 import StatsCard from './StatsCard'
 import { LineChart, BarChart } from './Chart'
+import { apiClient } from '../lib/apiClient'
+
+interface DashboardResponse {
+  clients: number
+  routers: { ok: number; down: number }
+  finance: { paid_today: number; pending: number }
+}
+
+interface NocSummaryResponse {
+  uptime: string
+  active_alerts: number
+  tickets_open: number
+}
+
+interface RouterUsage {
+  router_id: string
+  rx_mbps: number
+  tx_mbps: number
+  cpu?: number
+}
+
+interface TicketItem {
+  id: number
+  subject: string
+  status: string
+  priority: string
+  created_at?: string
+}
+
+interface FinanceSummaryResponse {
+  summary?: {
+    paid_this_month?: number
+    pending_this_month?: number
+    collection_rate?: number
+    mrr?: number
+  }
+  cashflow?: Array<{
+    label: string
+    paid: number
+    pending: number
+  }>
+}
+
+interface ActivityItem {
+  id: string
+  action: string
+  time: string
+  status: 'success' | 'warning' | 'info'
+}
 
 const ProfessionalDashboard: React.FC = () => {
-  const [stats, setStats] = useState({
-    activeClients: 1234,
-    monthlyRevenue: 45678,
-    activeRouters: 12,
-    uptime: 99.8,
-    avgBandwidth: 456,
-    totalTraffic: 12543
-  })
+  const [dashboard, setDashboard] = useState<DashboardResponse | null>(null)
+  const [nocSummary, setNocSummary] = useState<NocSummaryResponse | null>(null)
+  const [routers, setRouters] = useState<RouterUsage[]>([])
+  const [tickets, setTickets] = useState<TicketItem[]>([])
+  const [financeSummary, setFinanceSummary] = useState<FinanceSummaryResponse | null>(null)
+  const [loading, setLoading] = useState(false)
 
-  const chartData = [
-    { label: 'Lun', value: 45 },
-    { label: 'Mar', value: 52 },
-    { label: 'Mié', value: 48 },
-    { label: 'Jue', value: 61 },
-    { label: 'Vie', value: 55 },
-    { label: 'Sáb', value: 67 },
-    { label: 'Dom', value: 70 }
-  ]
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const [dashboardRes, nocRes, routersRes, ticketsRes, financeRes] = await Promise.allSettled([
+        apiClient.get('/dashboard'),
+        apiClient.get('/network/noc-summary'),
+        apiClient.get('/admin/routers/usage'),
+        apiClient.get('/tickets?limit=8'),
+        apiClient.get('/admin/finance/summary'),
+      ])
 
-  const utilizationData = [
-    { label: 'Router A', value: 65, color: 'bg-blue-600' },
-    { label: 'Router B', value: 45, color: 'bg-green-600' },
-    { label: 'Router C', value: 78, color: 'bg-orange-600' },
-    { label: 'Router D', value: 52, color: 'bg-purple-600' }
-  ]
+      if (dashboardRes.status === 'fulfilled') {
+        setDashboard(dashboardRes.value as DashboardResponse)
+      }
+      if (nocRes.status === 'fulfilled') {
+        setNocSummary(nocRes.value as NocSummaryResponse)
+      }
+      if (routersRes.status === 'fulfilled') {
+        setRouters(((routersRes.value as { items?: RouterUsage[] }).items || []) as RouterUsage[])
+      }
+      if (ticketsRes.status === 'fulfilled') {
+        setTickets((((ticketsRes.value as { items?: TicketItem[] }).items || []) as TicketItem[]).slice(0, 6))
+      }
+      if (financeRes.status === 'fulfilled') {
+        setFinanceSummary(financeRes.value as FinanceSummaryResponse)
+      }
+
+      const hasErrors = [dashboardRes, nocRes, routersRes, ticketsRes, financeRes].some(
+        (result) => result.status === 'rejected'
+      )
+      if (hasErrors) {
+        toast.error('Algunas metricas del dashboard no se pudieron cargar')
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'No se pudo cargar dashboard'
+      toast.error(msg)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    load()
+    const timer = setInterval(load, 30000)
+    return () => clearInterval(timer)
+  }, [load])
+
+  const totalThroughput = useMemo(
+    () => routers.reduce((sum, row) => sum + Number(row.rx_mbps || 0) + Number(row.tx_mbps || 0), 0),
+    [routers]
+  )
+
+  const avgBandwidth = useMemo(() => {
+    if (!routers.length) return 0
+    return totalThroughput / routers.length
+  }, [routers, totalThroughput])
+
+  const uptimeValue = useMemo(() => {
+    const raw = nocSummary?.uptime || '0'
+    const numeric = Number(String(raw).replace('%', '').trim())
+    return Number.isFinite(numeric) ? numeric : 0
+  }, [nocSummary?.uptime])
+
+  const lineData = useMemo(() => {
+    const fromCashflow = (financeSummary?.cashflow || []).slice(-6).map((row) => ({
+      label: row.label.split(' ')[0] || row.label,
+      value: Number(row.paid || 0),
+    }))
+    if (fromCashflow.length) return fromCashflow
+    return [{ label: 'Hoy', value: Number(dashboard?.finance?.paid_today || 0) }]
+  }, [financeSummary?.cashflow, dashboard?.finance?.paid_today])
+
+  const utilizationData = useMemo(() => {
+    if (!routers.length) return [{ label: 'Sin datos', value: 0, color: 'bg-slate-400' }]
+    const totals = routers.map((router) => ({
+      label: String(router.router_id),
+      total: Number(router.rx_mbps || 0) + Number(router.tx_mbps || 0),
+    }))
+    const maxTotal = Math.max(...totals.map((row) => row.total), 1)
+    return totals
+      .sort((a, b) => b.total - a.total)
+      .slice(0, 6)
+      .map((row, index) => ({
+        label: row.label,
+        value: Number(((row.total / maxTotal) * 100).toFixed(1)),
+        color:
+          index % 4 === 0
+            ? 'bg-blue-600'
+            : index % 4 === 1
+              ? 'bg-emerald-600'
+              : index % 4 === 2
+                ? 'bg-orange-600'
+                : 'bg-violet-600',
+      }))
+  }, [routers])
+
+  const activityFeed = useMemo<ActivityItem[]>(() => {
+    const ticketActivity = tickets.map((ticket) => ({
+      id: `ticket-${ticket.id}`,
+      action: `Ticket #${ticket.id}: ${ticket.subject}`,
+      time: ticket.created_at ? ticket.created_at.replace('T', ' ').slice(0, 16) : 'reciente',
+      status: ticket.priority === 'urgent' || ticket.priority === 'high' ? 'warning' as const : 'info' as const,
+    }))
+
+    const systemActivity: ActivityItem[] = [
+      {
+        id: 'routers',
+        action: `Routers activos: ${dashboard?.routers?.ok ?? 0}, caidos: ${dashboard?.routers?.down ?? 0}`,
+        time: 'actualizado',
+        status: (dashboard?.routers?.down || 0) > 0 ? 'warning' : 'success',
+      },
+      {
+        id: 'collection',
+        action: `Collection rate: ${(financeSummary?.summary?.collection_rate ?? 0).toFixed(1)}%`,
+        time: 'mes en curso',
+        status: (financeSummary?.summary?.collection_rate ?? 100) >= 90 ? 'success' : 'warning',
+      },
+      {
+        id: 'alerts',
+        action: `Alertas activas NOC: ${nocSummary?.active_alerts ?? 0}`,
+        time: 'actualizado',
+        status: (nocSummary?.active_alerts || 0) > 0 ? 'warning' : 'success',
+      },
+    ]
+    return [...systemActivity, ...ticketActivity].slice(0, 6)
+  }, [tickets, dashboard?.routers?.ok, dashboard?.routers?.down, financeSummary?.summary?.collection_rate, nocSummary?.active_alerts])
+
+  const paidThisMonth = financeSummary?.summary?.paid_this_month ?? dashboard?.finance?.paid_today ?? 0
+  const mrr = financeSummary?.summary?.mrr ?? paidThisMonth
 
   return (
-    <motion.div 
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      className="space-y-6"
-    >
-      {/* KPI Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
         <StatsCard
           title="Clientes Activos"
-          value={stats.activeClients.toLocaleString()}
-          trend={12}
+          value={(dashboard?.clients ?? 0).toLocaleString()}
+          trend={8}
           color="blue"
           icon={<UserGroupIcon />}
-          subtitle="+145 este mes"
+          subtitle={`${nocSummary?.tickets_open ?? 0} tickets abiertos`}
         />
         <StatsCard
-          title="Ingresos Mensuales"
-          value={`$${stats.monthlyRevenue.toLocaleString()}`}
-          trend={23}
+          title="Ingresos del Mes"
+          value={`$${paidThisMonth.toLocaleString()}`}
+          trend={6}
           color="green"
           icon={<CurrencyDollarIcon />}
-          subtitle="+23% vs mes anterior"
+          subtitle={`MRR estimado: $${mrr.toLocaleString()}`}
         />
         <StatsCard
           title="Routers Activos"
-          value={stats.activeRouters}
+          value={dashboard?.routers?.ok ?? 0}
           trend={0}
           color="purple"
           icon={<ServerIcon />}
-          subtitle="100% operativo"
+          subtitle={`${dashboard?.routers?.down ?? 0} caidos`}
         />
         <StatsCard
           title="Uptime"
-          value={`${stats.uptime}%`}
+          value={`${uptimeValue.toFixed(2)}%`}
           color="emerald"
           icon={<SparklesIcon />}
-          subtitle="Ultimos 30 días"
+          subtitle={`${nocSummary?.active_alerts ?? 0} alertas activas`}
         />
       </div>
 
-      {/* Charts */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <LineChart
-          data={chartData}
-          title="Conexiones Activas (Últimos 7 días)"
-          height={250}
-        />
-        <BarChart
-          data={utilizationData}
-          title="Utilización de Routers"
-          showValues={true}
-        />
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <LineChart data={lineData} title="Cobranza (ultimos meses)" height={250} />
+        <BarChart data={utilizationData} title="Utilizacion de Routers (top)" showValues={true} />
       </div>
 
-      {/* Additional Stats */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className="bg-gradient-to-br from-cyan-50 to-blue-50 rounded-lg p-4 border border-cyan-200">
-          <p className="text-sm text-cyan-700 font-medium">Ancho de Banda Promedio</p>
-          <p className="text-2xl font-bold text-cyan-900 mt-2">{stats.avgBandwidth} Mbps</p>
-          <p className="text-xs text-cyan-600 mt-1">↑ 15% vs última semana</p>
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+        <div className="rounded-lg border border-cyan-200 bg-gradient-to-br from-cyan-50 to-blue-50 p-4">
+          <p className="text-sm font-medium text-cyan-700">Ancho de Banda Promedio</p>
+          <p className="mt-2 text-2xl font-bold text-cyan-900">{avgBandwidth.toFixed(1)} Mbps</p>
+          <p className="mt-1 text-xs text-cyan-600">Promedio sobre routers monitoreados</p>
         </div>
-        <div className="bg-gradient-to-br from-orange-50 to-yellow-50 rounded-lg p-4 border border-orange-200">
-          <p className="text-sm text-orange-700 font-medium">Tráfico Total</p>
-          <p className="text-2xl font-bold text-orange-900 mt-2">{stats.totalTraffic} GB</p>
-          <p className="text-xs text-orange-600 mt-1">En el mes actual</p>
+        <div className="rounded-lg border border-orange-200 bg-gradient-to-br from-orange-50 to-yellow-50 p-4">
+          <p className="text-sm font-medium text-orange-700">Throughput Total</p>
+          <p className="mt-2 text-2xl font-bold text-orange-900">{totalThroughput.toFixed(1)} Mbps</p>
+          <p className="mt-1 text-xs text-orange-600">RX + TX agregado de la red</p>
         </div>
-        <div className="bg-gradient-to-br from-green-50 to-emerald-50 rounded-lg p-4 border border-green-200">
-          <p className="text-sm text-green-700 font-medium">Clientes Satisfechos</p>
-          <p className="text-2xl font-bold text-green-900 mt-2">98.5%</p>
-          <p className="text-xs text-green-600 mt-1">Calificación promedio</p>
+        <div className="rounded-lg border border-green-200 bg-gradient-to-br from-green-50 to-emerald-50 p-4">
+          <p className="text-sm font-medium text-green-700">Collection Rate</p>
+          <p className="mt-2 text-2xl font-bold text-green-900">
+            {(financeSummary?.summary?.collection_rate ?? 0).toFixed(1)}%
+          </p>
+          <p className="mt-1 text-xs text-green-600">Cartera cobrada del mes actual</p>
         </div>
       </div>
 
-      {/* Recent Activity */}
-      <div className="bg-white rounded-lg shadow p-6">
-        <h3 className="text-lg font-semibold text-gray-900 mb-4">Actividad Reciente</h3>
+      <div className="rounded-lg bg-white p-6 shadow">
+        <div className="mb-4 flex items-center justify-between">
+          <h3 className="text-lg font-semibold text-gray-900">Actividad Reciente</h3>
+          <button
+            onClick={load}
+            disabled={loading}
+            className="rounded-lg border border-gray-300 px-3 py-1 text-xs font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-60"
+          >
+            {loading ? 'Actualizando...' : 'Refrescar'}
+          </button>
+        </div>
         <div className="space-y-3">
-          {[
-            { time: 'Hace 2 minutos', action: 'Nuevo cliente registrado', status: 'success' },
-            { time: 'Hace 15 minutos', action: 'Backup de Router A completado', status: 'success' },
-            { time: 'Hace 1 hora', action: 'Actualización de firmware en Router C', status: 'info' },
-            { time: 'Hace 2 horas', action: 'Alerta: CPU alta en Router B (resuelta)', status: 'warning' }
-          ].map((item, i) => (
-            <div key={i} className="flex items-center justify-between py-2 border-b last:border-b-0">
+          {activityFeed.map((item) => (
+            <div key={item.id} className="flex items-center justify-between border-b py-2 last:border-b-0">
               <div>
                 <p className="text-sm font-medium text-gray-900">{item.action}</p>
                 <p className="text-xs text-gray-500">{item.time}</p>
               </div>
-              <span className={`px-3 py-1 rounded-full text-xs font-medium ${
-                item.status === 'success' ? 'bg-green-100 text-green-800' :
-                item.status === 'warning' ? 'bg-yellow-100 text-yellow-800' :
-                'bg-blue-100 text-blue-800'
-              }`}>
-                {item.status === 'success' ? '✓' : item.status === 'warning' ? '⚠' : 'ℹ'}
+              <span
+                className={`rounded-full px-3 py-1 text-xs font-medium ${
+                  item.status === 'success'
+                    ? 'bg-green-100 text-green-800'
+                    : item.status === 'warning'
+                      ? 'bg-yellow-100 text-yellow-800'
+                      : 'bg-blue-100 text-blue-800'
+                }`}
+              >
+                {item.status}
               </span>
             </div>
           ))}
+          {!activityFeed.length && <p className="text-sm text-gray-500">Sin actividad reciente.</p>}
         </div>
       </div>
     </motion.div>

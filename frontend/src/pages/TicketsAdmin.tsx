@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { motion } from 'framer-motion'
 import toast from 'react-hot-toast'
 import { apiClient } from '../lib/apiClient'
@@ -7,8 +7,8 @@ interface Ticket {
   id: number
   subject: string
   description: string
-  status: string
-  priority: string
+  status: 'open' | 'in_progress' | 'resolved' | 'closed'
+  priority: 'low' | 'medium' | 'high' | 'urgent'
   assigned_to?: string
   sla_due_at?: string
   created_at?: string
@@ -22,25 +22,58 @@ interface Comment {
   created_at?: string
 }
 
-const statusColors: Record<string, string> = {
+interface TicketDraft {
+  status: Ticket['status']
+  priority: Ticket['priority']
+  assigned_to: string
+  sla_due_at: string
+}
+
+const statusColors: Record<Ticket['status'], string> = {
   open: 'bg-yellow-100 text-yellow-700',
   in_progress: 'bg-blue-100 text-blue-700',
   resolved: 'bg-green-100 text-green-700',
   closed: 'bg-gray-100 text-gray-700',
 }
 
+const emptyDraft: TicketDraft = {
+  status: 'open',
+  priority: 'medium',
+  assigned_to: '',
+  sla_due_at: '',
+}
+
 const TicketsAdmin: React.FC = () => {
   const [tickets, setTickets] = useState<Ticket[]>([])
   const [comments, setComments] = useState<Record<number, Comment[]>>({})
   const [loading, setLoading] = useState(false)
-  const [selected, setSelected] = useState<Ticket | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [selectedId, setSelectedId] = useState<number | null>(null)
+  const [draft, setDraft] = useState<TicketDraft>(emptyDraft)
   const [newComment, setNewComment] = useState('')
+
+  const selected = useMemo(() => tickets.find((ticket) => ticket.id === selectedId) || null, [tickets, selectedId])
+
+  const syncDraftFromTicket = (ticket: Ticket | null) => {
+    if (!ticket) {
+      setDraft(emptyDraft)
+      return
+    }
+    setDraft({
+      status: ticket.status,
+      priority: ticket.priority,
+      assigned_to: ticket.assigned_to || '',
+      sla_due_at: ticket.sla_due_at || '',
+    })
+  }
 
   const load = async () => {
     setLoading(true)
     try {
       const res = await apiClient.get('/tickets')
-      setTickets(res.items || [])
+      const next = (res.items || []) as Ticket[]
+      setTickets(next)
+      setSelectedId((prev) => prev ?? (next.length ? next[0].id : null))
     } catch (err) {
       toast.error('No se pudieron cargar tickets')
     } finally {
@@ -48,42 +81,60 @@ const TicketsAdmin: React.FC = () => {
     }
   }
 
-  useEffect(() => { load() }, [])
-
-  const loadComments = async (ticketId: number) => {
+  const loadComments = useCallback(async (ticketId: number) => {
     try {
-      // Backend no tiene endpoint de list; usamos los que tenemos
-      // placeholder: comments se cargan cuando se crean
-      setComments((prev) => ({ ...prev, [ticketId]: prev[ticketId] || [] }))
+      const res = await apiClient.get(`/tickets/${ticketId}/comments`)
+      setComments((prev) => ({ ...prev, [ticketId]: (res.items || []) as Comment[] }))
     } catch (err) {
-      console.error(err)
+      toast.error('No se pudieron cargar comentarios')
     }
-  }
+  }, [])
 
-  const updateTicket = async (updates: Partial<Ticket>) => {
+  useEffect(() => {
+    load()
+  }, [])
+
+  useEffect(() => {
+    syncDraftFromTicket(selected)
+    if (selected?.id) {
+      loadComments(selected.id)
+    }
+  }, [selected, loadComments])
+
+  const updateTicket = async () => {
     if (!selected) return
+    setSaving(true)
     try {
-      const res = await apiClient.patch(`/tickets/${selected.id}`, updates)
+      const payload = {
+        status: draft.status,
+        priority: draft.priority,
+        assigned_to: draft.assigned_to || undefined,
+        sla_due_at: draft.sla_due_at || undefined,
+      }
+      const res = await apiClient.patch(`/tickets/${selected.id}`, payload)
       toast.success('Ticket actualizado')
-      setSelected(res.ticket)
-      setTickets((prev) => prev.map((t) => (t.id === res.ticket.id ? res.ticket : t)))
+      const updated = res.ticket as Ticket
+      setTickets((prev) => prev.map((ticket) => (ticket.id === updated.id ? updated : ticket)))
+      syncDraftFromTicket(updated)
     } catch (err) {
       toast.error('No se pudo actualizar ticket')
+    } finally {
+      setSaving(false)
     }
   }
 
   const addComment = async () => {
     if (!selected || !newComment.trim()) return
+    setSaving(true)
     try {
-      const res = await apiClient.post(`/tickets/${selected.id}/comments`, { comment: newComment })
-      setComments((prev) => ({
-        ...prev,
-        [selected.id]: [res.comment, ...(prev[selected.id] || [])],
-      }))
+      await apiClient.post(`/tickets/${selected.id}/comments`, { comment: newComment.trim() })
       setNewComment('')
+      await loadComments(selected.id)
       toast.success('Comentario agregado')
     } catch (err) {
       toast.error('No se pudo agregar comentario')
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -94,14 +145,14 @@ const TicketsAdmin: React.FC = () => {
           <h1 className="text-3xl font-bold text-gray-900">Tickets</h1>
           <p className="text-gray-600">Administra SLA, estados y asignaciones.</p>
         </div>
-        <button onClick={load} disabled={loading} className="px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60">
+        <button onClick={load} disabled={loading} className="rounded-lg bg-blue-600 px-4 py-2 text-white hover:bg-blue-700 disabled:opacity-60">
           {loading ? 'Actualizando...' : 'Actualizar'}
         </button>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <div className="lg:col-span-2 bg-white rounded-xl shadow border border-gray-200 overflow-hidden">
-          <div className="grid grid-cols-6 px-4 py-3 text-xs font-semibold text-gray-600 bg-gray-50">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+        <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow lg:col-span-2">
+          <div className="grid grid-cols-6 bg-gray-50 px-4 py-3 text-xs font-semibold text-gray-600">
             <span>ID</span>
             <span>Asunto</span>
             <span>Prioridad</span>
@@ -110,19 +161,15 @@ const TicketsAdmin: React.FC = () => {
             <span>Asignado</span>
           </div>
           <div className="divide-y divide-gray-100">
-            {tickets.map((t) => (
-              <button
-                key={t.id}
-                onClick={() => { setSelected(t); loadComments(t.id) }}
-                className="w-full text-left"
-              >
-                <motion.div className="grid grid-cols-6 px-4 py-3 hover:bg-gray-50">
-                  <span className="font-mono text-sm text-gray-900">{t.id}</span>
-                  <span className="text-sm text-gray-900 truncate">{t.subject}</span>
-                  <span className="text-xs font-semibold text-gray-700">{t.priority}</span>
-                  <span className={`text-xs px-2 py-1 rounded-full ${statusColors[t.status] || 'bg-gray-100 text-gray-700'}`}>{t.status}</span>
-                  <span className="text-xs text-gray-600">{t.sla_due_at ? t.sla_due_at.split('T')[0] : '-'}</span>
-                  <span className="text-sm text-gray-700">{t.assigned_to || '-'}</span>
+            {tickets.map((ticket) => (
+              <button key={ticket.id} onClick={() => setSelectedId(ticket.id)} className="w-full text-left">
+                <motion.div className={`grid grid-cols-6 px-4 py-3 ${selectedId === ticket.id ? 'bg-blue-50' : 'hover:bg-gray-50'}`}>
+                  <span className="text-sm font-mono text-gray-900">{ticket.id}</span>
+                  <span className="truncate text-sm text-gray-900">{ticket.subject}</span>
+                  <span className="text-xs font-semibold text-gray-700">{ticket.priority}</span>
+                  <span className={`rounded-full px-2 py-1 text-xs ${statusColors[ticket.status]}`}>{ticket.status}</span>
+                  <span className="text-xs text-gray-600">{ticket.sla_due_at ? ticket.sla_due_at.split('T')[0] : '-'}</span>
+                  <span className="text-sm text-gray-700">{ticket.assigned_to || '-'}</span>
                 </motion.div>
               </button>
             ))}
@@ -130,19 +177,19 @@ const TicketsAdmin: React.FC = () => {
           </div>
         </div>
 
-        <div className="bg-white rounded-xl shadow border border-gray-200 p-4">
+        <div className="rounded-xl border border-gray-200 bg-white p-4 shadow">
           {selected ? (
             <>
-              <h3 className="text-lg font-semibold text-gray-900 mb-2">Ticket #{selected.id}</h3>
-              <p className="text-sm text-gray-700 mb-2">{selected.subject}</p>
-              <p className="text-sm text-gray-600 mb-3 whitespace-pre-wrap">{selected.description}</p>
+              <h3 className="mb-2 text-lg font-semibold text-gray-900">Ticket #{selected.id}</h3>
+              <p className="mb-2 text-sm text-gray-700">{selected.subject}</p>
+              <p className="mb-3 whitespace-pre-wrap text-sm text-gray-600">{selected.description}</p>
 
-              <div className="space-y-2 mb-4">
+              <div className="mb-4 space-y-2">
                 <label className="text-xs text-gray-600">Estado</label>
                 <select
-                  className="w-full border rounded-lg px-3 py-2"
-                  value={selected.status}
-                  onChange={(e) => updateTicket({ status: e.target.value })}
+                  className="w-full rounded-lg border px-3 py-2"
+                  value={draft.status}
+                  onChange={(e) => setDraft((prev) => ({ ...prev, status: e.target.value as Ticket['status'] }))}
                 >
                   <option value="open">open</option>
                   <option value="in_progress">in_progress</option>
@@ -151,9 +198,9 @@ const TicketsAdmin: React.FC = () => {
                 </select>
                 <label className="text-xs text-gray-600">Prioridad</label>
                 <select
-                  className="w-full border rounded-lg px-3 py-2"
-                  value={selected.priority}
-                  onChange={(e) => updateTicket({ priority: e.target.value })}
+                  className="w-full rounded-lg border px-3 py-2"
+                  value={draft.priority}
+                  onChange={(e) => setDraft((prev) => ({ ...prev, priority: e.target.value as Ticket['priority'] }))}
                 >
                   <option value="low">low</option>
                   <option value="medium">medium</option>
@@ -162,39 +209,46 @@ const TicketsAdmin: React.FC = () => {
                 </select>
                 <label className="text-xs text-gray-600">Asignado a</label>
                 <input
-                  className="w-full border rounded-lg px-3 py-2"
-                  placeholder="técnico@isp.com"
-                  value={selected.assigned_to || ''}
-                  onChange={(e) => updateTicket({ assigned_to: e.target.value })}
+                  className="w-full rounded-lg border px-3 py-2"
+                  placeholder="tecnico@isp.com"
+                  value={draft.assigned_to}
+                  onChange={(e) => setDraft((prev) => ({ ...prev, assigned_to: e.target.value }))}
                 />
                 <label className="text-xs text-gray-600">SLA (ISO)</label>
                 <input
-                  className="w-full border rounded-lg px-3 py-2"
+                  className="w-full rounded-lg border px-3 py-2"
                   placeholder="2026-02-22T12:00:00"
-                  value={selected.sla_due_at || ''}
-                  onChange={(e) => updateTicket({ sla_due_at: e.target.value })}
+                  value={draft.sla_due_at}
+                  onChange={(e) => setDraft((prev) => ({ ...prev, sla_due_at: e.target.value }))}
                 />
+                <button onClick={updateTicket} disabled={saving} className="w-full rounded-lg bg-blue-600 px-3 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60">
+                  {saving ? 'Guardando...' : 'Guardar cambios'}
+                </button>
               </div>
 
               <div className="border-t pt-3">
-                <h4 className="text-sm font-semibold text-gray-900 mb-2">Comentarios</h4>
-                <div className="space-y-2 max-h-40 overflow-auto mb-2">
-                  {(comments[selected.id] || []).map((c) => (
-                    <div key={c.id} className="text-sm text-gray-700 border rounded-lg px-3 py-2">
-                      <div className="text-xs text-gray-500 mb-1">{c.author || 'usuario'} · {c.created_at?.replace('T', ' ').slice(0,16)}</div>
-                      <div>{c.comment}</div>
+                <h4 className="mb-2 text-sm font-semibold text-gray-900">Comentarios</h4>
+                <div className="mb-2 max-h-40 space-y-2 overflow-auto">
+                  {(comments[selected.id] || []).map((comment) => (
+                    <div key={comment.id} className="rounded-lg border px-3 py-2 text-sm text-gray-700">
+                      <div className="mb-1 text-xs text-gray-500">
+                        {comment.author || 'usuario'} - {comment.created_at?.replace('T', ' ').slice(0, 16)}
+                      </div>
+                      <div>{comment.comment}</div>
                     </div>
                   ))}
                   {!comments[selected.id]?.length && <div className="text-xs text-gray-500">Sin comentarios</div>}
                 </div>
                 <div className="flex gap-2">
                   <input
-                    className="flex-1 border rounded-lg px-3 py-2"
+                    className="flex-1 rounded-lg border px-3 py-2"
                     placeholder="Agregar comentario"
                     value={newComment}
                     onChange={(e) => setNewComment(e.target.value)}
                   />
-                  <button onClick={addComment} className="px-3 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">Enviar</button>
+                  <button onClick={addComment} disabled={saving || !newComment.trim()} className="rounded-lg bg-blue-600 px-3 py-2 text-white hover:bg-blue-700 disabled:opacity-60">
+                    Enviar
+                  </button>
                 </div>
               </div>
             </>

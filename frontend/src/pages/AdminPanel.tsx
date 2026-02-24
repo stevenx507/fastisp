@@ -48,6 +48,7 @@ import Inventory from '../components/admin/Inventory'
 import StaffView from '../components/admin/StaffView'
 import PlanChangeModal from '../components/admin/PlanChangeModal'
 import ManualPaymentModal from '../components/admin/ManualPaymentModal'
+import { apiClient } from '../lib/apiClient'
 
 const AdminPanel: React.FC = () => {
   const [activeView, setActiveView] = useState('dashboard')
@@ -63,26 +64,88 @@ const AdminPanel: React.FC = () => {
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({ core: true })
   const { logout } = useAuthStore()
 
-  type NotificationType = 'error' | 'warning' | 'info';
+  type NotificationType = 'error' | 'warning' | 'info'
   interface Notification {
-    id: number;
-    message: string;
-    time: string;
-    read: boolean;
-    type: NotificationType;
+    id: string
+    message: string
+    time: string
+    read: boolean
+    type: NotificationType
+    source: string
   }
 
-  const [notifications, setNotifications] = useState<Notification[]>([
-    { id: 1, message: 'Router "Principal" tiene CPU alta (85%).', time: 'Hace 2 min', read: false, type: 'error' },
-    { id: 2, message: 'Nuevo cliente "Juan Perez" necesita provisiÃ³n.', time: 'Hace 15 min', read: false, type: 'warning' },
-    { id: 3, message: 'Backup del sistema completado.', time: 'Hace 1 hora', read: true, type: 'info' },
-  ])
+  const [notifications, setNotifications] = useState<Notification[]>([])
+  const [loadingNotifications, setLoadingNotifications] = useState(false)
 
-  // This useEffect is ready for when you connect to a real API
-  useEffect(() => {
-    // const fetchNotifications = async () => { ... };
-    // fetchNotifications();
+  const loadNotifications = React.useCallback(async () => {
+    setLoadingNotifications(true)
+    try {
+      const [feedRes, historyRes, networkRes] = await Promise.allSettled([
+        apiClient.get('/notifications') as Promise<{ notifications?: Array<{ id: number | string; message: string; time?: string; read?: boolean }> }>,
+        apiClient.get('/admin/notifications/history?limit=12') as Promise<{ items?: Array<{ id: string; title: string; message: string; channel: string; sent_at?: string }> }>,
+        apiClient.get('/network/alerts') as Promise<{ alerts?: Array<{ id: string; severity: string; message: string; since?: string }> }>,
+      ])
+
+      const feedItems: Notification[] =
+        feedRes.status === 'fulfilled'
+          ? (feedRes.value.notifications || []).map((item) => ({
+              id: `feed-${item.id}`,
+              message: item.message,
+              time: item.time || new Date().toISOString(),
+              read: Boolean(item.read),
+              type: 'info',
+              source: 'feed',
+            }))
+          : []
+
+      const historyItems: Notification[] =
+        historyRes.status === 'fulfilled'
+          ? (historyRes.value.items || []).map((item) => ({
+              id: `history-${item.id}`,
+              message: `${item.title} (${item.channel})`,
+              time: item.sent_at || new Date().toISOString(),
+              read: true,
+              type: 'info',
+              source: 'campaign',
+            }))
+          : []
+
+      const networkItems: Notification[] =
+        networkRes.status === 'fulfilled'
+          ? (networkRes.value.alerts || []).map((item) => ({
+              id: `network-${item.id}`,
+              message: item.message,
+              time: item.since || new Date().toISOString(),
+              read: false,
+              type: item.severity === 'critical' ? 'error' : item.severity === 'warning' ? 'warning' : 'info',
+              source: 'network',
+            }))
+          : []
+
+      const merged = [...networkItems, ...feedItems, ...historyItems]
+        .sort((a, b) => {
+          const aTs = new Date(a.time).getTime()
+          const bTs = new Date(b.time).getTime()
+          return bTs - aTs
+        })
+        .slice(0, 30)
+
+      setNotifications((prev) => {
+        const prevRead = new Map(prev.map((item) => [item.id, item.read]))
+        return merged.map((item) => ({ ...item, read: prevRead.get(item.id) ?? item.read }))
+      })
+    } catch (err) {
+      console.error('[AdminPanel] notification load error', err)
+    } finally {
+      setLoadingNotifications(false)
+    }
   }, [])
+
+  useEffect(() => {
+    loadNotifications()
+    const timer = setInterval(loadNotifications, 30000)
+    return () => clearInterval(timer)
+  }, [loadNotifications])
 
   const unreadNotificationsCount = notifications.filter(n => !n.read).length
 
@@ -137,12 +200,12 @@ const AdminPanel: React.FC = () => {
     setOpenGroups((prev) => ({ core: true, ...prev }))
   }, [showAdvancedMenu])
 
-  const handleMarkAsRead = (id: number) => {
-    setNotifications(notifications.map(n => n.id === id ? { ...n, read: true } : n))
+  const handleMarkAsRead = (id: string) => {
+    setNotifications((prev) => prev.map((item) => (item.id === id ? { ...item, read: true } : item)))
   }
 
   const handleMarkAllAsRead = () => {
-    setNotifications(notifications.map(n => ({ ...n, read: true })))
+    setNotifications((prev) => prev.map((item) => ({ ...item, read: true })))
   }
 
   const handleClearAll = () => {
@@ -368,6 +431,9 @@ const AdminPanel: React.FC = () => {
                     <div className="px-4 py-3 border-b flex justify-between items-center">
                       <p className="text-sm font-semibold">Alertas y Notificaciones</p>
                       <div className="flex items-center space-x-2">
+                        <button onClick={loadNotifications} className="text-xs text-gray-600 hover:underline disabled:text-gray-400" disabled={loadingNotifications}>
+                          {loadingNotifications ? 'Actualizando...' : 'Refrescar'}
+                        </button>
                         <button onClick={handleMarkAllAsRead} className="text-xs text-blue-600 hover:underline disabled:text-gray-400" disabled={unreadNotificationsCount === 0}>Marcar todas leÃ­das</button>
                         <button onClick={handleClearAll} className="text-xs text-gray-500 hover:underline disabled:text-gray-400" disabled={notifications.length === 0}>Limpiar</button>
                       </div>
@@ -378,12 +444,12 @@ const AdminPanel: React.FC = () => {
                       return (
                         <Menu.Item key={n.id}>
                           {({ active }) => (
-                            <a href="#" onClick={(e) => { e.preventDefault(); handleMarkAsRead(n.id); }} className={`${active ? 'bg-white/10' : ''} flex items-start px-4 py-3 text-sm text-slate-100`}>
+                            <a href="#" onClick={(e) => { e.preventDefault(); handleMarkAsRead(n.id); }} className={`${active ? 'bg-gray-50' : ''} flex items-start px-4 py-3 text-sm text-gray-800`}>
                               {!n.read && <div className="w-2 h-2 bg-blue-500 rounded-full mt-1.5 mr-3 flex-shrink-0"></div>}
                               <Icon className={`w-5 h-5 ${notificationIconColors[n.type]} mr-3 flex-shrink-0 mt-0.5 ${n.read ? 'ml-5' : ''}`} />
                               <div className="flex-1">
                                 <p className={`font-medium ${!n.read ? 'text-gray-800' : 'text-gray-600'}`}>{n.message}</p>
-                                <p className="text-xs text-gray-500 mt-1">{n.time}</p>
+                                <p className="text-xs text-gray-500 mt-1">{n.time.replace('T', ' ').slice(0, 16)} | {n.source}</p>
                               </div>
                             </a>
                           )}
