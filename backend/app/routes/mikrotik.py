@@ -14,6 +14,7 @@ from app.tenancy import current_tenant_id, tenant_access_allowed
 import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+import re
 import uuid
 
 mikrotik_bp = Blueprint('mikrotik', __name__)
@@ -121,6 +122,40 @@ def _router_for_request(router_id: Any) -> Optional[MikroTikRouter]:
     if not tenant_access_allowed(router.tenant_id):
         return None
     return router
+
+
+def _pick_value(data: Dict[str, Any], *keys: str):
+    for key in keys:
+        if key in data:
+            return data.get(key)
+        alt = key.replace('-', '_')
+        if alt in data:
+            return data.get(alt)
+        alt = key.replace('_', '-')
+        if alt in data:
+            return data.get(alt)
+    return None
+
+
+def _parse_routeros_version(raw_version: Any) -> tuple[int, int, int]:
+    text = str(raw_version or '').strip()
+    if not text:
+        return (0, 0, 0)
+    match = re.search(r'(\d+)\.(\d+)(?:\.(\d+))?', text)
+    if not match:
+        return (0, 0, 0)
+    major = int(match.group(1))
+    minor = int(match.group(2))
+    patch = int(match.group(3) or 0)
+    return (major, minor, patch)
+
+
+def _version_supports_back_to_home(version: tuple[int, int, int]) -> bool:
+    return version >= (7, 12, 0)
+
+
+def _version_supports_bth_users(version: tuple[int, int, int]) -> bool:
+    return version >= (7, 14, 0)
 
 
 def _get_change_log(router_id: str) -> List[Dict[str, Any]]:
@@ -420,6 +455,9 @@ def router_quick_connect(router_id):
     wg_allowed_subnets = str(
         request.args.get('wg_allowed_subnets') or '10.250.0.0/16,10.251.0.0/16'
     ).strip() or '10.250.0.0/16,10.251.0.0/16'
+    bth_user = str(request.args.get('bth_user') or 'noc-vps').strip() or 'noc-vps'
+    bth_allow_lan = _as_bool(request.args.get('bth_allow_lan'), default=True)
+    bth_private_key = str(request.args.get('bth_private_key') or '<BASE64_WG_PRIVATE_KEY>').strip() or '<BASE64_WG_PRIVATE_KEY>'
 
     wg_endpoint_host = wg_endpoint
     wg_endpoint_port = 51820
@@ -450,11 +488,104 @@ def router_quick_connect(router_id):
         'windows_login': f"ssh {router.username}@{router.ip_address} -p 22",
         'linux_login': f"ssh {router.username}@{router.ip_address} -p 22",
     }
+
+    back_to_home = {
+        'reachable': False,
+        'routeros_version': None,
+        'supported': None,
+        'bth_users_supported': None,
+        'ddns_enabled': None,
+        'back_to_home_vpn': None,
+        'vpn_status': None,
+        'vpn_dns_name': None,
+        'vpn_interface': None,
+        'vpn_port': None,
+        'users': [],
+        'scripts': {
+            'enable_script': (
+                '/ip/cloud/set ddns-enabled=yes update-time=yes\n'
+                '/ip/cloud/set back-to-home-vpn=enabled\n'
+                '/ip/cloud/print\n'
+            ),
+            'add_vps_user_script': (
+                f'/ip/cloud/back-to-home-users/add name="{bth_user}" private-key="{bth_private_key}" '
+                f'allow-lan={"yes" if bth_allow_lan else "no"} comment="FastISP VPS" disabled=no\n'
+                f'/interface/wireguard/peers/show-client-config {bth_user}\n'
+            ),
+            'generate_private_key_hint': 'wg genkey | base64 -w0',
+        },
+        'limitations': [
+            'Back To Home por relay puede tener mas latencia que un túnel WireGuard sitio-a-sitio.',
+            'Para administracion masiva de routers desde VPS, WireGuard dedicado sigue siendo recomendado.',
+        ],
+    }
+
+    try:
+        with MikroTikService(router.id) as service:
+            if service.api:
+                back_to_home['reachable'] = True
+                router_info = service.get_router_info() or {}
+                version_text = (
+                    _pick_value(router_info, 'firmware', 'version', 'routeros_version')
+                    or _pick_value(router_info, 'routeros-version', 'routeros_version')
+                    or ''
+                )
+                version_tuple = _parse_routeros_version(version_text)
+                supports_bth = _version_supports_back_to_home(version_tuple)
+                supports_bth_users = _version_supports_bth_users(version_tuple)
+                back_to_home['routeros_version'] = str(version_text or '') or None
+                back_to_home['supported'] = supports_bth
+                back_to_home['bth_users_supported'] = supports_bth_users
+
+                cloud_rows = service.api.get_resource('/ip/cloud').get()
+                cloud_info = cloud_rows[0] if isinstance(cloud_rows, list) and cloud_rows else {}
+                back_to_home['ddns_enabled'] = _as_bool(_pick_value(cloud_info, 'ddns-enabled', 'ddns_enabled'), default=False)
+                back_to_home['back_to_home_vpn'] = str(
+                    _pick_value(cloud_info, 'back-to-home-vpn', 'back_to_home_vpn') or ''
+                ).strip() or None
+                back_to_home['vpn_status'] = str(
+                    _pick_value(cloud_info, 'back-to-home-vpn-status', 'back_to_home_vpn_status') or ''
+                ).strip() or None
+                back_to_home['vpn_dns_name'] = str(
+                    _pick_value(cloud_info, 'dns-name', 'dns_name', 'back-to-home-dns-name', 'back_to_home_dns_name') or ''
+                ).strip() or None
+                back_to_home['vpn_interface'] = str(
+                    _pick_value(cloud_info, 'back-to-home-interface', 'back_to_home_interface') or ''
+                ).strip() or None
+                back_to_home['vpn_port'] = str(
+                    _pick_value(cloud_info, 'back-to-home-vpn-port', 'back_to_home_vpn_port') or ''
+                ).strip() or None
+
+                if supports_bth_users:
+                    try:
+                        users_api = service.api.get_resource('/ip/cloud/back-to-home-users')
+                        raw_users = users_api.get()
+                        normalized_users = []
+                        for item in (raw_users or [])[:30]:
+                            normalized_users.append(
+                                {
+                                    'name': str(_pick_value(item, 'name') or ''),
+                                    'allow_lan': _as_bool(_pick_value(item, 'allow-lan', 'allow_lan'), default=False),
+                                    'disabled': _as_bool(_pick_value(item, 'disabled'), default=False),
+                                    'expires': str(_pick_value(item, 'expires') or ''),
+                                }
+                            )
+                        back_to_home['users'] = normalized_users
+                    except Exception as users_exc:
+                        back_to_home['users_error'] = str(users_exc)
+                else:
+                    back_to_home['scripts']['add_vps_user_script'] = (
+                        '# RouterOS < 7.14: crea el peer Back To Home desde la app MikroTik\n'
+                        '# e importa el perfil WireGuard en tu VPS para acceso remoto.\n'
+                    )
+    except Exception as exc:
+        back_to_home['error'] = str(exc)
+
     guidance = {
         'back_to_home': [
-            'Back To Home requiere RouterOS 7.12+ y activacion desde IP Cloud.',
-            'Habilita /ip cloud, abre app MikroTik y genera peer para cada tecnico.',
-            'Usa perfiles de solo lectura para monitoreo y cuenta admin separada para cambios.',
+            'Si, Back To Home puede funcionar aun con IP privadas porque usa relay/nube de MikroTik.',
+            'Para uso desde VPS, RouterOS 7.14+ permite usuarios BTH y perfil WireGuard exportable.',
+            'Para NOC masivo y menor latencia, preferir WireGuard site-to-site dedicado.',
         ],
         'notes': [
             'No expongas API/SSH sin ACL. Usa solo IPs de gestion o VPN privada.',
@@ -462,7 +593,7 @@ def router_quick_connect(router_id):
             'Registra cada cambio en auditoria antes de activar modo live.',
         ],
     }
-    return jsonify({'success': True, 'router': router.to_dict(), 'scripts': scripts, 'guidance': guidance}), 200
+    return jsonify({'success': True, 'router': router.to_dict(), 'scripts': scripts, 'guidance': guidance, 'back_to_home': back_to_home}), 200
 
 @mikrotik_bp.route('/validate-config', methods=['POST'])
 @admin_required()

@@ -55,6 +55,10 @@ def test_router_crud_and_quick_connect(client, app):
     assert 'direct_api_script' in quick_payload['scripts']
     assert 'wireguard_site_to_vps_script' in quick_payload['scripts']
     assert isinstance(quick_payload['guidance']['back_to_home'], list)
+    assert 'back_to_home' in quick_payload
+    assert 'scripts' in quick_payload['back_to_home']
+    assert 'enable_script' in quick_payload['back_to_home']['scripts']
+    assert 'add_vps_user_script' in quick_payload['back_to_home']['scripts']
 
     delete_response = client.delete(f'/api/mikrotik/routers/{router_id}', headers=headers)
     assert delete_response.status_code == 200

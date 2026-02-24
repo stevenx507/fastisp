@@ -40,10 +40,42 @@ interface RouterQuickGuidance {
   notes: string[]
 }
 
+interface RouterBackToHomeUser {
+  name: string
+  allow_lan: boolean
+  disabled: boolean
+  expires: string
+}
+
+interface RouterBackToHomeScripts {
+  enable_script: string
+  add_vps_user_script: string
+  generate_private_key_hint: string
+}
+
+interface RouterBackToHomeStatus {
+  reachable?: boolean
+  routeros_version?: string | null
+  supported?: boolean | null
+  bth_users_supported?: boolean | null
+  ddns_enabled?: boolean | null
+  back_to_home_vpn?: string | null
+  vpn_status?: string | null
+  vpn_dns_name?: string | null
+  vpn_interface?: string | null
+  vpn_port?: string | null
+  users?: RouterBackToHomeUser[]
+  users_error?: string
+  scripts?: RouterBackToHomeScripts
+  limitations?: string[]
+  error?: string
+}
+
 interface RouterQuickConnectResponse {
   success: boolean
   scripts?: RouterQuickScripts
   guidance?: RouterQuickGuidance
+  back_to_home?: RouterBackToHomeStatus
 }
 
 interface RouterFormState {
@@ -558,6 +590,84 @@ const MikroTikManagement: React.FC = () => {
                             </ul>
                           </div>
                         </div>
+
+                        {quickConnect.back_to_home && (
+                          <div className="space-y-3 rounded-lg border border-gray-200 bg-gray-50 p-3">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className={`rounded-full px-2 py-1 text-xs font-semibold ${quickConnect.back_to_home.reachable ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
+                                {quickConnect.back_to_home.reachable ? 'router reachable' : 'router unreachable'}
+                              </span>
+                              <span className={`rounded-full px-2 py-1 text-xs font-semibold ${quickConnect.back_to_home.supported ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+                                {quickConnect.back_to_home.supported ? 'BTH soportado' : 'BTH no confirmado'}
+                              </span>
+                              {quickConnect.back_to_home.routeros_version && (
+                                <span className="rounded-full bg-slate-200 px-2 py-1 text-xs font-semibold text-slate-700">
+                                  RouterOS {quickConnect.back_to_home.routeros_version}
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-xs text-gray-700">
+                              DDNS: <strong>{String(quickConnect.back_to_home.ddns_enabled ?? 'unknown')}</strong> | BTH VPN: <strong>{quickConnect.back_to_home.back_to_home_vpn || '-'}</strong> | Estado: <strong>{quickConnect.back_to_home.vpn_status || '-'}</strong>
+                            </p>
+                            <p className="text-xs text-gray-700">
+                              DNS: <strong>{quickConnect.back_to_home.vpn_dns_name || '-'}</strong> | Interfaz: <strong>{quickConnect.back_to_home.vpn_interface || '-'}</strong> | Puerto: <strong>{quickConnect.back_to_home.vpn_port || '-'}</strong>
+                            </p>
+
+                            {quickConnect.back_to_home.scripts?.enable_script && (
+                              <div className="rounded border border-gray-300 bg-white p-2">
+                                <div className="mb-2 flex items-center justify-between">
+                                  <p className="text-xs font-semibold uppercase text-gray-600">Script habilitar Back To Home</p>
+                                  <button
+                                    onClick={() => copyScript('script BTH enable', quickConnect.back_to_home?.scripts?.enable_script || '')}
+                                    className="rounded bg-gray-800 px-2 py-1 text-xs font-semibold text-white hover:bg-gray-700"
+                                  >
+                                    Copiar
+                                  </button>
+                                </div>
+                                <pre className="max-h-40 overflow-auto rounded bg-slate-950 p-2 text-xs text-slate-100">
+                                  {quickConnect.back_to_home.scripts.enable_script}
+                                </pre>
+                              </div>
+                            )}
+
+                            {quickConnect.back_to_home.scripts?.add_vps_user_script && (
+                              <div className="rounded border border-gray-300 bg-white p-2">
+                                <div className="mb-2 flex items-center justify-between">
+                                  <p className="text-xs font-semibold uppercase text-gray-600">Script usuario BTH para VPS</p>
+                                  <button
+                                    onClick={() => copyScript('script BTH VPS', quickConnect.back_to_home?.scripts?.add_vps_user_script || '')}
+                                    className="rounded bg-gray-800 px-2 py-1 text-xs font-semibold text-white hover:bg-gray-700"
+                                  >
+                                    Copiar
+                                  </button>
+                                </div>
+                                <pre className="max-h-40 overflow-auto rounded bg-slate-950 p-2 text-xs text-slate-100">
+                                  {quickConnect.back_to_home.scripts.add_vps_user_script}
+                                </pre>
+                                <p className="mt-2 text-xs text-gray-600">
+                                  Generar private key WireGuard en VPS: <code>{quickConnect.back_to_home.scripts.generate_private_key_hint}</code>
+                                </p>
+                              </div>
+                            )}
+
+                            {Array.isArray(quickConnect.back_to_home.users) && quickConnect.back_to_home.users.length > 0 && (
+                              <div className="rounded border border-gray-300 bg-white p-2">
+                                <p className="text-xs font-semibold uppercase text-gray-600">Usuarios BTH actuales</p>
+                                <ul className="mt-2 space-y-1 text-xs text-gray-700">
+                                  {quickConnect.back_to_home.users.map((user, idx) => (
+                                    <li key={`${user.name}-${idx}`}>
+                                      - {user.name} | allow-lan: {String(user.allow_lan)} | disabled: {String(user.disabled)} | expires: {user.expires || '-'}
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+
+                            {quickConnect.back_to_home.users_error && (
+                              <p className="text-xs text-amber-700">No fue posible leer usuarios BTH: {quickConnect.back_to_home.users_error}</p>
+                            )}
+                          </div>
+                        )}
                       </>
                     )}
                   </div>
