@@ -29,6 +29,7 @@ import BillingManagement from '../components/BillingManagement'
 import MonitoringView from '../components/MonitoringView'
 import AlertsView from '../components/AlertsView'
 import SettingsView from '../components/SettingsView'
+import OltManagement from '../components/OltManagement'
 import NocDashboard from './NocDashboard'
 import TicketsAdmin from './TicketsAdmin'
 import BackupsView from '../components/BackupsView'
@@ -102,6 +103,7 @@ const AdminPanel: React.FC = () => {
     { id: 'inventory', name: 'Almacén', icon: ServerIcon },
     { id: 'staff', name: 'Staff', icon: UserGroupIcon },
     { id: 'network', name: 'Gestión MikroTik', icon: WifiIcon },
+    { id: 'olt', name: 'Gestión OLT', icon: ServerIcon },
     { id: 'maps', name: 'Mapa de Red', icon: MapIcon },
     { id: 'billing', name: 'Facturación', icon: CreditCardIcon },
     { id: 'monitoring', name: 'Monitoreo', icon: ServerIcon },
@@ -112,7 +114,7 @@ const AdminPanel: React.FC = () => {
     { id: 'settings', name: 'Configuración', icon: CogIcon }
   ]), [])
   const coreMenuIds = React.useMemo(
-    () => new Set(['dashboard','clients','network','maps','billing','monitoring','noc','alerts','tickets','backups','settings']),
+    () => new Set(['dashboard','clients','network','olt','maps','billing','monitoring','noc','alerts','tickets','backups','settings']),
     []
   )
   const groups = React.useMemo(() => {
@@ -223,6 +225,7 @@ const AdminPanel: React.FC = () => {
     inventory: <Inventory />,
     staff: <StaffView />,
     network: <MikroTikManagement />,
+    olt: <OltManagement />,
     maps: <NetworkMap />,
     billing: (
       <div className="relative space-y-4">
