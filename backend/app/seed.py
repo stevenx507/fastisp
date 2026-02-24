@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import secrets
 
 from app import db
 from app.models import Client, MikroTikRouter, Plan, Subscription, Tenant, User
@@ -69,22 +70,26 @@ def seed_data():
     db.session.add_all([plan_basic, plan_pro, plan_gamer])
     db.session.commit()
 
+    admin_password = secrets.token_urlsafe(12)
+    client_1_password = secrets.token_urlsafe(12)
+    client_2_password = secrets.token_urlsafe(12)
+
     admin_user = User(
-        name="Admin Demo",
-        email="demo1@ispmax.com",
+        name="Admin Principal",
+        email="admin@ispfast.local",
         role="admin",
         tenant_id=default_tenant.id,
     )
-    admin_user.set_password("demo1")
+    admin_user.set_password(admin_password)
     db.session.add(admin_user)
 
     client_user_1 = User(
-        name="Cliente Demo",
-        email="demo2@ispmax.com",
+        name="Cliente Base",
+        email="cliente@ispfast.local",
         role="client",
         tenant_id=default_tenant.id,
     )
-    client_user_1.set_password("demo2")
+    client_user_1.set_password(client_1_password)
 
     client_1 = Client(
         full_name="Juan Perez",
@@ -107,7 +112,7 @@ def seed_data():
         role="client",
         tenant_id=default_tenant.id,
     )
-    client_user_2.set_password("pass123")
+    client_user_2.set_password(client_2_password)
 
     client_2 = Client(
         full_name="Ana Gomez",
@@ -175,3 +180,7 @@ def seed_data():
 
     db.session.commit()
     print("Sample data has been successfully seeded to the database!")
+    print("Seed credentials (store securely):")
+    print(f"  admin@ispfast.local / {admin_password}")
+    print(f"  cliente@ispfast.local / {client_1_password}")
+    print(f"  ana.gomez@example.com / {client_2_password}")

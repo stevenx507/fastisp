@@ -58,8 +58,6 @@ class Config:
     FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:3000')
     ALLOW_SELF_SIGNUP = _as_bool(os.environ.get('ALLOW_SELF_SIGNUP'), default=True)
     ALLOW_DEMO_LOGIN = _as_bool(os.environ.get('ALLOW_DEMO_LOGIN'), default=False)
-    ALLOW_PAYMENT_DEMO = _as_bool(os.environ.get('ALLOW_PAYMENT_DEMO'), default=True)
-    ALLOW_OLT_DEMO = _as_bool(os.environ.get('ALLOW_OLT_DEMO'), default=True)
     ALLOW_GOOGLE_LOGIN = _as_bool(os.environ.get('ALLOW_GOOGLE_LOGIN'), default=True)
     ALLOW_INSECURE_GOOGLE_LOGIN = _as_bool(
         os.environ.get('ALLOW_INSECURE_GOOGLE_LOGIN'), default=False
@@ -145,8 +143,6 @@ class ProductionConfig(Config):
     FRONTEND_URL = os.environ.get('FRONTEND_URL')
     ALLOW_SELF_SIGNUP = _as_bool(os.environ.get('ALLOW_SELF_SIGNUP'), default=True)
     ALLOW_DEMO_LOGIN = _as_bool(os.environ.get('ALLOW_DEMO_LOGIN'), default=False)
-    ALLOW_PAYMENT_DEMO = _as_bool(os.environ.get('ALLOW_PAYMENT_DEMO'), default=False)
-    ALLOW_OLT_DEMO = _as_bool(os.environ.get('ALLOW_OLT_DEMO'), default=False)
     ALLOW_GOOGLE_LOGIN = _as_bool(os.environ.get('ALLOW_GOOGLE_LOGIN'), default=True)
     ALLOW_INSECURE_GOOGLE_LOGIN = _as_bool(
         os.environ.get('ALLOW_INSECURE_GOOGLE_LOGIN'), default=False
