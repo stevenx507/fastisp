@@ -151,3 +151,18 @@ def test_tr064_test_reports_tcp_reachability(client, app, monkeypatch):
     payload = response.get_json()
     assert payload["success"] is True
     assert payload["host"] == "127.0.0.1"
+
+
+def test_tr069_reprovision_returns_not_implemented_without_acs_adapter(client, app):
+    headers = _admin_headers(client, app)
+
+    response = client.post(
+        "/api/olt/devices/OLT-ZTE-001/tr069/reprovision",
+        json={"host": "acs.provider.local", "run_mode": "simulate"},
+        headers=headers,
+    )
+
+    assert response.status_code == 501
+    payload = response.get_json()
+    assert payload["success"] is False
+    assert "requires ACS integration" in payload["error"]

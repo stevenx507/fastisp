@@ -338,7 +338,7 @@ const AdminPanel: React.FC = () => {
                   <div className="absolute top-0 right-0 -mr-12 pt-2">
                     <button 
                       type="button" 
-                      title="Cerrar menÃº"
+                      title="Cerrar menu"
                       className="ml-1 flex h-10 w-10 items-center justify-center rounded-full focus:outline-none focus:ring-2 focus:ring-inset focus:ring-white" 
                       onClick={() => setSidebarOpen(false)}
                     >
@@ -405,7 +405,7 @@ const AdminPanel: React.FC = () => {
             className="px-4 border-r border-gray-200 text-gray-500 lg:hidden"
             onClick={() => setSidebarOpen(true)}
           >
-            <span className="sr-only">Abrir menÃº</span>
+            <span className="sr-only">Abrir menu</span>
             <Bars3Icon className="h-6 w-6" />
           </button>
           <div className="flex-1 px-4 flex justify-between">
@@ -434,7 +434,7 @@ const AdminPanel: React.FC = () => {
                         <button onClick={loadNotifications} className="text-xs text-gray-600 hover:underline disabled:text-gray-400" disabled={loadingNotifications}>
                           {loadingNotifications ? 'Actualizando...' : 'Refrescar'}
                         </button>
-                        <button onClick={handleMarkAllAsRead} className="text-xs text-blue-600 hover:underline disabled:text-gray-400" disabled={unreadNotificationsCount === 0}>Marcar todas leÃ­das</button>
+                        <button onClick={handleMarkAllAsRead} className="text-xs text-blue-600 hover:underline disabled:text-gray-400" disabled={unreadNotificationsCount === 0}>Marcar todas leidas</button>
                         <button onClick={handleClearAll} className="text-xs text-gray-500 hover:underline disabled:text-gray-400" disabled={notifications.length === 0}>Limpiar</button>
                       </div>
                     </div>
@@ -473,7 +473,7 @@ const AdminPanel: React.FC = () => {
                     <Menu.Item>
                       {({ active }) => (
                         <button onClick={logout} className={`${active ? 'bg-white/10' : ''} group flex w-full items-center px-4 py-2 text-sm text-red-300`}>
-                          <ArrowLeftOnRectangleIcon className="mr-2 h-5 w-5 text-red-500" />Cerrar SesiÃ³n
+                          <ArrowLeftOnRectangleIcon className="mr-2 h-5 w-5 text-red-500" />Cerrar Sesion
                         </button>
                       )}
                     </Menu.Item>

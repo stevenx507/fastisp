@@ -1,5 +1,4 @@
 import { useAuthStore } from '../store/authStore'
-import mockRequest from '../mocks'
 import config from './config'
 
 class ApiError extends Error {
@@ -16,10 +15,6 @@ const API_BASE = config.API_BASE_URL.endsWith('/')
   ? config.API_BASE_URL.slice(0, -1)
   : config.API_BASE_URL
 
-const ENABLE_MOCKS =
-  import.meta.env.DEV &&
-  String(import.meta.env.VITE_ENABLE_API_MOCKS || 'false').toLowerCase() === 'true'
-
 const buildUrl = (endpoint: string) => {
   if (endpoint.startsWith('http://') || endpoint.startsWith('https://')) {
     return endpoint
@@ -27,14 +22,6 @@ const buildUrl = (endpoint: string) => {
 
   const normalizedEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`
   return `${API_BASE}${normalizedEndpoint}`
-}
-
-const isRecoverableNetworkError = (error: unknown) => {
-  if (error instanceof TypeError) {
-    return true
-  }
-
-  return error instanceof DOMException && error.name === 'AbortError'
 }
 
 export const apiClient = {
@@ -50,69 +37,51 @@ export const apiClient = {
       headers.set('Authorization', `Bearer ${token}`)
     }
 
+    // Add timeout to prevent indefinite hanging
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 5000) // 5s timeout
+
+    let response: Response
     try {
-      // Add timeout to prevent indefinite hanging
-      const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), 5000) // 5s timeout
+      response = await fetch(buildUrl(endpoint), {
+        ...options,
+        headers,
+        signal: controller.signal,
+      })
+    } finally {
+      clearTimeout(timeoutId)
+    }
 
-      let response: Response
-      try {
-        response = await fetch(buildUrl(endpoint), {
-          ...options,
-          headers,
-          signal: controller.signal,
-        })
-      } finally {
-        clearTimeout(timeoutId)
-      }
-
-      if (!response.ok) {
-        if (response.status === 401) {
-          useAuthStore.getState().logout()
-        }
-
-        const contentType = response.headers.get('content-type') || ''
-
-        if (contentType.includes('application/json')) {
-          try {
-            const errorData = await response.json()
-            const message = errorData?.error || errorData?.message || `HTTP Error: ${response.status}`
-            throw new ApiError(String(message), response.status)
-          } catch (jsonError) {
-            if (jsonError instanceof ApiError) {
-              throw jsonError
-            }
-          }
-        }
-
-        try {
-          const text = await response.text()
-          throw new ApiError(text || `HTTP Error: ${response.status}`, response.status)
-        } catch {
-          throw new ApiError(`HTTP Error: ${response.status}`, response.status)
-        }
+    if (!response.ok) {
+      if (response.status === 401) {
+        useAuthStore.getState().logout()
       }
 
       const contentType = response.headers.get('content-type') || ''
-      if (contentType.includes('application/json')) return response.json()
-      return response.text()
-    } catch (err) {
-      if (!ENABLE_MOCKS || err instanceof ApiError || !isRecoverableNetworkError(err)) {
-        throw err
-      }
 
-      console.warn('[apiClient] Network unavailable, using mocks:', endpoint, err)
-      const method = (options.method || 'GET').toUpperCase()
-      let body: unknown = undefined
-      if (typeof options.body === 'string') {
+      if (contentType.includes('application/json')) {
         try {
-          body = JSON.parse(options.body)
-        } catch {
-          body = options.body
+          const errorData = await response.json()
+          const message = errorData?.error || errorData?.message || `HTTP Error: ${response.status}`
+          throw new ApiError(String(message), response.status)
+        } catch (jsonError) {
+          if (jsonError instanceof ApiError) {
+            throw jsonError
+          }
         }
       }
-      return mockRequest(endpoint, method, body)
+
+      try {
+        const text = await response.text()
+        throw new ApiError(text || `HTTP Error: ${response.status}`, response.status)
+      } catch {
+        throw new ApiError(`HTTP Error: ${response.status}`, response.status)
+      }
     }
+
+    const contentType = response.headers.get('content-type') || ''
+    if (contentType.includes('application/json')) return response.json()
+    return response.text()
   },
 
   get(endpoint: string) {

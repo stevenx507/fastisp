@@ -10,7 +10,6 @@ interface SystemSettingsPayload {
   notifications_email_enabled: boolean
   allow_demo_login: boolean
   allow_self_signup: boolean
-  allow_payment_demo: boolean
   default_ticket_priority: string
   backup_retention_days: number
   metrics_poll_interval_sec: number
@@ -163,7 +162,6 @@ const SystemSettings: React.FC = () => {
                   ['notifications_email_enabled', 'Notificaciones email'],
                   ['allow_demo_login', 'Permitir login demo'],
                   ['allow_self_signup', 'Permitir autorregistro'],
-                  ['allow_payment_demo', 'Permitir pagos demo'],
                 ].map(([keyName, label]) => (
                   <label key={keyName} className="flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2 text-sm">
                     <input

@@ -4,6 +4,11 @@ from app import db
 from app.models import Tenant, User
 
 
+def _token_for_user(app, user_id: int) -> str:
+    with app.app_context():
+        return create_access_token(identity=str(user_id))
+
+
 def test_health_endpoint(client):
     response = client.get('/health')
 
@@ -146,4 +151,76 @@ def test_update_password_rejects_wrong_current_password(client, app):
     assert response.status_code == 400
     payload = response.get_json()
     assert 'incorrecta' in payload['error']
+
+
+def test_clients_map_data_requires_authenticated_staff(client):
+    response = client.get('/api/clients/map-data')
+    assert response.status_code == 401
+
+
+def test_clients_map_data_rejects_client_role(client, app):
+    with app.app_context():
+        user = User(email='portal-client@test.local', role='client', name='Portal Client')
+        user.set_password('clientpass123')
+        db.session.add(user)
+        db.session.commit()
+        token = _token_for_user(app, user.id)
+
+    response = client.get('/api/clients/map-data', headers={'Authorization': f'Bearer {token}'})
+    assert response.status_code == 403
+
+
+def test_notifications_endpoint_returns_client_feed(client, app):
+    with app.app_context():
+        user = User(email='notif-client@test.local', role='client', name='Notif Client')
+        user.set_password('clientpass123')
+        db.session.add(user)
+        db.session.commit()
+        token = _token_for_user(app, user.id)
+
+    response = client.get('/api/notifications', headers={'Authorization': f'Bearer {token}'})
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['count'] >= 1
+    assert isinstance(payload['notifications'], list)
+
+
+def test_stripe_checkout_requires_configured_secret(client, app):
+    with app.app_context():
+        user = User(email='payment-client@test.local', role='client', name='Payment Client')
+        user.set_password('clientpass123')
+        db.session.add(user)
+        db.session.commit()
+        token = _token_for_user(app, user.id)
+
+    response = client.post(
+        '/api/payments/checkout',
+        json={'amount': 25.0, 'currency': 'USD', 'method': 'stripe'},
+        headers={'Authorization': f'Bearer {token}'},
+    )
+
+    assert response.status_code == 503
+    payload = response.get_json()
+    assert 'Stripe no configurado' in payload['error']
+
+
+def test_billing_electronic_status_requires_invoice_id(client, app):
+    with app.app_context():
+        user = User(email='billing-admin@test.local', role='admin', name='Billing Admin')
+        user.set_password('adminpass123')
+        db.session.add(user)
+        db.session.commit()
+        token = _token_for_user(app, user.id)
+
+    missing_response = client.get(
+        '/api/billing/electronic/status',
+        headers={'Authorization': f'Bearer {token}'},
+    )
+    assert missing_response.status_code == 400
+
+    not_found_response = client.get(
+        '/api/billing/electronic/status?invoice_id=9999',
+        headers={'Authorization': f'Bearer {token}'},
+    )
+    assert not_found_response.status_code == 404
 

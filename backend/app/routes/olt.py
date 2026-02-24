@@ -106,20 +106,6 @@ def _audit(action: str, entity_type: str | None = None, entity_id: str | None = 
         pass
 
 
-def _demo_mode_response(feature: str):
-    if current_app.config.get("ALLOW_OLT_DEMO", False):
-        return None
-    return (
-        jsonify(
-            {
-                "success": False,
-                "error": f"{feature} requires real OLT integration (demo mode disabled).",
-            }
-        ),
-        501,
-    )
-
-
 def _parse_run_mode(data, default: str = "simulate") -> str:
     run_mode = str((data or {}).get("run_mode", default)).strip().lower()
     if run_mode not in {"simulate", "dry-run", "live"}:
@@ -362,12 +348,6 @@ def autofind_onu(device_id):
         return jsonify({"success": False, "error": str(exc)}), 400
 
     response, status = _run_vendor_action(device_id=device_id, action=action, payload=payload, run_mode=run_mode)
-    if run_mode in {"simulate", "dry-run"} and current_app.config.get("ALLOW_OLT_DEMO", False):
-        response["pending_onu"] = [
-            {"serial": "ZTEG00000001", "vendor": "zte", "signal": -18.2, "rx_power": -19.5},
-            {"serial": "48575443ABCDEF01", "vendor": "huawei", "signal": -20.0, "rx_power": -21.3},
-            {"serial": "VSOL00000001", "vendor": "vsol", "signal": -17.5, "rx_power": -18.7},
-        ]
 
     _audit(
         "olt_autofind_onu",
@@ -527,27 +507,33 @@ def reboot_onu(device_id):
 @olt_bp.route("/devices/<device_id>/tr069/reprovision", methods=["POST"])
 @admin_required()
 def tr069_reprovision(device_id):
-    guard = _demo_mode_response("tr069_reprovision")
-    if guard:
-        return guard
-
     data = request.get_json() or {}
-    host = data.get("host") or "acs.demo.local"
-    ssid = data.get("ssid") or "ISPFAST_WIFI"
-    key = data.get("key") or "ClaveFuerte2026"
-    _audit("olt_tr069_reprovision", entity_type="olt", entity_id=device_id, metadata={"acs": host})
+    run_mode = _parse_run_mode(data)
+    live_guard = _validate_live_confirm(run_mode, data)
+    if live_guard:
+        return live_guard
+
+    host = str(data.get("host") or "").strip()
+    if not host:
+        return jsonify({"success": False, "error": "host is required"}), 400
+
+    _audit(
+        "olt_tr069_reprovision",
+        entity_type="olt",
+        entity_id=device_id,
+        metadata={"acs": host, "run_mode": run_mode, "supported": False},
+    )
     return (
         jsonify(
             {
-                "success": True,
+                "success": False,
                 "device_id": device_id,
                 "acs": host,
-                "ssid": ssid,
-                "key": key,
-                "message": "TR-069 reprovision enviado (demo)",
+                "run_mode": run_mode,
+                "error": "TR-069 reprovision requires ACS integration in backend services.",
             }
         ),
-        200,
+        501,
     )
 
 
