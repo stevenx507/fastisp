@@ -63,6 +63,16 @@ class Config:
     )
     GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID', '')
     GEOIP_ALLOWLIST = _split_csv(os.environ.get('GEOIP_ALLOWLIST', ''))
+    TENANCY_ROOT_DOMAIN = (os.environ.get('TENANCY_ROOT_DOMAIN') or '').strip().lower()
+    TENANCY_MASTER_HOST = (os.environ.get('TENANCY_MASTER_HOST') or '').strip().lower()
+    TENANCY_API_HOST = (os.environ.get('TENANCY_API_HOST') or '').strip().lower()
+    TENANCY_EXCLUDED_SUBDOMAINS = _split_csv(
+        os.environ.get('TENANCY_EXCLUDED_SUBDOMAINS', 'api,master,www')
+    )
+    TENANCY_ENFORCE_HOST_MATCH = _as_bool(
+        os.environ.get('TENANCY_ENFORCE_HOST_MATCH'),
+        default=False,
+    )
 
     # Observability & Alerts
     PAGERDUTY_ROUTING_KEY = os.environ.get('PAGERDUTY_ROUTING_KEY')
@@ -150,6 +160,16 @@ class ProductionConfig(Config):
         os.environ.get('ALLOW_INSECURE_GOOGLE_LOGIN'), default=False
     )
     GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID', '')
+    TENANCY_ROOT_DOMAIN = (os.environ.get('TENANCY_ROOT_DOMAIN') or '').strip().lower()
+    TENANCY_MASTER_HOST = (os.environ.get('TENANCY_MASTER_HOST') or '').strip().lower()
+    TENANCY_API_HOST = (os.environ.get('TENANCY_API_HOST') or '').strip().lower()
+    TENANCY_EXCLUDED_SUBDOMAINS = _split_csv(
+        os.environ.get('TENANCY_EXCLUDED_SUBDOMAINS', 'api,master,www')
+    )
+    TENANCY_ENFORCE_HOST_MATCH = _as_bool(
+        os.environ.get('TENANCY_ENFORCE_HOST_MATCH'),
+        default=False,
+    )
 
     MIKROTIK_DEFAULT_USERNAME = os.environ.get('MIKROTIK_DEFAULT_USERNAME')
     MIKROTIK_DEFAULT_PASSWORD = os.environ.get('MIKROTIK_DEFAULT_PASSWORD')

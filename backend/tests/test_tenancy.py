@@ -1,6 +1,8 @@
 import pytest
 from flask_jwt_extended import create_access_token
 
+from app import db
+from app.models import Tenant
 from app.tenancy import TenantResolutionError, resolve_tenant_id
 
 
@@ -25,5 +27,28 @@ def test_resolve_tenant_id_rejects_jwt_and_header_mismatch(app):
         '/api/health',
         headers={'Authorization': f'Bearer {token}', 'X-Tenant-ID': '12'},
     ):
+        with pytest.raises(TenantResolutionError):
+            resolve_tenant_id()
+
+
+def test_resolve_tenant_id_from_subdomain_host(app):
+    with app.app_context():
+        app.config['TENANCY_ROOT_DOMAIN'] = 'fastisp.cloud'
+        app.config['TENANCY_EXCLUDED_SUBDOMAINS'] = ['api', 'master', 'www']
+        tenant = Tenant(slug='isp-a', name='ISP A')
+        db.session.add(tenant)
+        db.session.commit()
+        tenant_id = tenant.id
+
+    with app.test_request_context('/api/health', base_url='https://isp-a.fastisp.cloud'):
+        assert resolve_tenant_id() == tenant_id
+
+
+def test_resolve_tenant_id_rejects_unknown_subdomain_tenant(app):
+    with app.app_context():
+        app.config['TENANCY_ROOT_DOMAIN'] = 'fastisp.cloud'
+        app.config['TENANCY_EXCLUDED_SUBDOMAINS'] = ['api', 'master', 'www']
+
+    with app.test_request_context('/api/health', base_url='https://missing.fastisp.cloud'):
         with pytest.raises(TenantResolutionError):
             resolve_tenant_id()

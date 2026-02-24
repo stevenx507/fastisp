@@ -5,13 +5,13 @@ from __future__ import annotations
 from functools import wraps
 from typing import Any, Optional
 
-from flask import g, jsonify, request
+from flask import current_app, g, jsonify, request
 from flask_jwt_extended import get_jwt, get_jwt_identity, jwt_required, verify_jwt_in_request
 from flask_jwt_extended.exceptions import JWTExtendedException, NoAuthorizationError
 from jwt.exceptions import InvalidTokenError
 
 from app import db
-from app.models import User
+from app.models import Tenant, User
 
 
 class TenantResolutionError(ValueError):
@@ -27,8 +27,59 @@ def _coerce_tenant_id(value: Any) -> Optional[int]:
         raise TenantResolutionError('tenant_id must be an integer') from exc
 
 
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
+
+
+def _hostname_without_port(raw_host: Any) -> str:
+    host = str(raw_host or '').strip().lower()
+    if not host:
+        return ''
+    return host.split(':', 1)[0]
+
+
+def _resolve_tenant_id_from_host() -> Optional[int]:
+    host = _hostname_without_port(request.host)
+    if not host:
+        return None
+
+    root_domain = str(current_app.config.get('TENANCY_ROOT_DOMAIN') or '').strip().lower()
+    if not root_domain:
+        return None
+
+    master_host = _hostname_without_port(current_app.config.get('TENANCY_MASTER_HOST'))
+    api_host = _hostname_without_port(current_app.config.get('TENANCY_API_HOST'))
+    excluded = {
+        str(value).strip().lower()
+        for value in (current_app.config.get('TENANCY_EXCLUDED_SUBDOMAINS') or [])
+        if str(value).strip()
+    }
+
+    if host == root_domain or host == master_host or host == api_host:
+        return None
+
+    if not host.endswith(f'.{root_domain}'):
+        if _coerce_bool(current_app.config.get('TENANCY_ENFORCE_HOST_MATCH'), default=False):
+            raise TenantResolutionError('host is outside TENANCY_ROOT_DOMAIN')
+        return None
+
+    subdomain = host[: -(len(root_domain) + 1)]
+    if not subdomain or '.' in subdomain or subdomain in excluded:
+        return None
+
+    tenant = Tenant.query.filter_by(slug=subdomain).first()
+    if not tenant or not tenant.is_active:
+        raise TenantResolutionError('tenant not found for host')
+    return int(tenant.id)
+
+
 def resolve_tenant_id() -> Optional[int]:
     """Resolve tenant id from header/query/JWT with consistency checks."""
+    host_tenant = _resolve_tenant_id_from_host()
     request_tenant = _coerce_tenant_id(
         request.headers.get('X-Tenant-ID') or request.args.get('tenant_id')
     )
@@ -49,7 +100,16 @@ def resolve_tenant_id() -> Optional[int]:
             'tenant_id from request does not match authenticated tenant'
         )
 
-    return request_tenant if request_tenant is not None else jwt_tenant
+    if host_tenant is not None and request_tenant is not None and host_tenant != request_tenant:
+        raise TenantResolutionError('tenant_id from host does not match request tenant')
+    if host_tenant is not None and jwt_tenant is not None and host_tenant != jwt_tenant:
+        raise TenantResolutionError('tenant_id from host does not match authenticated tenant')
+
+    if request_tenant is not None:
+        return request_tenant
+    if host_tenant is not None:
+        return host_tenant
+    return jwt_tenant
 
 
 def _current_user_id() -> Optional[int]:

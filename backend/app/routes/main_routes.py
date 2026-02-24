@@ -10,7 +10,7 @@ import time
 from flask import Blueprint, jsonify, request, Response, current_app
 from flask_jwt_extended import create_access_token, get_jwt_identity, jwt_required
 
-from app.models import Client, User, Subscription, MikroTikRouter, Plan, AuditLog, Ticket, Invoice, PaymentRecord, TicketComment
+from app.models import Client, User, Subscription, MikroTikRouter, Plan, AuditLog, Ticket, Invoice, PaymentRecord, TicketComment, Tenant
 from app import limiter, cache, db
 import pyotp
 import requests
@@ -360,6 +360,7 @@ def _get_user_invoice_items(user: User, tenant_id) -> list[dict]:
 
 
 STAFF_ALLOWED_ROLES = {"admin", "tech", "support", "billing", "noc", "operator"}
+PLATFORM_ADMIN_ROLE = "platform_admin"
 STAFF_ALLOWED_STATUS = {"active", "on_leave", "inactive"}
 STAFF_ALLOWED_SHIFTS = {"day", "night", "mixed"}
 INSTALLATION_ALLOWED_STATUS = {"pending", "scheduled", "in_progress", "completed", "cancelled"}
@@ -573,6 +574,27 @@ def admin_required():
     return wrapper
 
 
+def platform_admin_required():
+    def wrapper(fn):
+        @jwt_required()
+        @wraps(fn)
+        def decorator(*args, **kwargs):
+            current_user_id = _current_user_id()
+            if current_user_id is None:
+                return jsonify({"error": "Token de usuario invalido."}), 401
+            user = db.session.get(User, current_user_id)
+            if not user or user.role != PLATFORM_ADMIN_ROLE:
+                return jsonify({"error": "Acceso denegado. Se requiere rol platform_admin."}), 403
+            tenant_id = current_tenant_id()
+            if tenant_id is not None:
+                return jsonify({"error": "Admin total solo disponible en host master/global."}), 403
+            return fn(*args, **kwargs)
+
+        return decorator
+
+    return wrapper
+
+
 def staff_required():
     def wrapper(fn):
         @jwt_required()
@@ -592,6 +614,30 @@ def staff_required():
         return decorator
 
     return wrapper
+
+
+def _serialize_tenant_platform_item(tenant: Tenant) -> dict:
+    users_total = User.query.filter_by(tenant_id=tenant.id).count()
+    admin_total = User.query.filter_by(tenant_id=tenant.id, role='admin').count()
+    clients_total = Client.query.filter_by(tenant_id=tenant.id).count()
+    routers_total = MikroTikRouter.query.filter_by(tenant_id=tenant.id).count()
+    subs_total = Subscription.query.filter_by(tenant_id=tenant.id).count()
+    active_subs = Subscription.query.filter_by(tenant_id=tenant.id, status='active').count()
+    suspended_subs = Subscription.query.filter_by(tenant_id=tenant.id, status='suspended').count()
+    return {
+        "id": tenant.id,
+        "slug": tenant.slug,
+        "name": tenant.name,
+        "is_active": bool(tenant.is_active),
+        "created_at": tenant.created_at.isoformat() if tenant.created_at else None,
+        "users_total": users_total,
+        "admins_total": admin_total,
+        "clients_total": clients_total,
+        "routers_total": routers_total,
+        "subscriptions_total": subs_total,
+        "subscriptions_active": active_subs,
+        "subscriptions_suspended": suspended_subs,
+    }
 
 
 def _build_network_alert_items(tenant_id) -> list[dict]:
@@ -934,6 +980,179 @@ def login():
         return jsonify({"token": access_token, "user": user.to_dict()}), 200
 
     return jsonify({"error": "Credenciales incorrectas."}), 401
+
+
+@main_bp.route('/platform/overview', methods=['GET'])
+@platform_admin_required()
+def platform_overview():
+    tenants_total = Tenant.query.count()
+    tenants_active = Tenant.query.filter_by(is_active=True).count()
+    tenants_inactive = max(0, tenants_total - tenants_active)
+    users_total = User.query.count()
+    clients_total = Client.query.count()
+    routers_total = MikroTikRouter.query.count()
+    subscriptions_total = Subscription.query.count()
+    subscriptions_active = Subscription.query.filter_by(status='active').count()
+
+    payload = {
+        "tenants_total": tenants_total,
+        "tenants_active": tenants_active,
+        "tenants_inactive": tenants_inactive,
+        "users_total": users_total,
+        "clients_total": clients_total,
+        "routers_total": routers_total,
+        "subscriptions_total": subscriptions_total,
+        "subscriptions_active": subscriptions_active,
+    }
+    return jsonify(payload), 200
+
+
+@main_bp.route('/platform/tenants', methods=['GET'])
+@platform_admin_required()
+def platform_list_tenants():
+    tenants = Tenant.query.order_by(Tenant.created_at.desc()).all()
+    items = [_serialize_tenant_platform_item(tenant) for tenant in tenants]
+    return jsonify({"items": items, "count": len(items)}), 200
+
+
+@main_bp.route('/platform/tenants', methods=['POST'])
+@platform_admin_required()
+def platform_create_tenant():
+    data = request.get_json() or {}
+    name = str(data.get('name') or '').strip()
+    slug_raw = str(data.get('slug') or '').strip().lower()
+
+    if not name:
+        return jsonify({"error": "name es requerido"}), 400
+
+    slug = _slugify(slug_raw or name)
+    if not slug:
+        return jsonify({"error": "slug invalido"}), 400
+
+    duplicate = Tenant.query.filter_by(slug=slug).first()
+    if duplicate:
+        return jsonify({"error": "slug ya existe"}), 409
+
+    is_active = _parse_bool(data.get('is_active'))
+    tenant = Tenant(
+        slug=slug,
+        name=name,
+        is_active=True if is_active is None else bool(is_active),
+    )
+    db.session.add(tenant)
+    db.session.flush()
+
+    created_admin = None
+    admin_email = str(data.get('admin_email') or '').strip().lower()
+    admin_name = str(data.get('admin_name') or 'Admin ISP').strip() or 'Admin ISP'
+    if admin_email:
+        if User.query.filter_by(email=admin_email).first():
+            db.session.rollback()
+            return jsonify({"error": "admin_email ya existe"}), 409
+        admin_password = str(data.get('admin_password') or '').strip() or secrets.token_urlsafe(12)
+        admin_user = User(
+            name=admin_name,
+            email=admin_email,
+            role='admin',
+            tenant_id=tenant.id,
+        )
+        admin_user.set_password(admin_password)
+        db.session.add(admin_user)
+        created_admin = {
+            "email": admin_email,
+            "name": admin_name,
+            "role": "admin",
+            "password": admin_password,
+        }
+
+    db.session.commit()
+    payload = {
+        "success": True,
+        "tenant": _serialize_tenant_platform_item(tenant),
+    }
+    if created_admin:
+        payload["admin"] = created_admin
+    return jsonify(payload), 201
+
+
+@main_bp.route('/platform/tenants/<int:tenant_id>', methods=['PATCH'])
+@platform_admin_required()
+def platform_update_tenant(tenant_id):
+    tenant = db.session.get(Tenant, tenant_id)
+    if not tenant:
+        return jsonify({"error": "Tenant no encontrado"}), 404
+
+    data = request.get_json() or {}
+    changed = False
+
+    if 'name' in data:
+        name = str(data.get('name') or '').strip()
+        if not name:
+            return jsonify({"error": "name invalido"}), 400
+        tenant.name = name
+        changed = True
+
+    if 'slug' in data:
+        slug = _slugify(str(data.get('slug') or '').strip().lower())
+        if not slug:
+            return jsonify({"error": "slug invalido"}), 400
+        duplicate = Tenant.query.filter(Tenant.id != tenant.id, Tenant.slug == slug).first()
+        if duplicate:
+            return jsonify({"error": "slug ya existe"}), 409
+        tenant.slug = slug
+        changed = True
+
+    if 'is_active' in data:
+        parsed = _parse_bool(data.get('is_active'))
+        if parsed is None:
+            return jsonify({"error": "is_active debe ser booleano"}), 400
+        tenant.is_active = parsed
+        changed = True
+
+    if changed:
+        db.session.add(tenant)
+        db.session.commit()
+
+    return jsonify({"success": True, "tenant": _serialize_tenant_platform_item(tenant)}), 200
+
+
+@main_bp.route('/platform/tenants/<int:tenant_id>/admins', methods=['POST'])
+@platform_admin_required()
+def platform_create_tenant_admin(tenant_id):
+    tenant = db.session.get(Tenant, tenant_id)
+    if not tenant:
+        return jsonify({"error": "Tenant no encontrado"}), 404
+
+    data = request.get_json() or {}
+    email = str(data.get('email') or '').strip().lower()
+    name = str(data.get('name') or 'Admin ISP').strip() or 'Admin ISP'
+    if not email:
+        return jsonify({"error": "email es requerido"}), 400
+    if User.query.filter_by(email=email).first():
+        return jsonify({"error": "email ya existe"}), 409
+
+    password = str(data.get('password') or '').strip() or secrets.token_urlsafe(12)
+    user = User(
+        name=name,
+        email=email,
+        role='admin',
+        tenant_id=tenant.id,
+    )
+    user.set_password(password)
+    db.session.add(user)
+    db.session.commit()
+
+    return jsonify({
+        "success": True,
+        "tenant_id": tenant.id,
+        "admin": {
+            "id": user.id,
+            "email": user.email,
+            "name": user.name,
+            "role": user.role,
+            "password": password,
+        },
+    }), 201
 
 
 @main_bp.route('/auth/register', methods=['POST'])

@@ -7,7 +7,7 @@ interface User {
   id: string
   name: string
   email: string
-  role: 'admin' | 'client'
+  role: 'admin' | 'client' | 'platform_admin'
   plan?: string
   client_id?: number
   mfa_enabled?: boolean
