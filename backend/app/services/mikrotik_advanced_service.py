@@ -36,7 +36,7 @@ class MikroTikAdvancedService:
     def connect(self) -> bool:
         """Establish connection to MikroTik router using the connection pool"""
         try:
-            self.router = MikroTikRouter.query.get(self.router_id)
+            self.router = db.session.get(MikroTikRouter, self.router_id)
             if not self.router:
                 logger.error(f"Router {self.router_id} not found in database.")
                 return False

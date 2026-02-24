@@ -90,7 +90,7 @@ def _normalize_queue_item(queue: Dict[str, Any]) -> Dict[str, Any]:
 def _resolve_actor_identity() -> str:
     try:
         identity = get_jwt_identity()
-        user = User.query.get(identity) if identity else None
+        user = db.session.get(User, identity) if identity else None
         if user:
             name = user.name or f"user-{user.id}"
             if user.email:
@@ -219,7 +219,7 @@ def get_routers():
 def get_router(router_id):
     """Get specific router details"""
     try:
-        router = MikroTikRouter.query.get(router_id)
+        router = db.session.get(MikroTikRouter, router_id)
         if not router:
             return jsonify({'success': False, 'error': 'Router not found'}), 404
         
@@ -251,9 +251,9 @@ def validate_config():
         plan_id = data.get('plan_id')
         issues = []
 
-        client = Client.query.get(client_id) if client_id else None
-        router = MikroTikRouter.query.get(router_id) if router_id else None
-        plan = Plan.query.get(plan_id) if plan_id else (client.plan if client else None)
+        client = db.session.get(Client, client_id) if client_id else None
+        router = db.session.get(MikroTikRouter, router_id) if router_id else None
+        plan = db.session.get(Plan, plan_id) if plan_id else (client.plan if client else None)
 
         if not client:
             issues.append('Client not found')
@@ -287,8 +287,8 @@ def provision_client():
         if not client_id or not router_id:
             return jsonify({'success': False, 'error': 'Missing client_id or router_id'}), 400
         
-        client = Client.query.get(client_id)
-        router = MikroTikRouter.query.get(router_id)
+        client = db.session.get(Client, client_id)
+        router = db.session.get(MikroTikRouter, router_id)
         
         if not client:
             return jsonify({'success': False, 'error': 'Client not found'}), 404
@@ -315,14 +315,14 @@ def suspend_client(client_id):
         data = request.get_json()
         reason = data.get('reason', 'non-payment')
         
-        client = Client.query.get(client_id)
+        client = db.session.get(Client, client_id)
         if not client:
             return jsonify({'success': False, 'error': 'Client not found'}), 404
         
         if not client.router_id:
             return jsonify({'success': False, 'error': 'Client does not have an associated router'}), 400
 
-        router = MikroTikRouter.query.get(client.router_id)
+        router = db.session.get(MikroTikRouter, client.router_id)
         if not router or not router.is_active:
             return jsonify({'success': False, 'error': 'No active router found for this client'}), 404
         
@@ -344,14 +344,14 @@ def suspend_client(client_id):
 def activate_client(client_id):
     """Activate suspended client"""
     try:
-        client = Client.query.get(client_id)
+        client = db.session.get(Client, client_id)
         if not client:
             return jsonify({'success': False, 'error': 'Client not found'}), 404
         
         if not client.router_id:
             return jsonify({'success': False, 'error': 'Client does not have an associated router'}), 400
 
-        router = MikroTikRouter.query.get(client.router_id)
+        router = db.session.get(MikroTikRouter, client.router_id)
         if not router or not router.is_active:
             return jsonify({'success': False, 'error': 'No active router found for this client'}), 404
         
@@ -376,18 +376,18 @@ def update_client_speed(client_id):
         data = request.get_json()
         plan_id = data.get('plan_id')
         
-        client = Client.query.get(client_id)
+        client = db.session.get(Client, client_id)
         if not client:
             return jsonify({'success': False, 'error': 'Client not found'}), 404
         
-        new_plan = Plan.query.get(plan_id)
+        new_plan = db.session.get(Plan, plan_id)
         if not new_plan:
             return jsonify({'success': False, 'error': 'Plan not found'}), 404
         
         if not client.router_id:
             return jsonify({'success': False, 'error': 'Client does not have an associated router'}), 400
 
-        router = MikroTikRouter.query.get(client.router_id)
+        router = db.session.get(MikroTikRouter, client.router_id)
         if not router or not router.is_active:
             return jsonify({'success': False, 'error': 'No active router found for this client'}), 404
         
@@ -581,7 +581,7 @@ def backup_router(router_id):
 def test_connection(router_id):
     """Test connectivity to specified router"""
     try:
-        router = MikroTikRouter.query.get(router_id)
+        router = db.session.get(MikroTikRouter, router_id)
         if not router:
             return jsonify({'success': False, 'error': 'Router not found'}), 404
         ok = _test_router_connection(router)
@@ -760,11 +760,11 @@ def get_ai_diagnosis(router_id):
     """Get an AI-powered network diagnosis for a specific router."""
     try:
         # Verificar que el router existe
-        router = MikroTikRouter.query.get(router_id)
+        router = db.session.get(MikroTikRouter, router_id)
         if not router:
             return jsonify({'success': False, 'error': 'Router not found'}), 404
 
-        # Instanciar y ejecutar el servicio de diagnóstico
+        # Instanciar y ejecutar el servicio de diagnostico
         ai_service = AIDiagnosticService(router_id=router_id)
         diagnosis_result = ai_service.run_diagnosis()
 
@@ -826,8 +826,8 @@ def advanced_provision():
         if not router_id or not client_id:
             return jsonify({'success': False, 'error': 'Missing router_id or client_id'}), 400
         
-        router = MikroTikRouter.query.get(router_id)
-        client = Client.query.get(client_id)
+        router = db.session.get(MikroTikRouter, router_id)
+        client = db.session.get(Client, client_id)
         
         if not router:
             return jsonify({'success': False, 'error': 'Router not found'}), 404
@@ -859,7 +859,7 @@ def get_router_metrics(router_id):
     """
     try:
         # Check if router exists
-        router = MikroTikRouter.query.get(router_id)
+        router = db.session.get(MikroTikRouter, router_id)
         if not router:
             return jsonify({'success': False, 'error': 'Router not found'}), 404
 
@@ -1016,17 +1016,17 @@ def get_enterprise_snapshot(router_id):
         health_score = _to_int((health or {}).get('health_score'), 0)
         recommendations: List[str] = []
         if health_score < 85:
-            recommendations.append('El health score está por debajo de 85. Revisar CPU, memoria e interfaces.')
+            recommendations.append('El health score esta por debajo de 85. Revisar CPU, memoria e interfaces.')
         if interface_summary['down'] > 0:
-            recommendations.append(f'Hay {interface_summary["down"]} interfaces caídas. Validar enlaces críticos.')
+            recommendations.append(f'Hay {interface_summary["down"]} interfaces caidas. Validar enlaces criticos.')
         if len(insecure_services) > 0:
-            recommendations.append('Se detectaron servicios de gestión inseguros habilitados. Aplicar hardening.')
+            recommendations.append('Se detectaron servicios de gestion inseguros habilitados. Aplicar hardening.')
         if scheduler_summary['backup_jobs'] == 0:
-            recommendations.append('No hay tareas de backup automáticas detectadas en /system scheduler.')
+            recommendations.append('No hay tareas de backup automaticas detectadas en /system scheduler.')
         if dhcp_summary['waiting'] > 20:
             recommendations.append('Hay muchas leases DHCP en estado waiting/offered. Revisar pool y conflictos.')
         if queue_summary['busy'] > 30:
-            recommendations.append('Número alto de colas ocupadas. Considerar optimización de QoS/PCQ.')
+            recommendations.append('Numero alto de colas ocupadas. Considerar optimizacion de QoS/PCQ.')
 
         normalized_logs = [
             {
@@ -1163,15 +1163,15 @@ def get_hardening_profiles(router_id):
     try:
         profiles = {
             'router_profiles': [
-                {'id': 'baseline', 'label': 'Baseline', 'description': 'Desactiva servicios inseguros de gestión.'},
+                {'id': 'baseline', 'label': 'Baseline', 'description': 'Desactiva servicios inseguros de gestion.'},
                 {'id': 'strict', 'label': 'Strict', 'description': 'Baseline + cifrado fuerte y aislamiento de descubrimiento.'},
-                {'id': 'hardened', 'label': 'Hardened', 'description': 'Perfil reforzado para producción crítica.'}
+                {'id': 'hardened', 'label': 'Hardened', 'description': 'Perfil reforzado para produccion critica.'}
             ],
             'site_profiles': [
-                {'id': 'core', 'label': 'Core', 'description': 'Núcleo de red con mayor control de protección.'},
-                {'id': 'distribution', 'label': 'Distribution', 'description': 'Enlaces de distribución con política de ICMP controlada.'},
+                {'id': 'core', 'label': 'Core', 'description': 'Nucleo de red con mayor control de proteccion.'},
+                {'id': 'distribution', 'label': 'Distribution', 'description': 'Enlaces de distribucion con politica de ICMP controlada.'},
                 {'id': 'access', 'label': 'Access', 'description': 'Nodos de acceso para clientes finales.'},
-                {'id': 'hotspot', 'label': 'Hotspot', 'description': 'Portal cautivo y control de tráfico de acceso público.'}
+                {'id': 'hotspot', 'label': 'Hotspot', 'description': 'Portal cautivo y control de trafico de acceso publico.'}
             ]
         }
         return jsonify({'success': True, 'profiles': profiles, 'router_id': str(router_id)}), 200

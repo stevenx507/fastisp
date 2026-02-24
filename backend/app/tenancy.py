@@ -10,6 +10,7 @@ from flask_jwt_extended import get_jwt, get_jwt_identity, jwt_required, verify_j
 from flask_jwt_extended.exceptions import JWTExtendedException, NoAuthorizationError
 from jwt.exceptions import InvalidTokenError
 
+from app import db
 from app.models import User
 
 
@@ -89,7 +90,7 @@ def tenant_admin_required():
                 return jsonify({'error': 'Token de usuario invalido.'}), 401
             if user_id is None:
                 return jsonify({'error': 'Token de usuario invalido.'}), 401
-            user = User.query.get(user_id)
+            user = db.session.get(User, user_id)
             if not user or user.role != 'admin':
                 return jsonify({'error': 'Acceso denegado. Se requiere rol de administrador.'}), 403
 

@@ -10,7 +10,7 @@ from flask import current_app
 import os
 import subprocess
 
-from app import celery
+from app import celery, db
 from app.models import MikroTikRouter, Subscription, Client
 from app.services.analytics_service import analytics_service
 from app.services.mikrotik_service import MikroTikService
@@ -259,7 +259,7 @@ def execute_router_operation(self, router_id: int, operation: str, payload: Opti
 def enforce_billing_status() -> Dict[str, Any]:
     """
     Auto-suspende clientes vencidos y reactiva los que volvieron a 'active'.
-    Inspirado en cortes automáticos de Wispro/Wisphub.
+    Inspirado en cortes automaticos de Wispro/Wisphub.
     """
     today = datetime.utcnow().date()
     updated: List[Dict[str, Any]] = []
@@ -271,23 +271,21 @@ def enforce_billing_status() -> Dict[str, Any]:
 
         client: Optional[Client] = sub.client
         if not client and sub.client_id:
-            client = Client.query.get(sub.client_id)
+            client = db.session.get(Client, sub.client_id)
 
         if sub.status in ('past_due', 'suspended') and client and client.router_id:
             with MikroTikService(client.router_id) as service:
                 service.suspend_client(client, reason='billing')
             sub.status = 'suspended'
-            _send_billing_notification(sub, f'Tu servicio está suspendido por pago vencido (sub {sub.id}).')
+            _send_billing_notification(sub, f'Tu servicio esta suspendido por pago vencido (sub {sub.id}).')
         elif sub.status == 'active' and client and client.router_id:
             with MikroTikService(client.router_id) as service:
                 service.activate_client(client)
 
         if sub.status != original_status:
             updated.append({"subscription_id": sub.id, "from": original_status, "to": sub.status})
-        from app import db
         db.session.add(sub)
 
-    from app import db
     db.session.commit()
     summary = {"timestamp": datetime.utcnow().isoformat() + "Z", "updated": updated, "count": len(updated)}
     current_app.logger.info('Billing enforcement summary: %s', json.dumps(summary, ensure_ascii=True))
@@ -299,6 +297,6 @@ def run_backups() -> Dict[str, Any]:
     """
     Backup de base de datos (pg_dump) y config de MikroTik.
     """
-    # Delegamos la lógica a backup_service para mantener una sola fuente.
+    # Delegamos la logica a backup_service para mantener una sola fuente.
     from app.services.backup_service import run_backups as run_full_backups
     return run_full_backups()

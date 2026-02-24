@@ -7,6 +7,7 @@ from routeros_api.exceptions import RouterOsApiConnectionError
 import logging
 from threading import Lock
 from queue import Queue, Empty
+from app import db
 from app.models import MikroTikRouter # To fetch router details
 
 logger = logging.getLogger(__name__)
@@ -68,7 +69,7 @@ class MikroTikConnectionPool:
             # If no existing connection, and max_connections not reached, create new
             if router_pool["in_use"] < self.max_connections_per_router:
                 try:
-                    router_db = MikroTikRouter.query.get(router_id)
+                    router_db = db.session.get(MikroTikRouter, router_id)
                     if not router_db:
                         raise ValueError(f"Router {router_id} not found in database.")
                     
