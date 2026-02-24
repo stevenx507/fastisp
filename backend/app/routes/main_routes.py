@@ -61,6 +61,21 @@ def _parse_int(value) -> int | None:
         return None
 
 
+def _parse_bool(value) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if value in (0, 1):
+            return bool(value)
+        return None
+    token = str(value or '').strip().lower()
+    if token in {'1', 'true', 'yes', 'y', 'on'}:
+        return True
+    if token in {'0', 'false', 'no', 'n', 'off'}:
+        return False
+    return None
+
+
 def _backup_dir_path() -> Path:
     configured = (
         current_app.config.get('BACKUP_DIR')
@@ -243,6 +258,7 @@ SCREEN_ALERT_ALLOWED_AUDIENCE = {"all", "active", "overdue", "suspended"}
 EXTRA_SERVICE_ALLOWED_STATUS = {"active", "disabled"}
 HOTSPOT_VOUCHER_ALLOWED_STATUS = {"generated", "sold", "used", "expired", "cancelled"}
 SYSTEM_ALLOWED_JOBS = {"backup", "cleanup_leases", "rotate_passwords", "recalc_balances"}
+TICKET_ALLOWED_PRIORITIES = {"low", "medium", "high", "urgent"}
 
 
 def _tenant_cache_key(prefix: str, tenant_id) -> str:
@@ -3751,6 +3767,10 @@ def admin_system_settings_update():
         "backup_retention_days": "int",
         "metrics_poll_interval_sec": "int",
     }
+    integer_limits = {
+        "backup_retention_days": (1, 365),
+        "metrics_poll_interval_sec": (15, 3600),
+    }
 
     overrides = _load_cached_dict(_system_settings_key(tenant_id))
     for key_name, key_type in allowed.items():
@@ -3758,11 +3778,26 @@ def admin_system_settings_update():
             continue
         raw_value = incoming.get(key_name)
         if key_type == "bool":
-            overrides[key_name] = bool(raw_value)
+            parsed = _parse_bool(raw_value)
+            if parsed is None:
+                return jsonify({"error": f"{key_name} debe ser booleano"}), 400
+            overrides[key_name] = parsed
         elif key_type == "int":
-            overrides[key_name] = int(raw_value)
+            try:
+                parsed_int = int(raw_value)
+            except (TypeError, ValueError):
+                return jsonify({"error": f"{key_name} debe ser entero"}), 400
+            minimum, maximum = integer_limits.get(key_name, (-2**31, 2**31 - 1))
+            if parsed_int < minimum or parsed_int > maximum:
+                return jsonify({"error": f"{key_name} debe estar entre {minimum} y {maximum}"}), 400
+            overrides[key_name] = parsed_int
         else:
-            overrides[key_name] = str(raw_value)
+            text_value = str(raw_value or '').strip().lower()
+            if key_name == "default_ticket_priority" and text_value not in TICKET_ALLOWED_PRIORITIES:
+                return jsonify(
+                    {"error": f"default_ticket_priority invalido. permitidos: {', '.join(sorted(TICKET_ALLOWED_PRIORITIES))}"}
+                ), 400
+            overrides[key_name] = text_value
 
     _save_cached_dict(_system_settings_key(tenant_id), overrides)
     settings = {**_default_system_settings(), **overrides}
