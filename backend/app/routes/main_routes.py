@@ -3,26 +3,25 @@ from functools import wraps
 import random
 import secrets
 
-from flask import Blueprint, jsonify, request, Response, current_app, send_file
+from flask import Blueprint, jsonify, request, Response, current_app
 from flask_jwt_extended import create_access_token, get_jwt_identity, jwt_required
 
 from app.models import Client, User, Subscription, MikroTikRouter, Plan, AuditLog, Ticket, Invoice, PaymentRecord, TicketComment
-from app import limiter, cache
+from app import limiter, cache, db
 import pyotp
+import requests
 from app.services.mikrotik_service import MikroTikService
 from app.services.monitoring_service import MonitoringService
 from app.tenancy import current_tenant_id, tenant_access_allowed
 from datetime import date
 from werkzeug.exceptions import BadRequest
 from sqlalchemy.orm import joinedload
+from sqlalchemy import or_
 import subprocess
 import os
 from flask_mail import Message
 from flask import send_from_directory
 from pathlib import Path
-from io import BytesIO
-from reportlab.lib.pagesizes import letter
-from reportlab.pdfgen import canvas
 
 
 def _current_user_id():
@@ -55,6 +54,35 @@ def _get_plan_for_request(data, tenant_id):
                 tenant_id=tenant_id,
             )
     return plan
+
+
+def _client_invoice_payload(invoice: Invoice) -> dict:
+    payload = invoice.to_dict()
+    # Backward-compatible aliases consumed by existing client portal UI.
+    payload["due"] = payload.get("due_date")
+    payload["total"] = payload.get("total_amount")
+    return payload
+
+
+def _get_user_invoice_items(user: User, tenant_id) -> list[dict]:
+    query = Invoice.query.join(Subscription, Invoice.subscription_id == Subscription.id)
+    if tenant_id is not None:
+        query = query.filter(Subscription.tenant_id == tenant_id)
+
+    if user.client:
+        query = query.filter(
+            or_(
+                Subscription.client_id == user.client.id,
+                Subscription.email == user.email,
+            )
+        )
+    else:
+        query = query.filter(Subscription.email == user.email)
+
+    return [
+        _client_invoice_payload(invoice)
+        for invoice in query.order_by(Invoice.created_at.desc()).all()
+    ]
 
 
 # In-memory ticket store for demo; replace with DB model in production.
@@ -480,17 +508,64 @@ def manual_payment():
     return jsonify({"invoice": invoice.to_dict(), "payment": payment.to_dict()}), 201
 
 
+def _verify_google_credential(credential: str) -> dict:
+    google_client_id = (current_app.config.get('GOOGLE_CLIENT_ID') or '').strip()
+    if not google_client_id:
+        raise BadRequest("GOOGLE_CLIENT_ID no está configurado en el backend.")
+
+    try:
+        resp = requests.get(
+            "https://oauth2.googleapis.com/tokeninfo",
+            params={"id_token": credential},
+            timeout=5,
+        )
+    except requests.RequestException as exc:
+        raise BadRequest(f"No se pudo validar el token de Google: {exc}") from exc
+
+    if resp.status_code != 200:
+        raise BadRequest("Token de Google inválido o expirado.")
+
+    payload = resp.json()
+    aud = (payload.get('aud') or '').strip()
+    issuer = (payload.get('iss') or '').strip()
+    email = (payload.get('email') or '').strip().lower()
+    email_verified = str(payload.get('email_verified') or '').strip().lower()
+    name = (payload.get('name') or payload.get('given_name') or 'Usuario Google').strip()
+
+    if aud != google_client_id:
+        raise BadRequest("El token no corresponde al GOOGLE_CLIENT_ID configurado.")
+    if issuer not in {'accounts.google.com', 'https://accounts.google.com'}:
+        raise BadRequest("Issuer de Google inválido.")
+    if email_verified not in {'true', '1'}:
+        raise BadRequest("La cuenta de Google no está verificada.")
+    if not email:
+        raise BadRequest("No se pudo obtener email desde el token de Google.")
+
+    return {"email": email, "name": name}
+
+
 @main_bp.route('/auth/google', methods=['POST'])
 def google_login():
-    """
-    Endpoint de demostraciÃ³n para "login con Google": confÃ­a en el payload recibido.
-    """
+    """Google login with server-side ID token verification."""
     if not current_app.config.get('ALLOW_GOOGLE_LOGIN', True):
         return jsonify({"error": "El login con Google está deshabilitado en este entorno."}), 403
 
     data = request.get_json() or {}
-    email = (data.get('email') or '').strip().lower()
-    name = (data.get('name') or 'Usuario Google').strip()
+    credential = (data.get('credential') or '').strip()
+
+    try:
+        if credential:
+            payload = _verify_google_credential(credential)
+            email = payload["email"]
+            name = payload["name"]
+        elif current_app.config.get('ALLOW_INSECURE_GOOGLE_LOGIN', False):
+            email = (data.get('email') or '').strip().lower()
+            name = (data.get('name') or 'Usuario Google').strip()
+        else:
+            return jsonify({"error": "Credential de Google requerida."}), 400
+    except BadRequest as exc:
+        return jsonify({"error": str(exc)}), 400
+
     if not email:
         return jsonify({"error": "Email es requerido."}), 400
 
@@ -1044,17 +1119,7 @@ def client_portal_overview():
     if tenant_id is not None and client.tenant_id not in (None, tenant_id):
         return jsonify({"error": "Acceso denegado para este tenant."}), 403
 
-    invoices = []
-    subs_q = Subscription.query.filter_by(email=user.email)
-    if tenant_id is not None:
-        subs_q = subs_q.filter_by(tenant_id=tenant_id)
-    for s in subs_q.all():
-        invoices.append({
-            "id": f"SUB-{s.id}",
-            "amount": float(s.amount),
-            "due": s.next_charge.isoformat() if s.next_charge else datetime.utcnow().date().isoformat(),
-            "status": s.status
-        })
+    invoices = _get_user_invoice_items(user, tenant_id)
 
     overview = {
         "plan": client.plan.name if client.plan else None,
@@ -1080,18 +1145,7 @@ def client_invoices():
         return jsonify({"error": "Token de usuario invalido."}), 401
     user = User.query.get_or_404(current_user_id)
     tenant_id = current_tenant_id()
-    subs = Subscription.query.filter_by(email=user.email)
-    if tenant_id is not None:
-        subs = subs.filter_by(tenant_id=tenant_id)
-    invoices = [
-        {
-            "id": f"SUB-{s.id}",
-            "amount": float(s.amount),
-            "due": s.next_charge.isoformat() if s.next_charge else datetime.utcnow().date().isoformat(),
-            "status": s.status
-        }
-        for s in subs.all()
-    ]
+    invoices = _get_user_invoice_items(user, tenant_id)
     return jsonify({"items": invoices, "count": len(invoices)}), 200
 
 
@@ -1809,34 +1863,6 @@ def _sla_due(priority: str) -> datetime:
     return now + timedelta(hours=48)
 
 
-@main_bp.route('/tickets', methods=['GET'])
-@jwt_required()
-def list_tickets():
-    tenant_id = current_tenant_id()
-    user_id = _current_user_id()
-    is_admin = False
-    user = User.query.get(user_id)
-    if user and user.role == 'admin':
-        is_admin = True
-
-    query = Ticket.query.options(joinedload(Ticket.comments))
-    if not is_admin:
-        query = query.filter((Ticket.user_id == user_id) | (Ticket.tenant_id == tenant_id))
-    items = []
-    for t in query.order_by(Ticket.created_at.desc()).all():
-        items.append({
-            "id": t.id,
-            "subject": t.subject,
-            "description": t.description,
-            "status": t.status,
-            "priority": t.priority,
-            "assigned_to": t.assigned_to,
-            "sla_due_at": t.sla_due_at.isoformat() if t.sla_due_at else None,
-            "created_at": t.created_at.isoformat() if t.created_at else None,
-        })
-    return jsonify({"items": items, "count": len(items)}), 200
-
-
 @main_bp.route('/tickets', methods=['POST'])
 @jwt_required()
 def create_ticket():
@@ -1863,46 +1889,6 @@ def create_ticket():
     db.session.commit()
     _notify_incident(f"Nuevo ticket: {subject}", severity="warning")
     return jsonify({"ticket": ticket.to_dict()}), 201
-
-
-@main_bp.route('/tickets/<int:ticket_id>', methods=['PATCH'])
-@jwt_required()
-def update_ticket(ticket_id):
-    data = request.get_json() or {}
-    ticket = Ticket.query.get_or_404(ticket_id)
-    user_id = _current_user_id()
-    user = User.query.get(user_id)
-    is_admin = user and user.role == 'admin'
-    # Non-admin only can comment via /comments
-    if not is_admin and data:
-        return jsonify({"error": "Solo admin puede actualizar ticket"}), 403
-    status = data.get('status')
-    assigned_to = data.get('assigned_to')
-    priority = data.get('priority')
-    if status:
-        ticket.status = status
-    if assigned_to is not None:
-        ticket.assigned_to = assigned_to
-    if priority:
-        ticket.priority = priority
-        ticket.sla_due_at = _sla_due(priority)
-    db.session.commit()
-    return jsonify({"ticket": ticket.to_dict()}), 200
-
-
-@main_bp.route('/tickets/<int:ticket_id>/comments', methods=['POST'])
-@jwt_required()
-def add_ticket_comment(ticket_id):
-    data = request.get_json() or {}
-    comment = (data.get('comment') or '').strip()
-    if not comment:
-        return jsonify({"error": "comment requerido"}), 400
-    ticket = Ticket.query.get_or_404(ticket_id)
-    user_id = _current_user_id()
-    tc = TicketComment(ticket_id=ticket.id, user_id=user_id, comment=comment)
-    db.session.add(tc)
-    db.session.commit()
-    return jsonify({"comment": tc.to_dict()}), 201
 
 
 def _notify_client(client: Client, subject: str, body: str):

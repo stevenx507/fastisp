@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useState } from 'react'
 import { useAuthStore } from '../store/authStore'
 import { apiClient } from '../lib/apiClient'
 import { CheckCircleIcon, WrenchScrewdriverIcon, ClockIcon, ChatBubbleBottomCenterTextIcon } from '@heroicons/react/24/outline'
@@ -28,7 +28,7 @@ const TechApp: React.FC = () => {
   const [loading, setLoading] = useState(false)
   const [note, setNote] = useState('')
 
-  const loadTickets = async () => {
+  const loadTickets = useCallback(async () => {
     setLoading(true)
     try {
       const res = await apiClient.get('/tickets?status=open')
@@ -40,9 +40,9 @@ const TechApp: React.FC = () => {
     } finally {
       setLoading(false)
     }
-  }
+  }, [user?.email])
 
-  useEffect(() => { loadTickets() }, [])
+  useEffect(() => { loadTickets() }, [loadTickets])
 
   const updateStatus = async (ticket: Ticket, status: string) => {
     try {

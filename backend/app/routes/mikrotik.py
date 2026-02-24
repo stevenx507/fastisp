@@ -72,6 +72,21 @@ def _parse_router_latency_ms(value: Any) -> Optional[float]:
     except Exception:
         return None
 
+
+def _normalize_queue_item(queue: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        'id': queue.get('id') or queue.get('.id') or '',
+        'name': queue.get('name', ''),
+        'target': queue.get('target', ''),
+        'max_limit': queue.get('max_limit') or queue.get('max-limit') or '',
+        'rate': queue.get('rate', ''),
+        'packet_rate': queue.get('packet_rate') or queue.get('packet-rate') or '',
+        'queued_bytes': queue.get('queued_bytes') or queue.get('queued-bytes') or '0',
+        'queued_packets': queue.get('queued_packets') or queue.get('queued-packets') or '0',
+        'disabled': str(queue.get('disabled', 'false')).lower() == 'true' if isinstance(queue.get('disabled'), str) else bool(queue.get('disabled', False)),
+        'comment': queue.get('comment', ''),
+    }
+
 def _resolve_actor_identity() -> str:
     try:
         identity = get_jwt_identity()
@@ -415,6 +430,119 @@ def get_router_queues(router_id):
         return jsonify({'success': True, 'queues': queues}), 200
     except Exception as e:
         logger.error(f"Error getting router queues: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@mikrotik_bp.route('/routers/<router_id>/queues/toggle', methods=['POST'])
+@admin_required()
+def toggle_router_queue(router_id):
+    data = request.get_json() or {}
+    queue_id = str(data.get('id') or '').strip()
+    disable = _as_bool(data.get('disable'), default=False)
+    if not queue_id:
+        return jsonify({'success': False, 'error': 'Queue id is required'}), 400
+
+    try:
+        with MikroTikService(router_id) as service:
+            if not service.api:
+                return jsonify({'success': False, 'error': 'Could not connect to router'}), 500
+            success = service.toggle_queue_status(queue_id, disable)
+        if not success:
+            return jsonify({'success': False, 'error': 'Queue not found or update failed'}), 404
+        return jsonify({'success': True, 'queue_id': queue_id, 'disabled': disable}), 200
+    except Exception as e:
+        logger.error(f"Error toggling queue status: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@mikrotik_bp.route('/routers/<router_id>/queues/update-limit', methods=['PUT'])
+@admin_required()
+def update_router_queue_limit(router_id):
+    data = request.get_json() or {}
+    queue_id = str(data.get('id') or '').strip()
+    download = str(data.get('download') or '').strip()
+    upload = str(data.get('upload') or '').strip()
+    if not queue_id or not download or not upload:
+        return jsonify({'success': False, 'error': 'id, download and upload are required'}), 400
+
+    try:
+        with MikroTikService(router_id) as service:
+            if not service.api:
+                return jsonify({'success': False, 'error': 'Could not connect to router'}), 500
+            success = service.update_queue_limit(queue_id, download, upload)
+        if not success:
+            return jsonify({'success': False, 'error': 'Queue not found or update failed'}), 404
+        return jsonify({'success': True, 'queue_id': queue_id, 'max_limit': f'{upload}M/{download}M'}), 200
+    except Exception as e:
+        logger.error(f"Error updating queue limit: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@mikrotik_bp.route('/routers/<router_id>/queues/update-comment', methods=['PUT'])
+@admin_required()
+def update_router_queue_comment(router_id):
+    data = request.get_json() or {}
+    queue_id = str(data.get('id') or '').strip()
+    comment = '' if data.get('comment') is None else str(data.get('comment'))
+    if not queue_id:
+        return jsonify({'success': False, 'error': 'Queue id is required'}), 400
+
+    try:
+        with MikroTikService(router_id) as service:
+            if not service.api:
+                return jsonify({'success': False, 'error': 'Could not connect to router'}), 500
+            success = service.update_queue_comment(queue_id, comment)
+        if not success:
+            return jsonify({'success': False, 'error': 'Queue not found or update failed'}), 404
+        return jsonify({'success': True, 'queue_id': queue_id, 'comment': comment}), 200
+    except Exception as e:
+        logger.error(f"Error updating queue comment: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@mikrotik_bp.route('/routers/<router_id>/queues', methods=['POST'])
+@admin_required()
+def create_router_queue(router_id):
+    data = request.get_json() or {}
+    name = str(data.get('name') or '').strip()
+    target = str(data.get('target') or '').strip()
+    download = str(data.get('download') or '').strip()
+    upload = str(data.get('upload') or '').strip()
+    if not name or not target or not download or not upload:
+        return jsonify({'success': False, 'error': 'name, target, download and upload are required'}), 400
+
+    try:
+        with MikroTikService(router_id) as service:
+            if not service.api:
+                return jsonify({'success': False, 'error': 'Could not connect to router'}), 500
+            result = service.create_simple_queue(name=name, target=target, download_speed=download, upload_speed=upload)
+        if not result.get('success'):
+            return jsonify({'success': False, 'error': result.get('error') or 'Queue creation failed'}), 400
+        queue = _normalize_queue_item(result.get('queue') or {})
+        return jsonify({'success': True, 'queue': queue}), 201
+    except Exception as e:
+        logger.error(f"Error creating queue: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@mikrotik_bp.route('/routers/<router_id>/queues', methods=['DELETE'])
+@admin_required()
+def delete_router_queue(router_id):
+    data = request.get_json() or {}
+    queue_id = str(data.get('id') or '').strip()
+    if not queue_id:
+        return jsonify({'success': False, 'error': 'Queue id is required'}), 400
+
+    try:
+        with MikroTikService(router_id) as service:
+            if not service.api:
+                return jsonify({'success': False, 'error': 'Could not connect to router'}), 500
+            success = service.delete_queue(queue_id)
+        if not success:
+            return jsonify({'success': False, 'error': 'Queue not found or delete failed'}), 404
+        return jsonify({'success': True, 'queue_id': queue_id}), 200
+    except Exception as e:
+        logger.error(f"Error deleting queue: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @mikrotik_bp.route('/routers/<router_id>/connections', methods=['GET'])

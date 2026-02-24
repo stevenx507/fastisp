@@ -5,12 +5,12 @@ import AppLayout from '../components/AppLayout'
 import { apiClient } from '../lib/apiClient'
 
 interface Invoice {
-  id: string
+  id: number
   amount: number
   tax_percent?: number
-  total?: number
+  total_amount?: number
   currency: string
-  due: string
+  due_date: string
   status: string
   method?: string
 }
@@ -27,7 +27,7 @@ const statusColors: Record<string, string> = {
 const BillingPortal: React.FC = () => {
   const [invoices, setInvoices] = useState<Invoice[]>([])
   const [loading, setLoading] = useState(false)
-  const [paying, setPaying] = useState<string | null>(null)
+  const [paying, setPaying] = useState<number | null>(null)
 
   const load = async () => {
     setLoading(true)
@@ -44,7 +44,7 @@ const BillingPortal: React.FC = () => {
 
   useEffect(() => { load() }, [])
 
-  const pay = async (invoiceId: string, amount: number, currency: string) => {
+  const pay = async (invoiceId: number, amount: number, currency: string) => {
     setPaying(invoiceId)
     try {
       const res = await apiClient.post('/payments/checkout', { invoice_id: invoiceId, amount, currency, method: 'transfer' })
@@ -89,15 +89,15 @@ const BillingPortal: React.FC = () => {
                 <span className="font-mono text-sm text-gray-900">{inv.id}</span>
                 <span className="text-sm text-gray-800">{inv.amount.toFixed(2)} {inv.currency}</span>
                 <span className="text-sm text-gray-600">{(inv.tax_percent ?? 0).toFixed(2)}%</span>
-                <span className="text-sm font-semibold text-gray-900">{(inv.total ?? inv.amount).toFixed(2)} {inv.currency}</span>
-                <span className="text-sm text-gray-600">{inv.due}</span>
+                <span className="text-sm font-semibold text-gray-900">{(inv.total_amount ?? inv.amount).toFixed(2)} {inv.currency}</span>
+                <span className="text-sm text-gray-600">{inv.due_date}</span>
                 <div className="flex items-center gap-2">
                   <span className={`text-xs px-2 py-1 rounded-full ${statusColors[inv.status] || 'bg-gray-100 text-gray-700'}`}>
                     {inv.status}
                   </span>
                   {inv.status !== 'paid' && (
                     <button
-                      onClick={() => pay(inv.id, inv.total ?? inv.amount, inv.currency || 'USD')}
+                      onClick={() => pay(inv.id, inv.total_amount ?? inv.amount, inv.currency || 'USD')}
                       disabled={paying === inv.id}
                       className="text-xs px-3 py-1 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60"
                     >
