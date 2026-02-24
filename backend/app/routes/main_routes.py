@@ -678,7 +678,7 @@ def login():
 @limiter.limit("5/minute")
 def register():
     """
-    Registro ligero para demo: crea un usuario cliente y devuelve token inmediato.
+    Registro publico: crea un usuario cliente y devuelve token inmediato.
     """
     if not current_app.config.get('ALLOW_SELF_SIGNUP', False):
         return jsonify({"error": "El registro publico esta deshabilitado. Solicite acceso al administrador."}), 403
