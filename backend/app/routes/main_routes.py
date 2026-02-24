@@ -881,9 +881,11 @@ def change_plan(client_id):
 
     data = request.get_json() or {}
     plan_id = data.get('plan_id')
-    apply_proration = bool(data.get('prorate', True))
+    apply_proration = _parse_bool(data.get('prorate', True))
     if not plan_id:
         return jsonify({"error": "plan_id es requerido"}), 400
+    if apply_proration is None:
+        return jsonify({"error": "prorate debe ser booleano"}), 400
 
     new_plan = db.session.get(Plan, plan_id)
     if not new_plan:
@@ -1862,11 +1864,13 @@ def client_notification_preferences():
     key = f"notif_pref_{current_user_id}"
     if request.method == 'POST':
         data = request.get_json() or {}
-        prefs = {
-            "email": bool(data.get('email', True)),
-            "whatsapp": bool(data.get('whatsapp', False)),
-            "push": bool(data.get('push', False)),
-        }
+        defaults = {"email": True, "whatsapp": False, "push": False}
+        prefs = {}
+        for channel, default_value in defaults.items():
+            parsed = _parse_bool(data.get(channel, default_value))
+            if parsed is None:
+                return jsonify({"error": f"{channel} debe ser booleano"}), 400
+            prefs[channel] = parsed
         cache.set(key, prefs, timeout=86400)
         return jsonify({"success": True, "preferences": prefs}), 200
     prefs = cache.get(key) or {"email": True, "whatsapp": False, "push": False}
@@ -2651,13 +2655,16 @@ def admin_staff_create():
 
     supplied_password = (data.get('password') or '').strip()
     temporary_password = supplied_password or secrets.token_urlsafe(10)
+    mfa_enabled = _parse_bool(data.get('mfa_enabled', False))
+    if mfa_enabled is None:
+        return jsonify({"error": "mfa_enabled debe ser booleano"}), 400
 
     user = User(
         name=name,
         email=email,
         role=role,
         tenant_id=tenant_id,
-        mfa_enabled=bool(data.get('mfa_enabled', False)),
+        mfa_enabled=mfa_enabled,
     )
     if user.mfa_enabled:
         user.mfa_secret = pyotp.random_base32()
@@ -2690,7 +2697,9 @@ def admin_staff_create():
 @admin_required()
 def admin_staff_update(staff_id):
     tenant_id = current_tenant_id()
-    user = User.query.get_or_404(staff_id)
+    user = db.session.get(User, staff_id)
+    if not user:
+        return jsonify({"error": "Usuario de staff no encontrado"}), 404
     if tenant_id is not None and user.tenant_id not in (None, tenant_id):
         return jsonify({"error": "Acceso denegado para este tenant."}), 403
 
@@ -2708,7 +2717,9 @@ def admin_staff_update(staff_id):
         user.role = role
 
     if 'mfa_enabled' in data:
-        mfa_enabled = bool(data.get('mfa_enabled'))
+        mfa_enabled = _parse_bool(data.get('mfa_enabled'))
+        if mfa_enabled is None:
+            return jsonify({"error": "mfa_enabled debe ser booleano"}), 400
         user.mfa_enabled = mfa_enabled
         if mfa_enabled and not user.mfa_secret:
             user.mfa_secret = pyotp.random_base32()
@@ -3282,7 +3293,10 @@ def admin_installations_update(installation_id):
     if 'checklist' in data and isinstance(data.get('checklist'), dict):
         checklist = entry.get('checklist') or {}
         for key_name, value in data['checklist'].items():
-            checklist[str(key_name)] = bool(value)
+            parsed = _parse_bool(value)
+            if parsed is None:
+                return jsonify({"error": f"checklist.{key_name} debe ser booleano"}), 400
+            checklist[str(key_name)] = parsed
         entry['checklist'] = checklist
 
     if entry.get('status') == 'completed':
