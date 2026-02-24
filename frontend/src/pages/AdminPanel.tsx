@@ -348,7 +348,7 @@ const AdminPanel: React.FC = () => {
                 </Transition.Child>
                 <div className="flex flex-shrink-0 items-center px-4">
                   <div className="w-10 h-10 bg-gradient-to-r from-blue-600 to-purple-600 rounded-xl flex items-center justify-center"><span className="text-white font-bold text-lg">IM</span></div>
-                  <div className="ml-3"><h1 className="text-lg font-bold text-gray-900">ISPMAX</h1><p className="text-xs text-gray-600">Panel Admin</p></div>
+                  <div className="ml-3"><h1 className="text-lg font-bold text-slate-100">ISPMAX</h1><p className="text-xs text-slate-300">Panel Admin</p></div>
                 </div>
                 <div className="mt-5 h-0 flex-1 overflow-y-auto">
                   <NavigationItems isMobile />
@@ -366,10 +366,10 @@ const AdminPanel: React.FC = () => {
           <div className="flex flex-col flex-shrink-0 pt-5 pb-4">
             <div className="flex items-center flex-shrink-0 px-4">
               <div className="w-10 h-10 bg-gradient-to-r from-blue-600 to-purple-600 rounded-xl flex items-center justify-center"><span className="text-white font-bold text-lg">IM</span></div>
-              <div className="ml-3"><h1 className="text-lg font-bold text-gray-900">ISPMAX</h1><p className="text-xs text-gray-600">Panel Admin</p></div>
+              <div className="ml-3"><h1 className="text-lg font-bold text-slate-100">ISPMAX</h1><p className="text-xs text-slate-300">Panel Admin</p></div>
             </div>
             <div className="mt-3 px-4">
-              <label className="flex items-center gap-2 text-xs text-gray-500">
+              <label className="flex items-center gap-2 text-xs text-slate-300">
                 <input
                   type="checkbox"
                   checked={showAdvancedMenu}
@@ -378,7 +378,7 @@ const AdminPanel: React.FC = () => {
                     setShowAdvancedMenu(val)
                     safeStorage.setItem('showAdvancedMenu', String(val))
                   }}
-                  className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  className="rounded border-slate-500 bg-slate-800 text-blue-500 focus:ring-blue-500"
                 />
                 Mostrar módulos avanzados
               </label>
@@ -388,8 +388,8 @@ const AdminPanel: React.FC = () => {
           <div className="flex-shrink-0 flex border-t border-white/10 p-4">
             <div className="flex items-center w-full">
               <div className="ml-3">
-                <p className="text-sm font-medium text-gray-700">Admin ISP</p>
-                <p className="text-xs text-gray-500">admin@ispmax.com</p>
+                <p className="text-sm font-medium text-slate-100">Admin ISP</p>
+                <p className="text-xs text-slate-300">admin@ispmax.com</p>
               </div>
             </div>
           </div>
@@ -410,7 +410,7 @@ const AdminPanel: React.FC = () => {
           </button>
           <div className="flex-1 px-4 flex justify-between">
             <div className="flex-1 flex">
-              <h2 className="text-lg font-semibold text-gray-900 my-auto">
+              <h2 className="text-lg font-semibold text-slate-100 my-auto">
                 {menuItems.find(item => item.id === activeView)?.name}
               </h2>
             </div>
@@ -485,7 +485,7 @@ const AdminPanel: React.FC = () => {
         </div>
 
         {/* Main content area */}
-        <main className="flex-1">
+        <main className="flex-1 text-slate-900">
           <div className="py-6">
             <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
               {viewComponents[activeView] || <div>Vista no encontrada</div>}

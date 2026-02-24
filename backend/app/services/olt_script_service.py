@@ -116,41 +116,82 @@ DEFAULT_OLT_DEVICES = [
 
 
 class OLTScriptService:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        extra_devices: Optional[List[Dict[str, Any]]] = None,
+        credentials_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> None:
+        self.extra_devices = list(extra_devices or [])
+        self.credentials_overrides = dict(credentials_overrides or {})
         self.devices = self._load_devices()
 
     def _load_devices(self) -> List[Dict[str, Any]]:
         env_value = os.environ.get("OLT_DEVICES_JSON", "").strip()
-        if not env_value:
-            return list(DEFAULT_OLT_DEVICES)
-        try:
-            parsed = json.loads(env_value)
-            if isinstance(parsed, list):
-                normalized = []
-                for index, item in enumerate(parsed):
-                    if not isinstance(item, dict):
-                        continue
-                    vendor = str(item.get("vendor", "")).strip().lower()
-                    if vendor not in SUPPORTED_VENDORS:
-                        continue
-                    normalized.append(
-                        {
-                            "id": str(item.get("id") or f"OLT-{vendor.upper()}-{index+1:03d}"),
-                            "name": str(item.get("name") or f"{SUPPORTED_VENDORS[vendor]['label']} OLT {index+1}"),
-                            "vendor": vendor,
-                            "model": str(item.get("model") or "N/D"),
-                            "host": str(item.get("host") or ""),
-                            "transport": str(item.get("transport") or SUPPORTED_VENDORS[vendor]["default_transport"]),
-                            "port": int(item.get("port") or SUPPORTED_VENDORS[vendor]["default_port"]),
-                            "username": str(item.get("username") or "admin"),
-                            "site": str(item.get("site") or "N/D"),
-                        }
-                    )
-                if normalized:
-                    return normalized
-        except Exception:
-            pass
-        return list(DEFAULT_OLT_DEVICES)
+        base_devices: List[Dict[str, Any]] = list(DEFAULT_OLT_DEVICES)
+        if env_value:
+            try:
+                parsed = json.loads(env_value)
+                if isinstance(parsed, list):
+                    normalized = []
+                    for index, item in enumerate(parsed):
+                        if not isinstance(item, dict):
+                            continue
+                        vendor = str(item.get("vendor", "")).strip().lower()
+                        if vendor not in SUPPORTED_VENDORS:
+                            continue
+                        normalized.append(
+                            {
+                                "id": str(item.get("id") or f"OLT-{vendor.upper()}-{index+1:03d}"),
+                                "name": str(item.get("name") or f"{SUPPORTED_VENDORS[vendor]['label']} OLT {index+1}"),
+                                "vendor": vendor,
+                                "model": str(item.get("model") or "N/D"),
+                                "host": str(item.get("host") or ""),
+                                "transport": str(item.get("transport") or SUPPORTED_VENDORS[vendor]["default_transport"]),
+                                "port": int(item.get("port") or SUPPORTED_VENDORS[vendor]["default_port"]),
+                                "username": str(item.get("username") or "admin"),
+                                "site": str(item.get("site") or "N/D"),
+                                "origin": str(item.get("origin") or "catalog"),
+                            }
+                        )
+                    if normalized:
+                        base_devices = normalized
+            except Exception:
+                base_devices = list(DEFAULT_OLT_DEVICES)
+
+        merged: Dict[str, Dict[str, Any]] = {}
+        for item in base_devices:
+            if not isinstance(item, dict):
+                continue
+            normalized = dict(item)
+            normalized["origin"] = str(normalized.get("origin") or "catalog")
+            item_id = str(normalized.get("id") or "").strip()
+            if not item_id:
+                continue
+            merged[item_id] = normalized
+
+        for index, item in enumerate(self.extra_devices):
+            if not isinstance(item, dict):
+                continue
+            vendor = str(item.get("vendor") or "").strip().lower()
+            if vendor not in SUPPORTED_VENDORS:
+                continue
+            item_id = str(item.get("id") or f"OLT-{vendor.upper()}-CUSTOM-{index + 1:03d}").strip()
+            if not item_id:
+                continue
+            merged[item_id] = {
+                "id": item_id,
+                "name": str(item.get("name") or f"{SUPPORTED_VENDORS[vendor]['label']} OLT"),
+                "vendor": vendor,
+                "model": str(item.get("model") or "N/D"),
+                "host": str(item.get("host") or ""),
+                "transport": str(item.get("transport") or SUPPORTED_VENDORS[vendor]["default_transport"]),
+                "port": int(item.get("port") or SUPPORTED_VENDORS[vendor]["default_port"]),
+                "username": str(item.get("username") or "admin"),
+                "site": str(item.get("site") or "N/D"),
+                "origin": "custom",
+            }
+
+        return list(merged.values())
 
     def list_vendors(self) -> List[Dict[str, Any]]:
         return [
@@ -166,9 +207,18 @@ class OLTScriptService:
 
     def list_devices(self, vendor: Optional[str] = None) -> List[Dict[str, Any]]:
         if not vendor:
-            return list(self.devices)
-        vendor_id = vendor.strip().lower()
-        return [item for item in self.devices if item.get("vendor") == vendor_id]
+            source = list(self.devices)
+        else:
+            vendor_id = vendor.strip().lower()
+            source = [item for item in self.devices if item.get("vendor") == vendor_id]
+
+        sanitized: List[Dict[str, Any]] = []
+        for item in source:
+            safe = dict(item)
+            safe.pop("password", None)
+            safe.pop("enable_password", None)
+            sanitized.append(safe)
+        return sanitized
 
     def get_device(self, device_id: str) -> Optional[Dict[str, Any]]:
         return next((item for item in self.devices if item.get("id") == device_id), None)
@@ -185,30 +235,36 @@ class OLTScriptService:
 
     def _get_credentials_map(self) -> Dict[str, Dict[str, Any]]:
         raw = os.environ.get("OLT_CREDENTIALS_JSON", "").strip()
-        if not raw:
-            return {}
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, dict):
-                normalized: Dict[str, Dict[str, Any]] = {}
-                for key, value in parsed.items():
-                    if not isinstance(value, dict):
-                        continue
-                    normalized[str(key)] = dict(value)
-                return normalized
-            if isinstance(parsed, list):
-                normalized = {}
-                for item in parsed:
-                    if not isinstance(item, dict):
-                        continue
-                    item_id = str(item.get("id") or item.get("device_id") or "").strip()
-                    if not item_id:
-                        continue
-                    normalized[item_id] = dict(item)
-                return normalized
-        except Exception:
-            logger.warning("Invalid OLT_CREDENTIALS_JSON format; ignoring credentials map.")
-        return {}
+        loaded: Dict[str, Dict[str, Any]] = {}
+        if raw:
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    normalized: Dict[str, Dict[str, Any]] = {}
+                    for key, value in parsed.items():
+                        if not isinstance(value, dict):
+                            continue
+                        normalized[str(key)] = dict(value)
+                    loaded = normalized
+                elif isinstance(parsed, list):
+                    normalized = {}
+                    for item in parsed:
+                        if not isinstance(item, dict):
+                            continue
+                        item_id = str(item.get("id") or item.get("device_id") or "").strip()
+                        if not item_id:
+                            continue
+                        normalized[item_id] = dict(item)
+                    loaded = normalized
+            except Exception:
+                logger.warning("Invalid OLT_CREDENTIALS_JSON format; ignoring credentials map.")
+                loaded = {}
+
+        for key, value in self.credentials_overrides.items():
+            if not isinstance(value, dict):
+                continue
+            loaded[str(key)] = dict(value)
+        return loaded
 
     def _resolve_device_credentials(self, device: Dict[str, Any]) -> Dict[str, Any]:
         credentials_map = self._get_credentials_map()
@@ -216,13 +272,33 @@ class OLTScriptService:
         entry = credentials_map.get(device_id, {})
 
         username = str(entry.get("username") or device.get("username") or os.environ.get("OLT_DEFAULT_USERNAME", "admin"))
-        password = str(entry.get("password") or os.environ.get("OLT_DEFAULT_PASSWORD", "")).strip()
-        enable_password = str(entry.get("enable_password") or os.environ.get("OLT_DEFAULT_ENABLE_PASSWORD", "")).strip()
-        timeout = float(entry.get("timeout_seconds") or os.environ.get("OLT_LIVE_TIMEOUT_SECONDS", "6"))
+        password = str(
+            entry.get("password")
+            or device.get("password")
+            or os.environ.get("OLT_DEFAULT_PASSWORD", "")
+        ).strip()
+        enable_password = str(
+            entry.get("enable_password")
+            or device.get("enable_password")
+            or os.environ.get("OLT_DEFAULT_ENABLE_PASSWORD", "")
+        ).strip()
+        timeout = float(
+            entry.get("timeout_seconds")
+            or device.get("timeout_seconds")
+            or os.environ.get("OLT_LIVE_TIMEOUT_SECONDS", "6")
+        )
         timeout = max(2.0, min(timeout, 20.0))
-        cmd_delay = float(entry.get("command_delay_seconds") or os.environ.get("OLT_COMMAND_DELAY_SECONDS", "0.2"))
+        cmd_delay = float(
+            entry.get("command_delay_seconds")
+            or device.get("command_delay_seconds")
+            or os.environ.get("OLT_COMMAND_DELAY_SECONDS", "0.2")
+        )
         cmd_delay = max(0.05, min(cmd_delay, 2.0))
-        shell_prompt = str(entry.get("shell_prompt") or os.environ.get("OLT_SHELL_PROMPT", "#")).strip() or "#"
+        shell_prompt = str(
+            entry.get("shell_prompt")
+            or device.get("shell_prompt")
+            or os.environ.get("OLT_SHELL_PROMPT", "#")
+        ).strip() or "#"
 
         return {
             "username": username,

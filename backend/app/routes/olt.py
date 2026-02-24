@@ -9,9 +9,10 @@ import time
 from flask import Blueprint, current_app, jsonify, request
 from flask_jwt_extended import get_jwt_identity
 
+from app import cache
 from app.models import AuditLog, User
 from app.routes.main_routes import admin_required
-from app.services.olt_script_service import OLTScriptService
+from app.services.olt_script_service import OLTScriptService, SUPPORTED_VENDORS
 from app.tenancy import current_tenant_id
 
 olt_bp = Blueprint("olt", __name__)
@@ -149,8 +150,145 @@ def _build_onu_payload(data) -> dict:
     return payload
 
 
+def _tenant_key(prefix: str) -> str:
+    tenant_id = current_tenant_id()
+    scoped = tenant_id if tenant_id is not None else "global"
+    return f"olt:{prefix}:{scoped}"
+
+
+def _devices_cache_key() -> str:
+    return _tenant_key("custom_devices")
+
+
+def _credentials_cache_key() -> str:
+    return _tenant_key("custom_credentials")
+
+
+def _load_custom_devices() -> list[dict]:
+    raw = cache.get(_devices_cache_key()) or []
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, dict)]
+    return []
+
+
+def _save_custom_devices(devices: list[dict]) -> None:
+    cache.set(_devices_cache_key(), devices, timeout=86400 * 30)
+
+
+def _load_custom_credentials() -> dict:
+    raw = cache.get(_credentials_cache_key()) or {}
+    if isinstance(raw, dict):
+        return {str(key): value for key, value in raw.items() if isinstance(value, dict)}
+    return {}
+
+
+def _save_custom_credentials(credentials: dict) -> None:
+    cache.set(_credentials_cache_key(), credentials, timeout=86400 * 30)
+
+
+def _normalize_device_transport(vendor: str, transport: str | None) -> str:
+    default_transport = str(SUPPORTED_VENDORS[vendor]["default_transport"])
+    candidate = str(transport or default_transport).strip().lower()
+    return candidate if candidate in ("ssh", "telnet") else default_transport
+
+
+def _normalize_device_port(vendor: str, transport: str, raw_port) -> int:
+    fallback = int(SUPPORTED_VENDORS[vendor]["default_port"])
+    try:
+        parsed = int(raw_port if raw_port not in (None, "") else fallback)
+    except (TypeError, ValueError):
+        parsed = fallback
+    if parsed < 1 or parsed > 65535:
+        raise ValueError("port must be between 1 and 65535")
+    if raw_port in (None, "") and transport == "telnet":
+        return 23
+    if raw_port in (None, "") and transport == "ssh":
+        return 22
+    return parsed
+
+
+def _normalize_custom_device_payload(data, existing_ids: set[str] | None = None) -> tuple[dict | None, str | None]:
+    payload = data or {}
+    vendor = str(payload.get("vendor") or "").strip().lower()
+    if vendor not in SUPPORTED_VENDORS:
+        return None, "vendor is required and must be one of: zte, huawei, vsol"
+
+    existing_ids = existing_ids or set()
+    requested_id = str(payload.get("id") or "").strip()
+    if requested_id:
+        device_id = requested_id
+    else:
+        suffix = 1
+        candidate = f"OLT-{vendor.upper()}-CUSTOM-{suffix:03d}"
+        while candidate in existing_ids:
+            suffix += 1
+            candidate = f"OLT-{vendor.upper()}-CUSTOM-{suffix:03d}"
+        device_id = candidate
+
+    name = str(payload.get("name") or "").strip()
+    host = str(payload.get("host") or "").strip()
+    if not name:
+        return None, "name is required"
+    if not host:
+        return None, "host is required"
+
+    transport = _normalize_device_transport(vendor, payload.get("transport"))
+    try:
+        port = _normalize_device_port(vendor, transport, payload.get("port"))
+    except ValueError as exc:
+        return None, str(exc)
+
+    device = {
+        "id": device_id,
+        "name": name,
+        "vendor": vendor,
+        "model": str(payload.get("model") or "N/D").strip() or "N/D",
+        "host": host,
+        "transport": transport,
+        "port": port,
+        "username": str(payload.get("username") or "admin").strip() or "admin",
+        "site": str(payload.get("site") or "N/D").strip() or "N/D",
+        "origin": "custom",
+    }
+    return device, None
+
+
+def _extract_credentials_payload(data) -> dict:
+    payload = data or {}
+    credentials: dict = {}
+    if "password" in payload:
+        credentials["password"] = str(payload.get("password") or "").strip()
+    if "enable_password" in payload:
+        credentials["enable_password"] = str(payload.get("enable_password") or "").strip()
+    if "shell_prompt" in payload:
+        prompt = str(payload.get("shell_prompt") or "").strip()
+        if prompt:
+            credentials["shell_prompt"] = prompt
+    for key in ("timeout_seconds", "command_delay_seconds"):
+        if key not in payload:
+            continue
+        try:
+            credentials[key] = float(payload.get(key))
+        except (TypeError, ValueError):
+            continue
+    return credentials
+
+
+def _service() -> OLTScriptService:
+    extra_devices = _load_custom_devices()
+    credentials_overrides = _load_custom_credentials()
+    try:
+        return OLTScriptService(
+            extra_devices=extra_devices,
+            credentials_overrides=credentials_overrides,
+        )
+    except TypeError:
+        # Backward-compatible fallback for tests monkeypatching OLTScriptService with minimal stubs.
+        return OLTScriptService()
+
+
 def _run_vendor_action(device_id: str, action: str, payload: dict, run_mode: str):
-    service = OLTScriptService()
+    service = _service()
     generated = service.generate_script(device_id=device_id, action=action, payload=payload)
     if not generated.get("success"):
         return generated, 400
@@ -185,7 +323,7 @@ def _run_vendor_action(device_id: str, action: str, payload: dict, run_mode: str
 @olt_bp.route("/vendors", methods=["GET"])
 @admin_required()
 def list_vendors():
-    service = OLTScriptService()
+    service = _service()
     return jsonify({"success": True, "vendors": service.list_vendors()}), 200
 
 
@@ -202,14 +340,107 @@ def service_templates():
 @admin_required()
 def list_devices():
     vendor = request.args.get("vendor")
-    service = OLTScriptService()
+    service = _service()
     return jsonify({"success": True, "devices": service.list_devices(vendor=vendor)}), 200
+
+
+@olt_bp.route("/devices", methods=["POST"])
+@admin_required()
+def create_device():
+    data = request.get_json() or {}
+    service = _service()
+    existing_ids = {str(item.get("id") or "") for item in service.list_devices()}
+    device, error = _normalize_custom_device_payload(data, existing_ids=existing_ids)
+    if error:
+        return jsonify({"success": False, "error": error}), 400
+
+    assert device is not None
+    custom_devices = _load_custom_devices()
+    custom_devices.insert(0, device)
+    _save_custom_devices(custom_devices)
+
+    incoming_credentials = _extract_credentials_payload(data)
+    if incoming_credentials:
+        credentials = _load_custom_credentials()
+        credentials[device["id"]] = incoming_credentials
+        _save_custom_credentials(credentials)
+
+    _audit(
+        "olt_device_create",
+        entity_type="olt_device",
+        entity_id=device["id"],
+        metadata={"vendor": device["vendor"], "host": device["host"], "origin": "custom"},
+    )
+    return jsonify({"success": True, "device": device}), 201
+
+
+@olt_bp.route("/devices/<device_id>", methods=["PATCH"])
+@admin_required()
+def update_device(device_id):
+    updates = request.get_json() or {}
+    devices = _load_custom_devices()
+    target = next((item for item in devices if str(item.get("id") or "") == str(device_id)), None)
+    if not target:
+        return jsonify({"success": False, "error": "Custom OLT not found"}), 404
+
+    payload = {**target, **updates, "id": device_id, "origin": "custom"}
+    normalized, error = _normalize_custom_device_payload(payload, existing_ids={str(device_id)})
+    if error:
+        return jsonify({"success": False, "error": error}), 400
+    assert normalized is not None
+
+    for idx, item in enumerate(devices):
+        if str(item.get("id") or "") == str(device_id):
+            devices[idx] = normalized
+            break
+    _save_custom_devices(devices)
+
+    credential_updates = _extract_credentials_payload(updates)
+    if credential_updates:
+        credentials = _load_custom_credentials()
+        current = dict(credentials.get(device_id) or {})
+        for key, value in credential_updates.items():
+            if key in ("password", "enable_password") and not str(value).strip():
+                current.pop(key, None)
+                continue
+            current[key] = value
+        if current:
+            credentials[device_id] = current
+        else:
+            credentials.pop(device_id, None)
+        _save_custom_credentials(credentials)
+
+    _audit(
+        "olt_device_update",
+        entity_type="olt_device",
+        entity_id=device_id,
+        metadata={"fields": sorted(list(updates.keys()))},
+    )
+    return jsonify({"success": True, "device": normalized}), 200
+
+
+@olt_bp.route("/devices/<device_id>", methods=["DELETE"])
+@admin_required()
+def delete_device(device_id):
+    devices = _load_custom_devices()
+    next_devices = [item for item in devices if str(item.get("id") or "") != str(device_id)]
+    if len(next_devices) == len(devices):
+        return jsonify({"success": False, "error": "Custom OLT not found"}), 404
+    _save_custom_devices(next_devices)
+
+    credentials = _load_custom_credentials()
+    if str(device_id) in credentials:
+        credentials.pop(str(device_id), None)
+        _save_custom_credentials(credentials)
+
+    _audit("olt_device_delete", entity_type="olt_device", entity_id=device_id)
+    return jsonify({"success": True, "deleted_id": device_id}), 200
 
 
 @olt_bp.route("/devices/<device_id>/snapshot", methods=["GET"])
 @admin_required()
 def get_snapshot(device_id):
-    service = OLTScriptService()
+    service = _service()
     result = service.get_snapshot(device_id)
     _audit("olt_snapshot", entity_type="olt", entity_id=device_id, metadata={"success": result.get("success")})
     return jsonify(result), (200 if result.get("success") else 404)
@@ -229,7 +460,7 @@ def test_connection():
         return jsonify({"success": False, "error": "timeout must be numeric"}), 400
     timeout = max(0.5, min(timeout, 10.0))
 
-    service = OLTScriptService()
+    service = _service()
     result = service.test_connection(device_id=device_id, timeout_seconds=timeout)
     _audit(
         "olt_test_connection",
@@ -249,7 +480,7 @@ def generate_script(device_id):
         return jsonify({"success": False, "error": "action is required"}), 400
     payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
 
-    service = OLTScriptService()
+    service = _service()
     result = service.generate_script(device_id=device_id, action=action, payload=payload)
     _audit(
         "olt_generate_script",
@@ -273,7 +504,7 @@ def execute_script(device_id):
     if live_guard:
         return live_guard
 
-    service = OLTScriptService()
+    service = _service()
     result = service.execute_script(
         device_id=device_id,
         commands=commands,
@@ -300,7 +531,7 @@ def get_audit_log():
     except Exception:
         limit = 50
     limit = max(1, min(200, limit))
-    service = OLTScriptService()
+    service = _service()
     return jsonify({"success": True, "entries": service.list_audit_log(limit=limit)}), 200
 
 
@@ -314,7 +545,7 @@ def quick_connect_script(device_id):
     if platform not in ("windows", "linux"):
         platform = "windows"
 
-    service = OLTScriptService()
+    service = _service()
     generated = service.generate_script(device_id=device_id, action=action, payload=payload)
     if not generated.get("success"):
         return jsonify(generated), 400
@@ -546,12 +777,53 @@ def quick_login(device_id):
     if platform not in ("windows", "linux"):
         platform = "windows"
 
-    service = OLTScriptService()
+    service = _service()
     try:
         connect = service.quick_login_command(device_id=device_id, platform=platform)
         return jsonify({"success": True, "platform": platform, "command": connect}), 200
     except ValueError as exc:
         return jsonify({"success": False, "error": str(exc)}), 404
+
+
+@olt_bp.route("/devices/<device_id>/remote-options", methods=["GET"])
+@admin_required()
+def remote_options(device_id):
+    service = _service()
+    device = service.get_device(device_id)
+    if not device:
+        return jsonify({"success": False, "error": "OLT not found"}), 404
+
+    host = str(device.get("host") or "").strip()
+    port = int(device.get("port") or 22)
+    user = str(device.get("username") or "admin").strip() or "admin"
+    transport = str(device.get("transport") or "ssh").strip().lower()
+    login = f"telnet {host} {port}" if transport == "telnet" else f"ssh {user}@{host} -p {port}"
+
+    options = {
+        "direct_login": login,
+        "tcp_probe_windows": f"Test-NetConnection -ComputerName {host} -Port {port}",
+        "tcp_probe_linux": f"nc -vz {host} {port}",
+        "jump_host_ssh": (
+            f"ssh -J noc@YOUR_VPS_PUBLIC_IP {user}@{host} -p {port}"
+            if transport == "ssh"
+            else f"ssh -J noc@YOUR_VPS_PUBLIC_IP -L 2323:{host}:{port} noc@YOUR_VPS_PUBLIC_IP"
+        ),
+        "reverse_tunnel_template": (
+            f"ssh -N -R 22{port}:{host}:{port} noc@YOUR_VPS_PUBLIC_IP"
+            if transport == "ssh"
+            else f"ssh -N -R 23{port}:{host}:{port} noc@YOUR_VPS_PUBLIC_IP"
+        ),
+        "recommendations": [
+            "Preferir enlace privado VPN (WireGuard/IPsec) entre POP y VPS para gestion OLT.",
+            "Permitir acceso solo desde ACL de gestion y no exponer puertos OLT a internet.",
+            "Usar usuario tecnico dedicado con privilegios minimos para operaciones remotas.",
+        ],
+    }
+
+    safe_device = dict(device)
+    safe_device.pop("password", None)
+    safe_device.pop("enable_password", None)
+    return jsonify({"success": True, "device": safe_device, "options": options}), 200
 
 
 @olt_bp.route("/tr064/test", methods=["POST"])

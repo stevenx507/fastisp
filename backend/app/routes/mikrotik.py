@@ -10,6 +10,7 @@ from app.services.mikrotik_service import MikroTikService
 from app.services.mikrotik_advanced_service import MikroTikAdvancedService
 from app.services.ai_diagnostic_service import AIDiagnosticService
 from app.services.monitoring_service import monitoring_service
+from app.tenancy import current_tenant_id, tenant_access_allowed
 import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -99,6 +100,28 @@ def _resolve_actor_identity() -> str:
     except Exception:
         pass
     return "admin"
+
+
+def _tenant_router_query():
+    tenant_id = current_tenant_id()
+    query = MikroTikRouter.query
+    if tenant_id is not None:
+        query = query.filter_by(tenant_id=tenant_id)
+    return query
+
+
+def _router_for_request(router_id: Any) -> Optional[MikroTikRouter]:
+    try:
+        normalized = int(router_id)
+    except (TypeError, ValueError):
+        return None
+    router = db.session.get(MikroTikRouter, normalized)
+    if not router:
+        return None
+    if not tenant_access_allowed(router.tenant_id):
+        return None
+    return router
+
 
 def _get_change_log(router_id: str) -> List[Dict[str, Any]]:
     key = str(router_id)
@@ -205,7 +228,7 @@ def _register_change(
 def get_routers():
     """Get all MikroTik routers"""
     try:
-        routers = MikroTikRouter.query.all()
+        routers = _tenant_router_query().order_by(MikroTikRouter.name.asc()).all()
         return jsonify({
             'success': True,
             'routers': [r.to_dict() for r in routers]
@@ -214,12 +237,65 @@ def get_routers():
         logger.error(f"Error getting routers: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
+
+@mikrotik_bp.route('/routers', methods=['POST'])
+@admin_required()
+def create_router():
+    data = request.get_json() or {}
+    name = str(data.get('name') or '').strip()
+    ip_address = str(data.get('ip_address') or '').strip()
+    username = str(data.get('username') or '').strip()
+    password = str(data.get('password') or '').strip()
+
+    if not name:
+        return jsonify({'success': False, 'error': 'name is required'}), 400
+    if not ip_address:
+        return jsonify({'success': False, 'error': 'ip_address is required'}), 400
+    if not username:
+        return jsonify({'success': False, 'error': 'username is required'}), 400
+    if not password:
+        return jsonify({'success': False, 'error': 'password is required'}), 400
+
+    try:
+        api_port = int(data.get('api_port') or 8728)
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': 'api_port must be integer'}), 400
+    if api_port < 1 or api_port > 65535:
+        return jsonify({'success': False, 'error': 'api_port must be between 1 and 65535'}), 400
+
+    duplicate = _tenant_router_query().filter_by(ip_address=ip_address).first()
+    if duplicate:
+        return jsonify({'success': False, 'error': 'A router with this IP already exists'}), 409
+
+    router = MikroTikRouter(
+        name=name,
+        ip_address=ip_address,
+        username=username,
+        api_port=api_port,
+        is_active=_as_bool(data.get('is_active'), default=True),
+        tenant_id=current_tenant_id(),
+    )
+    router.password = password
+    db.session.add(router)
+    db.session.commit()
+
+    test_connection = _as_bool(data.get('test_connection'), default=True)
+    reachable = _test_router_connection(router) if test_connection else None
+    return jsonify(
+        {
+            'success': True,
+            'router': router.to_dict(),
+            'connection_tested': test_connection,
+            'reachable': reachable,
+        }
+    ), 201
+
 @mikrotik_bp.route('/routers/<router_id>', methods=['GET'])
 @admin_required()
 def get_router(router_id):
     """Get specific router details"""
     try:
-        router = db.session.get(MikroTikRouter, router_id)
+        router = _router_for_request(router_id)
         if not router:
             return jsonify({'success': False, 'error': 'Router not found'}), 404
         
@@ -239,6 +315,154 @@ def get_router(router_id):
     except Exception as e:
         logger.error(f"Error getting router {router_id}: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@mikrotik_bp.route('/routers/<router_id>', methods=['PATCH'])
+@admin_required()
+def update_router(router_id):
+    router = _router_for_request(router_id)
+    if not router:
+        return jsonify({'success': False, 'error': 'Router not found'}), 404
+
+    data = request.get_json() or {}
+    changed = []
+
+    if 'name' in data:
+        name = str(data.get('name') or '').strip()
+        if not name:
+            return jsonify({'success': False, 'error': 'name cannot be empty'}), 400
+        router.name = name
+        changed.append('name')
+
+    if 'ip_address' in data:
+        ip_address = str(data.get('ip_address') or '').strip()
+        if not ip_address:
+            return jsonify({'success': False, 'error': 'ip_address cannot be empty'}), 400
+        duplicate = _tenant_router_query().filter(
+            MikroTikRouter.ip_address == ip_address,
+            MikroTikRouter.id != router.id,
+        ).first()
+        if duplicate:
+            return jsonify({'success': False, 'error': 'A router with this IP already exists'}), 409
+        router.ip_address = ip_address
+        changed.append('ip_address')
+
+    if 'username' in data:
+        username = str(data.get('username') or '').strip()
+        if not username:
+            return jsonify({'success': False, 'error': 'username cannot be empty'}), 400
+        router.username = username
+        changed.append('username')
+
+    if 'password' in data:
+        password = str(data.get('password') or '').strip()
+        if password:
+            router.password = password
+            changed.append('password')
+
+    if 'api_port' in data:
+        try:
+            api_port = int(data.get('api_port'))
+        except (TypeError, ValueError):
+            return jsonify({'success': False, 'error': 'api_port must be integer'}), 400
+        if api_port < 1 or api_port > 65535:
+            return jsonify({'success': False, 'error': 'api_port must be between 1 and 65535'}), 400
+        router.api_port = api_port
+        changed.append('api_port')
+
+    if 'is_active' in data:
+        router.is_active = _as_bool(data.get('is_active'), default=True)
+        changed.append('is_active')
+
+    db.session.add(router)
+    db.session.commit()
+    return jsonify({'success': True, 'router': router.to_dict(), 'updated_fields': changed}), 200
+
+
+@mikrotik_bp.route('/routers/<router_id>', methods=['DELETE'])
+@admin_required()
+def delete_router(router_id):
+    router = _router_for_request(router_id)
+    if not router:
+        return jsonify({'success': False, 'error': 'Router not found'}), 404
+
+    clients_query = Client.query.filter_by(router_id=router.id)
+    tenant_id = current_tenant_id()
+    if tenant_id is not None:
+        clients_query = clients_query.filter_by(tenant_id=tenant_id)
+    linked_clients = clients_query.count()
+    if linked_clients > 0:
+        return jsonify(
+            {
+                'success': False,
+                'error': 'Router has linked clients and cannot be deleted',
+                'linked_clients': linked_clients,
+            }
+        ), 409
+
+    db.session.delete(router)
+    db.session.commit()
+    return jsonify({'success': True, 'deleted_id': str(router.id)}), 200
+
+
+@mikrotik_bp.route('/routers/<router_id>/quick-connect', methods=['GET'])
+@admin_required()
+def router_quick_connect(router_id):
+    router = _router_for_request(router_id)
+    if not router:
+        return jsonify({'success': False, 'error': 'Router not found'}), 404
+
+    allowed_mgmt = str(request.args.get('allowed_mgmt') or 'YOUR_PUBLIC_IP/32').strip() or 'YOUR_PUBLIC_IP/32'
+    wg_endpoint = str(request.args.get('wg_endpoint') or 'vpn.fastisp.cloud:51820').strip() or 'vpn.fastisp.cloud:51820'
+    wg_server_public_key = str(
+        request.args.get('wg_server_public_key') or '<WIREGUARD_SERVER_PUBLIC_KEY>'
+    ).strip() or '<WIREGUARD_SERVER_PUBLIC_KEY>'
+    wg_allowed_subnets = str(
+        request.args.get('wg_allowed_subnets') or '10.250.0.0/16,10.251.0.0/16'
+    ).strip() or '10.250.0.0/16,10.251.0.0/16'
+
+    wg_endpoint_host = wg_endpoint
+    wg_endpoint_port = 51820
+    if ':' in wg_endpoint:
+        host_part, port_part = wg_endpoint.rsplit(':', 1)
+        try:
+            wg_endpoint_port = int(port_part)
+            wg_endpoint_host = host_part
+        except ValueError:
+            wg_endpoint_host = wg_endpoint
+            wg_endpoint_port = 51820
+
+    router_peer_ip = f'10.250.{int(router.id) % 250}.2/32'
+    scripts = {
+        'direct_api_script': (
+            f"/ip service set api disabled=no port={router.api_port}\n"
+            "/ip service set ssh disabled=no port=22\n"
+            f"/ip firewall address-list add list=fastisp-management address={allowed_mgmt} comment=\"FastISP NOC\"\n"
+            f"/ip firewall filter add chain=input action=accept protocol=tcp dst-port={router.api_port},22 src-address-list=fastisp-management comment=\"FastISP remote access\"\n"
+            "/ip firewall filter add chain=input action=drop protocol=tcp dst-port=22,8728,8729 in-interface-list=WAN comment=\"Drop unmanaged remote\"\n"
+        ),
+        'wireguard_site_to_vps_script': (
+            "/interface/wireguard add name=wg-fastisp listen-port=13231 comment=\"FastISP NOC tunnel\"\n"
+            f"/ip/address/add address={router_peer_ip} interface=wg-fastisp comment=\"FastISP tunnel\"\n"
+            f"/interface/wireguard/peers/add interface=wg-fastisp public-key=\"{wg_server_public_key}\" endpoint-address={wg_endpoint_host} endpoint-port={wg_endpoint_port} allowed-address={wg_allowed_subnets} persistent-keepalive=25s\n"
+            "/ip/firewall/filter add chain=input action=accept protocol=udp dst-port=13231 comment=\"Allow WireGuard\"\n"
+        ),
+        'windows_login': f"ssh {router.username}@{router.ip_address} -p 22",
+        'linux_login': f"ssh {router.username}@{router.ip_address} -p 22",
+    }
+    guidance = {
+        'back_to_home': [
+            'Back To Home requiere RouterOS 7.12+ y activacion desde IP Cloud.',
+            'Habilita /ip cloud, abre app MikroTik y genera peer para cada tecnico.',
+            'Usa perfiles de solo lectura para monitoreo y cuenta admin separada para cambios.',
+        ],
+        'notes': [
+            'No expongas API/SSH sin ACL. Usa solo IPs de gestion o VPN privada.',
+            'Para despliegues masivos: preferir WireGuard site-to-site entre POP y VPS.',
+            'Registra cada cambio en auditoria antes de activar modo live.',
+        ],
+    }
+    return jsonify({'success': True, 'router': router.to_dict(), 'scripts': scripts, 'guidance': guidance}), 200
 
 @mikrotik_bp.route('/validate-config', methods=['POST'])
 @admin_required()
