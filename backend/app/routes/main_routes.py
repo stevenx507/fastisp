@@ -1387,7 +1387,9 @@ def create_subscription():
 @admin_required()
 def update_subscription(subscription_id):
     data = request.get_json() or {}
-    sub = Subscription.query.get_or_404(subscription_id)
+    sub = db.session.get(Subscription, subscription_id)
+    if not sub:
+        return jsonify({"error": "Suscripcion no encontrada"}), 404
     tenant_id = current_tenant_id()
     if tenant_id is not None and sub.tenant_id not in (None, tenant_id):
         return jsonify({"error": "Acceso denegado para este tenant."}), 403
@@ -1422,7 +1424,9 @@ def update_subscription(subscription_id):
 @main_bp.route('/subscriptions/<int:subscription_id>/charge', methods=['POST'])
 @admin_required()
 def charge_subscription(subscription_id):
-    sub = Subscription.query.get_or_404(subscription_id)
+    sub = db.session.get(Subscription, subscription_id)
+    if not sub:
+        return jsonify({"error": "Suscripcion no encontrada"}), 404
     tenant_id = current_tenant_id()
     if tenant_id is not None and sub.tenant_id not in (None, tenant_id):
         return jsonify({"error": "Acceso denegado para este tenant."}), 403
@@ -1581,7 +1585,9 @@ def client_portal_overview():
     current_user_id = _current_user_id()
     if current_user_id is None:
         return jsonify({"error": "Token de usuario invalido."}), 401
-    user = User.query.get_or_404(current_user_id)
+    user = db.session.get(User, current_user_id)
+    if not user:
+        return jsonify({"error": "Usuario no encontrado"}), 404
     client = user.client
     if not client:
         return jsonify({"error": "No existe cliente asociado."}), 404
@@ -1613,7 +1619,9 @@ def client_invoices():
     current_user_id = _current_user_id()
     if current_user_id is None:
         return jsonify({"error": "Token de usuario invalido."}), 401
-    user = User.query.get_or_404(current_user_id)
+    user = db.session.get(User, current_user_id)
+    if not user:
+        return jsonify({"error": "Usuario no encontrado"}), 404
     tenant_id = current_tenant_id()
     invoices = _get_user_invoice_items(user, tenant_id)
     return jsonify({"items": invoices, "count": len(invoices)}), 200
@@ -1782,7 +1790,9 @@ def tickets_admin_list():
 @admin_required()
 def tickets_admin_update(ticket_id):
     tenant_id = current_tenant_id()
-    ticket = Ticket.query.get_or_404(ticket_id)
+    ticket = db.session.get(Ticket, ticket_id)
+    if not ticket:
+        return jsonify({"error": "Ticket no encontrado"}), 404
     if tenant_id is not None and ticket.tenant_id not in (None, tenant_id):
         return jsonify({"error": "Acceso denegado para este tenant."}), 403
 
@@ -1816,7 +1826,9 @@ def tickets_admin_update(ticket_id):
 @main_bp.route('/tickets/<int:ticket_id>/comments', methods=['POST'])
 @jwt_required()
 def ticket_add_comment(ticket_id):
-    ticket = Ticket.query.get_or_404(ticket_id)
+    ticket = db.session.get(Ticket, ticket_id)
+    if not ticket:
+        return jsonify({"error": "Ticket no encontrado"}), 404
     tenant_id = current_tenant_id()
     if tenant_id is not None and ticket.tenant_id not in (None, tenant_id):
         return jsonify({"error": "Acceso denegado para este tenant."}), 403
@@ -1835,7 +1847,9 @@ def ticket_add_comment(ticket_id):
 @main_bp.route('/tickets/<int:ticket_id>/comments', methods=['GET'])
 @jwt_required()
 def ticket_list_comments(ticket_id):
-    ticket = Ticket.query.get_or_404(ticket_id)
+    ticket = db.session.get(Ticket, ticket_id)
+    if not ticket:
+        return jsonify({"error": "Ticket no encontrado"}), 404
     tenant_id = current_tenant_id()
     if tenant_id is not None and ticket.tenant_id not in (None, tenant_id):
         return jsonify({"error": "Acceso denegado para este tenant."}), 403
@@ -2205,7 +2219,9 @@ def reboot_client_cpe(client_id):
     if not user:
         return jsonify({"error": "Usuario no autenticado."}), 401
 
-    client = Client.query.get_or_404(client_id)
+    client = db.session.get(Client, client_id)
+    if not client:
+        return jsonify({"error": "Cliente no encontrado"}), 404
     if not tenant_access_allowed(client.tenant_id):
         return jsonify({"error": "Acceso denegado para este tenant."}), 403
 
@@ -2408,7 +2424,9 @@ def admin_create_client():
 @main_bp.route('/admin/clients/<int:client_id>/suspend', methods=['POST'])
 @admin_required()
 def suspend_client(client_id):
-    client = Client.query.get_or_404(client_id)
+    client = db.session.get(Client, client_id)
+    if not client:
+        return jsonify({"error": "Cliente no encontrado"}), 404
     tenant_id = current_tenant_id()
     if tenant_id and client.tenant_id not in (None, tenant_id):
         return jsonify({"error": "Cliente fuera del tenant"}), 403
@@ -2428,7 +2446,9 @@ def suspend_client(client_id):
 @main_bp.route('/admin/clients/<int:client_id>/activate', methods=['POST'])
 @admin_required()
 def activate_client(client_id):
-    client = Client.query.get_or_404(client_id)
+    client = db.session.get(Client, client_id)
+    if not client:
+        return jsonify({"error": "Cliente no encontrado"}), 404
     tenant_id = current_tenant_id()
     if tenant_id and client.tenant_id not in (None, tenant_id):
         return jsonify({"error": "Cliente fuera del tenant"}), 403
@@ -2452,11 +2472,15 @@ def change_client_speed(client_id):
     plan_id = data.get('plan_id')
     if not plan_id:
         raise BadRequest("plan_id es requerido")
-    client = Client.query.get_or_404(client_id)
+    client = db.session.get(Client, client_id)
+    if not client:
+        return jsonify({"error": "Cliente no encontrado"}), 404
     tenant_id = current_tenant_id()
     if tenant_id and client.tenant_id not in (None, tenant_id):
         return jsonify({"error": "Cliente fuera del tenant"}), 403
-    plan = Plan.query.get_or_404(plan_id)
+    plan = db.session.get(Plan, plan_id)
+    if not plan:
+        return jsonify({"error": "Plan no encontrado"}), 404
     if not client.router_id:
         return jsonify({"error": "Cliente sin router asociado"}), 400
     with MikroTikService(client.router_id) as mikrotik:
@@ -2467,7 +2491,9 @@ def change_client_speed(client_id):
 @main_bp.route('/admin/clients/<int:client_id>/scripts', methods=['GET'])
 @admin_required()
 def get_client_scripts(client_id):
-    client = Client.query.get_or_404(client_id)
+    client = db.session.get(Client, client_id)
+    if not client:
+        return jsonify({"error": "Cliente no encontrado"}), 404
     plan = client.plan or (db.session.get(Plan, client.plan_id) if client.plan_id else None)
     if not plan:
         return jsonify({"error": "Plan no encontrado"}), 400
@@ -3951,7 +3977,9 @@ def create_ticket():
     if not subject or not description:
         return jsonify({"error": "subject y description son requeridos"}), 400
     user_id = _current_user_id()
-    user = User.query.get_or_404(user_id)
+    user = db.session.get(User, user_id)
+    if not user:
+        return jsonify({"error": "Usuario no encontrado"}), 404
     tenant_id = current_tenant_id()
     ticket = Ticket(
         subject=subject,
@@ -4003,7 +4031,9 @@ def _notify_client(client: Client, subject: str, body: str):
 @admin_required()
 def router_remote_script(router_id):
     """Devuelve un script rápido para habilitar acceso remoto seguro (API/SSH) en MikroTik."""
-    router = MikroTikRouter.query.get_or_404(router_id)
+    router = db.session.get(MikroTikRouter, router_id)
+    if not router:
+        return jsonify({"error": "Router no encontrado"}), 404
     api_user = f"fastisp-{router_id}"
     api_pass = f"{router.password or 'CambiarEstaClave'}"
     api_port = 8728
