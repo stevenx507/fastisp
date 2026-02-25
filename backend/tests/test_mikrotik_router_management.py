@@ -281,6 +281,21 @@ class _DummyMikrotikOnboardService:
         return {'success': True, 'result': 'ok'}
 
 
+class _DummyMikrotikOnboardNoApiService:
+    def __init__(self, router_id):
+        self.router_id = router_id
+        self.api = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def execute_script(self, _script_content):
+        return {'success': False, 'result': 'unreachable'}
+
+
 def test_change_ticket_guard_required_for_high_risk_mikrotik_actions(client, app, monkeypatch):
     headers = _admin_headers(client, app)
     monkeypatch.setattr(mikrotik_routes, 'MikroTikService', _DummyMikrotikRiskService)
@@ -618,3 +633,76 @@ def test_wireguard_onboard_returns_conflict_if_router_exists_and_update_disabled
     )
     assert response.status_code == 409
     assert 'already exists' in str(response.get_json().get('error', ''))
+
+
+def test_wireguard_onboard_normalizes_ip_with_port(client, app, monkeypatch):
+    headers = _admin_headers(client, app)
+    monkeypatch.setattr(mikrotik_routes, 'MikroTikService', _DummyMikrotikOnboardService)
+    monkeypatch.setattr(
+        mikrotik_routes,
+        '_build_router_readiness_payload',
+        lambda _service, run_write_probe=False: {
+            'score': 70,
+            'checks': [],
+            'blockers': [],
+            'recommendations': [],
+            'runtime': {'reachable': True},
+            'write_probe_enabled': bool(run_write_probe),
+        },
+    )
+
+    response = client.post(
+        '/api/mikrotik/wireguard/onboard',
+        data={
+            'archive': (_build_wireguard_archive(), 'wireguard-export.zip'),
+            'ip_address': '172.16.0.1:9090',
+            'username': 'api-admin',
+            'password': 'router-pass',
+            'api_port': '8728',
+        },
+        headers=headers,
+        content_type='multipart/form-data',
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['success'] is True
+    assert payload['router']['ip_address'] == '172.16.0.1'
+    assert payload['router']['api_port'] == 8728
+
+
+def test_wireguard_onboard_keeps_router_when_bootstrap_unreachable(client, app, monkeypatch):
+    headers = _admin_headers(client, app)
+    monkeypatch.setattr(mikrotik_routes, 'MikroTikService', _DummyMikrotikOnboardNoApiService)
+    monkeypatch.setattr(
+        mikrotik_routes,
+        '_build_router_readiness_payload',
+        lambda _service, run_write_probe=False: {
+            'score': 20,
+            'checks': [{'id': 'api_connectivity', 'ok': False, 'severity': 'critical'}],
+            'blockers': [{'id': 'api_connectivity', 'detail': 'Router API unreachable from backend.'}],
+            'recommendations': [],
+            'runtime': {'reachable': False},
+            'write_probe_enabled': bool(run_write_probe),
+        },
+    )
+
+    response = client.post(
+        '/api/mikrotik/wireguard/onboard',
+        data={
+            'archive': (_build_wireguard_archive(), 'wireguard-export.zip'),
+            'username': 'api-admin',
+            'password': 'router-pass',
+            'bootstrap_bth': 'true',
+            'bth_user_name': 'noc-vps',
+            'change_ticket': 'CHG-ONBOARD-UNREACHABLE',
+            'preflight_ack': 'true',
+        },
+        headers=headers,
+        content_type='multipart/form-data',
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['success'] is True
+    assert payload['created'] is True
+    assert payload['bootstrap']['success'] is False
+    assert 'No se pudo conectar por API' in str(payload['bootstrap'].get('error', ''))

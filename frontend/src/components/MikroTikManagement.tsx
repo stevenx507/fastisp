@@ -80,6 +80,8 @@ interface RouterQuickConnectResponse {
 }
 
 interface RouterBackToHomeBootstrapData {
+  success?: boolean
+  error?: string
   user_name?: string
   allow_lan?: boolean
   user_visible_after_run?: boolean
@@ -853,6 +855,9 @@ const MikroTikManagement: React.FC = () => {
         setRouterReadiness(payload.readiness || null)
         if (payload.bootstrap) {
           setBootstrapResult(payload.bootstrap)
+          if (payload.bootstrap.success === false) {
+            addToast('error', payload.bootstrap.error || 'Bootstrap automatico no pudo ejecutarse por API')
+          }
         }
         setWireGuardImportSummary({
           success: true,
@@ -1312,7 +1317,7 @@ const MikroTikManagement: React.FC = () => {
           <input
             value={routerForm.ip_address}
             onChange={(e) => setRouterForm((prev) => ({ ...prev, ip_address: e.target.value }))}
-            placeholder="IP o DNS"
+            placeholder="IP o DNS (sin puerto)"
             className="rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-900"
           />
           <input

@@ -119,6 +119,13 @@ def _parse_wireguard_config(config_text: str) -> Dict[str, Any]:
     }
 
 
+def _normalize_router_host(raw_value: str) -> tuple[str, Optional[int]]:
+    parsed = _parse_wireguard_endpoint(raw_value)
+    host = str(parsed.get('host') or raw_value or '').strip()
+    port = parsed.get('port')
+    return host, port
+
+
 def _probe_write_access(service: MikroTikService) -> Dict[str, Any]:
     """
     Probe write permissions by creating/removing a temporary system script.
@@ -634,7 +641,8 @@ def onboard_router_from_wireguard_archive():
         return jsonify({'success': False, 'error': 'Could not parse WireGuard archive'}), 500
 
     form = request.form or {}
-    endpoint_host = str(form.get('ip_address') or parsed.get('endpoint_host') or '').strip()
+    raw_endpoint_host = str(form.get('ip_address') or parsed.get('endpoint_host') or '').strip()
+    endpoint_host, endpoint_port_hint = _normalize_router_host(raw_endpoint_host)
     if not endpoint_host:
         return jsonify({'success': False, 'error': 'ip_address or WireGuard endpoint host is required'}), 400
 
@@ -649,8 +657,12 @@ def onboard_router_from_wireguard_archive():
     if not password:
         return jsonify({'success': False, 'error': 'password is required'}), 400
 
+    raw_api_port = form.get('api_port')
     try:
-        api_port = int(form.get('api_port') or 8728)
+        if raw_api_port in (None, ''):
+            api_port = int(endpoint_port_hint or 8728)
+        else:
+            api_port = int(raw_api_port)
     except (TypeError, ValueError):
         return jsonify({'success': False, 'error': 'api_port must be integer'}), 400
     if api_port < 1 or api_port > 65535:
@@ -722,39 +734,46 @@ def onboard_router_from_wireguard_archive():
 
             if bootstrap_bth:
                 if not service.api:
-                    return jsonify({'success': False, 'error': 'Could not connect to router for bootstrap'}), 502
+                    bootstrap_payload = {
+                        'success': False,
+                        'error': 'No se pudo conectar por API al router para bootstrap automatico.',
+                        'user_name': bth_user_name,
+                    }
+                    readiness_payload.setdefault('recommendations', []).append(
+                        'Verifica conectividad API (host/IP y puerto) o desactiva bootstrap automatico para registrar primero el router.'
+                    )
+                else:
+                    safe_name = _script_escape(bth_user_name)
+                    safe_key = _script_escape(bth_private_key)
+                    safe_comment = _script_escape(comment)
+                    script_lines: List[str] = []
+                    if ddns_enabled:
+                        script_lines.append(f"/ip/cloud/set ddns-enabled=yes update-time={'yes' if update_time else 'no'}")
+                    if enable_vpn:
+                        script_lines.append('/ip/cloud/set back-to-home-vpn=enabled')
+                    if replace_existing_user:
+                        script_lines.append(f'/ip/cloud/back-to-home-users/remove [find where name="{safe_name}"]')
+                    script_lines.append(
+                        f'/ip/cloud/back-to-home-users/add name="{safe_name}" private-key="{safe_key}" '
+                        f'allow-lan={"yes" if bth_allow_lan else "no"} comment="{safe_comment}" disabled=no'
+                    )
+                    script_lines.append('/ip/cloud/print')
+                    script_content = '\n'.join(script_lines)
 
-                safe_name = _script_escape(bth_user_name)
-                safe_key = _script_escape(bth_private_key)
-                safe_comment = _script_escape(comment)
-                script_lines: List[str] = []
-                if ddns_enabled:
-                    script_lines.append(f"/ip/cloud/set ddns-enabled=yes update-time={'yes' if update_time else 'no'}")
-                if enable_vpn:
-                    script_lines.append('/ip/cloud/set back-to-home-vpn=enabled')
-                if replace_existing_user:
-                    script_lines.append(f'/ip/cloud/back-to-home-users/remove [find where name="{safe_name}"]')
-                script_lines.append(
-                    f'/ip/cloud/back-to-home-users/add name="{safe_name}" private-key="{safe_key}" '
-                    f'allow-lan={"yes" if bth_allow_lan else "no"} comment="{safe_comment}" disabled=no'
-                )
-                script_lines.append('/ip/cloud/print')
-                script_content = '\n'.join(script_lines)
+                    exec_result = service.execute_script(script_content)
+                    result = exec_result if isinstance(exec_result, dict) else {'success': bool(exec_result), 'result': str(exec_result)}
+                    runtime = _collect_back_to_home_runtime(service)
+                    users = runtime.get('users') if isinstance(runtime.get('users'), list) else []
+                    user_visible = any(str(item.get('name') or '').strip() == bth_user_name for item in users)
 
-                exec_result = service.execute_script(script_content)
-                result = exec_result if isinstance(exec_result, dict) else {'success': bool(exec_result), 'result': str(exec_result)}
-                runtime = _collect_back_to_home_runtime(service)
-                users = runtime.get('users') if isinstance(runtime.get('users'), list) else []
-                user_visible = any(str(item.get('name') or '').strip() == bth_user_name for item in users)
-
-                bootstrap_payload = {
-                    'success': bool(result.get('success')),
-                    'script': script_content,
-                    'result': result,
-                    'runtime': runtime,
-                    'user_name': bth_user_name,
-                    'user_visible_after_run': user_visible,
-                }
+                    bootstrap_payload = {
+                        'success': bool(result.get('success')),
+                        'script': script_content,
+                        'result': result,
+                        'runtime': runtime,
+                        'user_name': bth_user_name,
+                        'user_visible_after_run': user_visible,
+                    }
     except Exception as exc:
         logger.error('Error on WireGuard onboarding for router %s: %s', router.id, exc, exc_info=True)
 
@@ -810,7 +829,8 @@ def get_routers():
 def create_router():
     data = request.get_json() or {}
     name = str(data.get('name') or '').strip()
-    ip_address = str(data.get('ip_address') or '').strip()
+    raw_ip_address = str(data.get('ip_address') or '').strip()
+    ip_address, parsed_ip_port = _normalize_router_host(raw_ip_address)
     username = str(data.get('username') or '').strip()
     password = str(data.get('password') or '').strip()
 
@@ -823,8 +843,12 @@ def create_router():
     if not password:
         return jsonify({'success': False, 'error': 'password is required'}), 400
 
+    raw_api_port = data.get('api_port')
     try:
-        api_port = int(data.get('api_port') or 8728)
+        if raw_api_port in (None, ''):
+            api_port = int(parsed_ip_port or 8728)
+        else:
+            api_port = int(raw_api_port)
     except (TypeError, ValueError):
         return jsonify({'success': False, 'error': 'api_port must be integer'}), 400
     if api_port < 1 or api_port > 65535:
@@ -902,7 +926,8 @@ def update_router(router_id):
         changed.append('name')
 
     if 'ip_address' in data:
-        ip_address = str(data.get('ip_address') or '').strip()
+        raw_ip_address = str(data.get('ip_address') or '').strip()
+        ip_address, _parsed_ip_port = _normalize_router_host(raw_ip_address)
         if not ip_address:
             return jsonify({'success': False, 'error': 'ip_address cannot be empty'}), 400
         duplicate = _tenant_router_query().filter(
