@@ -31,7 +31,7 @@ function App() {
             <Route path="/dashboard/usage" element={<ProtectedRoute allowedRoles={['client']}><ClientUsage /></ProtectedRoute>} />
             <Route path="/dashboard/support" element={<ProtectedRoute allowedRoles={['client']}><ClientSupport /></ProtectedRoute>} />
             <Route path="/dashboard/profile" element={<ProtectedRoute allowedRoles={['client']}><ClientProfile /></ProtectedRoute>} />
-            <Route path="/tech" element={<ProtectedRoute><TechApp /></ProtectedRoute>} />
+            <Route path="/tech" element={<ProtectedRoute allowedRoles={['admin', 'platform_admin']}><TechApp /></ProtectedRoute>} />
             <Route path="/admin" element={<ProtectedRoute allowedRoles={['admin', 'platform_admin']}><AdminPanel /></ProtectedRoute>} />
             <Route path="/platform" element={<ProtectedRoute allowedRoles={['platform_admin']}><PlatformAdmin /></ProtectedRoute>} />
             <Route path="/platform/bootstrap" element={isAuthenticated ? <Navigate to={authHome} /> : <PlatformBootstrap />} />
