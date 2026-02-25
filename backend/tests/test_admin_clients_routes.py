@@ -1,7 +1,10 @@
+from datetime import date
+
+import app.routes.main_routes as main_routes
 from flask_jwt_extended import create_access_token
 
 from app import db
-from app.models import Client, Plan, User
+from app.models import Client, MikroTikRouter, Plan, Subscription, User
 
 
 def _token_for_user(app, user_id: int) -> str:
@@ -175,3 +178,128 @@ def test_admin_reset_portal_access_for_existing_user(client, app):
         updated_user = db.session.get(User, user_id)
         assert updated_user is not None
         assert updated_user.check_password('new-password-123') is True
+
+
+def test_admin_clients_export_csv_supports_filters(client, app):
+    admin_id, plan_id = _admin_and_plan(app, email_prefix='admin-clients-export')
+    token = _token_for_user(app, admin_id)
+
+    with app.app_context():
+        db.session.add_all(
+            [
+                Client(full_name='Cliente Export Uno', connection_type='dhcp', plan_id=plan_id, ip_address='10.0.0.11'),
+                Client(full_name='Cliente Export Dos', connection_type='dhcp', plan_id=plan_id, ip_address='10.0.0.12'),
+            ]
+        )
+        db.session.commit()
+
+    response = client.get(
+        '/api/admin/clients/export?format=csv&q=Uno',
+        headers={'Authorization': f'Bearer {token}'},
+    )
+    assert response.status_code == 200
+    assert 'text/csv' in response.headers.get('Content-Type', '').lower()
+    body = response.get_data(as_text=True)
+    assert 'Cliente Export Uno' in body
+    assert 'Cliente Export Dos' not in body
+    assert 'router_name' in body
+
+
+def test_admin_clients_bulk_action_suspend_and_activate(client, app, monkeypatch):
+    admin_id, plan_id = _admin_and_plan(app, email_prefix='admin-clients-bulk')
+    token = _token_for_user(app, admin_id)
+
+    with app.app_context():
+        router = MikroTikRouter(
+            name='Router Bulk',
+            ip_address='10.200.1.1',
+            username='admin',
+            tenant_id=None,
+        )
+        router.password = 'Secret#Router01'
+        db.session.add(router)
+        db.session.flush()
+
+        ok_client = Client(
+            full_name='Cliente Lote OK',
+            connection_type='pppoe',
+            plan_id=plan_id,
+            router_id=router.id,
+            pppoe_username='loteok',
+            pppoe_password='lotepass',
+        )
+        no_router_client = Client(
+            full_name='Cliente Lote Sin Router',
+            connection_type='dhcp',
+            plan_id=plan_id,
+        )
+        db.session.add_all([ok_client, no_router_client])
+        db.session.flush()
+
+        subscription = Subscription(
+            customer=ok_client.full_name,
+            email='cliente.lote.ok@test.local',
+            plan='Plan bulk',
+            cycle_months=1,
+            amount=25,
+            status='active',
+            currency='USD',
+            tax_percent=0,
+            next_charge=date.today(),
+            method='manual',
+            client_id=ok_client.id,
+        )
+        db.session.add(subscription)
+        db.session.commit()
+
+        ok_client_id = ok_client.id
+        no_router_client_id = no_router_client.id
+
+    class FakeMikroTikService:
+        def __init__(self, router_id):
+            self.router_id = router_id
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def suspend_client(self, _client):
+            return True
+
+        def activate_client(self, _client, _plan):
+            return True
+
+    monkeypatch.setattr(main_routes, 'MikroTikService', FakeMikroTikService)
+    monkeypatch.setattr(main_routes, '_notify_incident', lambda *args, **kwargs: None)
+    monkeypatch.setattr(main_routes, '_notify_client', lambda *args, **kwargs: None)
+
+    suspend_response = client.post(
+        '/api/admin/clients/bulk-action',
+        json={'action': 'suspend', 'client_ids': [ok_client_id, no_router_client_id, 999999]},
+        headers={'Authorization': f'Bearer {token}'},
+    )
+    assert suspend_response.status_code == 200
+    suspend_payload = suspend_response.get_json()
+    assert suspend_payload['success_count'] == 1
+    assert suspend_payload['failed_count'] == 2
+
+    with app.app_context():
+        updated = Subscription.query.filter_by(client_id=ok_client_id).first()
+        assert updated is not None
+        assert updated.status == 'suspended'
+
+    activate_response = client.post(
+        '/api/admin/clients/bulk-action',
+        json={'action': 'activate', 'client_ids': [ok_client_id]},
+        headers={'Authorization': f'Bearer {token}'},
+    )
+    assert activate_response.status_code == 200
+    activate_payload = activate_response.get_json()
+    assert activate_payload['success_count'] == 1
+
+    with app.app_context():
+        updated = Subscription.query.filter_by(client_id=ok_client_id).first()
+        assert updated is not None
+        assert updated.status == 'active'

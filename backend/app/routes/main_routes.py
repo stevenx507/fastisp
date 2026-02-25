@@ -1,7 +1,9 @@
 ﻿from datetime import datetime, timedelta
 from functools import wraps
+import csv
 import hashlib
 import hmac
+import io
 import json
 import secrets
 import string
@@ -3418,25 +3420,123 @@ def admin_router_usage():
 @admin_required()
 def admin_list_clients():
     tenant_id = current_tenant_id()
-    query = Client.query.options(joinedload(Client.plan), joinedload(Client.user))
+    term = (request.args.get('q') or '').strip()
+    status_filter = (request.args.get('status') or '').strip().lower() or None
+    plan_id_raw = request.args.get('plan_id')
+    plan_id = _parse_int(plan_id_raw) if plan_id_raw is not None else None
+    if plan_id_raw is not None and plan_id is None:
+        return jsonify({"error": "plan_id invalido"}), 400
+    clients = _collect_admin_clients(tenant_id, term=term, status_filter=status_filter, plan_id=plan_id)
+    return jsonify({"items": clients, "count": len(clients)}), 200
+
+
+def _client_status(client: Client) -> str:
+    subs = client.subscriptions or []
+    return str(subs[0].status if subs else 'active')
+
+
+def _serialize_admin_client(client: Client) -> dict:
+    return {
+        "id": client.id,
+        "name": client.full_name,
+        "ip_address": client.ip_address,
+        "plan": client.plan.name if client.plan else None,
+        "plan_id": client.plan_id,
+        "router_id": client.router_id,
+        "router_name": client.router.name if client.router else None,
+        "status": _client_status(client),
+        "email": client.user.email if client.user else None,
+        "portal_access": bool(client.user_id),
+        "connection_type": client.connection_type,
+        "pppoe_username": client.pppoe_username,
+    }
+
+
+def _collect_admin_clients(tenant_id, term: str | None = None, status_filter: str | None = None, plan_id: int | None = None) -> list[dict]:
+    query = Client.query.options(
+        joinedload(Client.plan),
+        joinedload(Client.user),
+        joinedload(Client.router),
+        joinedload(Client.subscriptions),
+    )
     if tenant_id is not None:
         query = query.filter_by(tenant_id=tenant_id)
-    clients = []
-    for c in query.all():
-        subs = c.subscriptions or []
-        status = subs[0].status if subs else 'active'
-        clients.append({
-            "id": c.id,
-            "name": c.full_name,
-            "ip_address": c.ip_address,
-            "plan": c.plan.name if c.plan else None,
-            "plan_id": c.plan_id,
-            "router_id": c.router_id,
-            "status": status,
-            "email": c.user.email if c.user else None,
-            "portal_access": bool(c.user_id),
-        })
-    return jsonify({"items": clients, "count": len(clients)}), 200
+    if plan_id is not None:
+        query = query.filter_by(plan_id=plan_id)
+
+    normalized_term = str(term or '').strip().lower()
+    normalized_status = str(status_filter or '').strip().lower()
+    items: list[dict] = []
+    for row in query.order_by(Client.id.asc()).all():
+        payload = _serialize_admin_client(row)
+        if normalized_status and payload["status"] != normalized_status:
+            continue
+        if normalized_term:
+            haystack = [
+                str(payload.get("id") or "").lower(),
+                str(payload.get("name") or "").lower(),
+                str(payload.get("ip_address") or "").lower(),
+                str(payload.get("email") or "").lower(),
+                str(payload.get("plan") or "").lower(),
+            ]
+            if not any(normalized_term in candidate for candidate in haystack):
+                continue
+        items.append(payload)
+    return items
+
+
+@main_bp.route('/admin/clients/export', methods=['GET'])
+@admin_required()
+def admin_export_clients():
+    tenant_id = current_tenant_id()
+    term = (request.args.get('q') or '').strip()
+    status_filter = (request.args.get('status') or '').strip().lower() or None
+    plan_id_raw = request.args.get('plan_id')
+    plan_id = _parse_int(plan_id_raw) if plan_id_raw is not None else None
+    if plan_id_raw is not None and plan_id is None:
+        return jsonify({"error": "plan_id invalido"}), 400
+
+    export_format = (request.args.get('format') or 'csv').strip().lower()
+    items = _collect_admin_clients(tenant_id, term=term, status_filter=status_filter, plan_id=plan_id)
+    if export_format == 'json':
+        return jsonify({"items": items, "count": len(items)}), 200
+    if export_format != 'csv':
+        return jsonify({"error": "format invalido"}), 400
+
+    columns = [
+        "id",
+        "name",
+        "email",
+        "status",
+        "plan",
+        "plan_id",
+        "router_id",
+        "router_name",
+        "ip_address",
+        "connection_type",
+        "portal_access",
+        "pppoe_username",
+    ]
+    stream = io.StringIO()
+    writer = csv.DictWriter(stream, fieldnames=columns)
+    writer.writeheader()
+    for item in items:
+        writer.writerow({column: item.get(column) for column in columns})
+
+    _audit(
+        "clients_export",
+        entity_type="client",
+        metadata={
+            "format": export_format,
+            "count": len(items),
+            "status_filter": status_filter,
+            "plan_id": plan_id,
+        },
+    )
+    timestamp = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
+    response = Response(stream.getvalue(), mimetype='text/csv; charset=utf-8')
+    response.headers['Content-Disposition'] = f'attachment; filename=clients-{timestamp}.csv'
+    return response, 200
 
 
 @main_bp.route('/admin/clients', methods=['POST'])
@@ -3573,6 +3673,112 @@ def admin_manage_client_portal_access(client_id):
     return jsonify(payload), 201 if created else 200
 
 
+def _apply_network_action_to_client(client: Client, action: str) -> tuple[bool, str | None]:
+    action_name = str(action or '').strip().lower()
+    if action_name not in {'suspend', 'activate'}:
+        return False, "accion invalida"
+    if not client.router_id:
+        return False, "Cliente sin router asociado"
+
+    plan = client.plan or (db.session.get(Plan, client.plan_id) if client.plan_id else None)
+    try:
+        with MikroTikService(client.router_id) as mikrotik:
+            if action_name == 'suspend':
+                ok = mikrotik.suspend_client(client)
+            else:
+                ok = mikrotik.activate_client(client, plan)
+    except Exception as exc:
+        current_app.logger.error("Error aplicando accion %s en cliente %s: %s", action_name, client.id, exc, exc_info=True)
+        return False, "Error conectando con MikroTik"
+
+    if not ok:
+        return False, f"No se pudo {action_name} en MikroTik"
+
+    if client.subscriptions:
+        client.subscriptions[0].status = 'suspended' if action_name == 'suspend' else 'active'
+    if action_name == 'suspend':
+        _notify_incident(f"Suspendido cliente {client.full_name}", severity="warning")
+        _notify_client(client, "Aviso de suspensión", "Tu servicio ha sido suspendido por pago pendiente. Regulariza para reactivarlo.")
+    else:
+        _notify_incident(f"Reactivado cliente {client.full_name}", severity="info")
+        _notify_client(client, "Servicio reactivado", "Tu servicio ha sido reactivado. Gracias por ponerte al día.")
+    return True, None
+
+
+@main_bp.route('/admin/clients/bulk-action', methods=['POST'])
+@admin_required()
+def admin_bulk_client_action():
+    data = request.get_json() or {}
+    action = str(data.get('action') or '').strip().lower()
+    if action not in {'suspend', 'activate'}:
+        return jsonify({"error": "action invalida. Use suspend o activate"}), 400
+
+    raw_client_ids = data.get('client_ids')
+    if not isinstance(raw_client_ids, list) or not raw_client_ids:
+        return jsonify({"error": "client_ids es requerido y debe ser una lista"}), 400
+
+    unique_ids: list[int] = []
+    for raw in raw_client_ids:
+        parsed = _parse_int(raw)
+        if parsed is None:
+            continue
+        if parsed not in unique_ids:
+            unique_ids.append(parsed)
+    if not unique_ids:
+        return jsonify({"error": "client_ids no contiene IDs validos"}), 400
+    if len(unique_ids) > 200:
+        return jsonify({"error": "maximo 200 clientes por lote"}), 400
+
+    tenant_id = current_tenant_id()
+    results: list[dict] = []
+    success_count = 0
+
+    for client_id in unique_ids:
+        client = db.session.get(Client, client_id)
+        if not client:
+            results.append({"client_id": client_id, "success": False, "error": "Cliente no encontrado"})
+            continue
+        if tenant_id is not None and client.tenant_id not in (None, tenant_id):
+            results.append({"client_id": client_id, "success": False, "error": "Cliente fuera del tenant"})
+            continue
+
+        ok, error = _apply_network_action_to_client(client, action)
+        if not ok:
+            db.session.rollback()
+            results.append({"client_id": client_id, "success": False, "error": error})
+            continue
+
+        try:
+            db.session.commit()
+            success_count += 1
+            results.append({"client_id": client_id, "success": True})
+        except Exception as exc:
+            db.session.rollback()
+            current_app.logger.error("Error guardando accion masiva de cliente %s: %s", client_id, exc, exc_info=True)
+            results.append({"client_id": client_id, "success": False, "error": "No se pudo guardar el cambio"})
+
+    _audit(
+        "clients_bulk_action",
+        entity_type="client",
+        metadata={
+            "action": action,
+            "requested": len(unique_ids),
+            "success": success_count,
+            "failed": len(unique_ids) - success_count,
+        },
+    )
+    return jsonify(
+        {
+            "success": True,
+            "action": action,
+            "requested": len(unique_ids),
+            "success_count": success_count,
+            "failed_count": len(unique_ids) - success_count,
+            "results": results,
+        }
+    ), 200
+
+
 # ==================== RED: SUSPENDER / ACTIVAR / CAMBIAR VELOCIDAD ====================
 
 @main_bp.route('/admin/clients/<int:client_id>/suspend', methods=['POST'])
@@ -3584,17 +3790,14 @@ def suspend_client(client_id):
     tenant_id = current_tenant_id()
     if tenant_id and client.tenant_id not in (None, tenant_id):
         return jsonify({"error": "Cliente fuera del tenant"}), 403
-    if not client.router_id:
-        return jsonify({"error": "Cliente sin router asociado"}), 400
-    plan = client.plan or db.session.get(Plan, client.plan_id) if client.plan_id else None
-    with MikroTikService(client.router_id) as mikrotik:
-        ok = mikrotik.suspend_client(client)
-    if ok and client.subscriptions:
-        client.subscriptions[0].status = 'suspended'
-        db.session.commit()
-        _notify_incident(f"Suspendido cliente {client.full_name}", severity="warning")
-        _notify_client(client, "Aviso de suspensión", "Tu servicio ha sido suspendido por pago pendiente. Regulariza para reactivarlo.")
-    return (jsonify({"success": True}), 200) if ok else (jsonify({"error": "No se pudo suspender en MikroTik"}), 500)
+    ok, error = _apply_network_action_to_client(client, 'suspend')
+    if not ok:
+        db.session.rollback()
+        if error == "Cliente sin router asociado":
+            return jsonify({"error": error}), 400
+        return jsonify({"error": error or "No se pudo suspender en MikroTik"}), 500
+    db.session.commit()
+    return jsonify({"success": True}), 200
 
 
 @main_bp.route('/admin/clients/<int:client_id>/activate', methods=['POST'])
@@ -3606,17 +3809,14 @@ def activate_client(client_id):
     tenant_id = current_tenant_id()
     if tenant_id and client.tenant_id not in (None, tenant_id):
         return jsonify({"error": "Cliente fuera del tenant"}), 403
-    plan = client.plan or db.session.get(Plan, client.plan_id) if client.plan_id else None
-    if not client.router_id:
-        return jsonify({"error": "Cliente sin router asociado"}), 400
-    with MikroTikService(client.router_id) as mikrotik:
-        ok = mikrotik.activate_client(client, plan)
-    if ok and client.subscriptions:
-        client.subscriptions[0].status = 'active'
-        db.session.commit()
-        _notify_incident(f"Reactivado cliente {client.full_name}", severity="info")
-        _notify_client(client, "Servicio reactivado", "Tu servicio ha sido reactivado. Gracias por ponerte al día.")
-    return (jsonify({"success": True}), 200) if ok else (jsonify({"error": "No se pudo activar en MikroTik"}), 500)
+    ok, error = _apply_network_action_to_client(client, 'activate')
+    if not ok:
+        db.session.rollback()
+        if error == "Cliente sin router asociado":
+            return jsonify({"error": error}), 400
+        return jsonify({"error": error or "No se pudo activar en MikroTik"}), 500
+    db.session.commit()
+    return jsonify({"success": True}), 200
 
 
 @main_bp.route('/admin/clients/<int:client_id>/speed', methods=['POST'])
