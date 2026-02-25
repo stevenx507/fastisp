@@ -156,6 +156,7 @@ const MikroTikManagement: React.FC = () => {
   const [bthUserName, setBthUserName] = useState('noc-vps')
   const [bthPrivateKey, setBthPrivateKey] = useState('')
   const [bthAllowLan, setBthAllowLan] = useState(true)
+  const [changeTicket, setChangeTicket] = useState('')
   const [routerForm, setRouterForm] = useState<RouterFormState>({
     name: '',
     ip_address: '',
@@ -182,6 +183,14 @@ const MikroTikManagement: React.FC = () => {
   }, [])
 
   const API_BASE = (import.meta as { env?: { VITE_API_BASE_URL?: string } }).env?.VITE_API_BASE_URL || ''
+
+  const withChangeTicket = useCallback(
+    (payload: Record<string, unknown> = {}) => {
+      const ticket = changeTicket.trim()
+      return ticket ? { ...payload, change_ticket: ticket } : payload
+    },
+    [changeTicket]
+  )
 
   const safeJson = useCallback(async (res: Response): Promise<unknown> => {
     try {
@@ -301,7 +310,11 @@ const MikroTikManagement: React.FC = () => {
     if (!selectedRouter) return
     setActionLoading(true)
     try {
-      const response = await apiFetch(`/api/mikrotik/routers/${selectedRouter.id}/reboot`, { method: 'POST' })
+      const response = await apiFetch(`/api/mikrotik/routers/${selectedRouter.id}/reboot`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(withChangeTicket({})),
+      })
       const data = (await safeJson(response)) as { success?: boolean; error?: string } | null
       if (response.ok && data?.success) addToast('success', 'Reinicio solicitado correctamente')
       else addToast('error', data?.error || 'Error reiniciando router')
@@ -319,7 +332,7 @@ const MikroTikManagement: React.FC = () => {
       const response = await apiFetch(`/api/mikrotik/routers/${selectedRouter.id}/backup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: `backup_${new Date().toISOString()}` }),
+        body: JSON.stringify(withChangeTicket({ name: `backup_${new Date().toISOString()}` })),
       })
       const data = (await safeJson(response)) as { success?: boolean; error?: string } | null
       if (response.ok && data?.success) addToast('success', 'Backup creado exitosamente')
@@ -416,7 +429,7 @@ const MikroTikManagement: React.FC = () => {
       const response = await apiFetch(`/api/mikrotik/routers/${selectedRouter.id}/back-to-home/enable`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ confirm: true }),
+        body: JSON.stringify(withChangeTicket({ confirm: true })),
       })
       const payload = (await safeJson(response)) as { success?: boolean; error?: string } | null
       if (response.ok && payload?.success) {
@@ -450,13 +463,15 @@ const MikroTikManagement: React.FC = () => {
       const response = await apiFetch(`/api/mikrotik/routers/${selectedRouter.id}/back-to-home/users/add`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          confirm: true,
-          user_name: userName,
-          private_key: privateKey,
-          allow_lan: bthAllowLan,
-          comment: 'FastISP VPS',
-        }),
+        body: JSON.stringify(
+          withChangeTicket({
+            confirm: true,
+            user_name: userName,
+            private_key: privateKey,
+            allow_lan: bthAllowLan,
+            comment: 'FastISP VPS',
+          })
+        ),
       })
       const payload = (await safeJson(response)) as { success?: boolean; error?: string } | null
       if (response.ok && payload?.success) {
@@ -480,10 +495,12 @@ const MikroTikManagement: React.FC = () => {
       const response = await apiFetch(`/api/mikrotik/routers/${selectedRouter.id}/back-to-home/users/remove`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          confirm: true,
-          user_name: userName.trim(),
-        }),
+        body: JSON.stringify(
+          withChangeTicket({
+            confirm: true,
+            user_name: userName.trim(),
+          })
+        ),
       })
       const payload = (await safeJson(response)) as { success?: boolean; error?: string } | null
       if (response.ok && payload?.success) {
@@ -518,14 +535,16 @@ const MikroTikManagement: React.FC = () => {
       const response = await apiFetch(`/api/mikrotik/routers/${selectedRouter.id}/back-to-home/bootstrap`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          confirm: true,
-          user_name: userName,
-          private_key: privateKey,
-          allow_lan: bthAllowLan,
-          replace_existing_user: true,
-          comment: 'FastISP VPS',
-        }),
+        body: JSON.stringify(
+          withChangeTicket({
+            confirm: true,
+            user_name: userName,
+            private_key: privateKey,
+            allow_lan: bthAllowLan,
+            replace_existing_user: true,
+            comment: 'FastISP VPS',
+          })
+        ),
       })
       const payload = (await safeJson(response)) as RouterBackToHomeBootstrapResponse | null
       if (response.ok && payload?.success) {
@@ -608,6 +627,21 @@ const MikroTikManagement: React.FC = () => {
         onShowDhcpLeases={() => setSidePanel('dhcp')}
         onShowWifiClients={() => setSidePanel('wifi')}
       />
+
+      <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 shadow-sm">
+        <p className="text-xs font-semibold uppercase tracking-wide text-amber-800">Control de cambios</p>
+        <div className="mt-2 flex flex-col gap-2 md:flex-row md:items-center">
+          <input
+            value={changeTicket}
+            onChange={(e) => setChangeTicket(e.target.value)}
+            placeholder="Ticket de cambio (ej: CHG-2026-0001)"
+            className="w-full rounded-lg border border-amber-300 bg-white px-3 py-2 text-sm text-gray-900 md:max-w-md"
+          />
+          <p className="text-xs text-amber-800">
+            Se usa para acciones live (reinicio, scripts y operacion Back To Home).
+          </p>
+        </div>
+      </div>
 
       <div className="rounded-xl border border-gray-200 bg-white p-4 shadow">
         <h3 className="mb-3 text-lg font-semibold text-gray-900">Alta rapida de MikroTik</h3>

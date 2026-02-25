@@ -5,7 +5,7 @@ from flask import Blueprint, request, jsonify
 from flask_jwt_extended import get_jwt_identity
 from app.routes.main_routes import admin_required
 from app import db
-from app.models import MikroTikRouter, Client, Plan, User
+from app.models import AdminSystemSetting, MikroTikRouter, Client, Plan, User
 from app.services.mikrotik_service import MikroTikService
 from app.services.mikrotik_advanced_service import MikroTikAdvancedService
 from app.services.ai_diagnostic_service import AIDiagnosticService
@@ -122,6 +122,41 @@ def _router_for_request(router_id: Any) -> Optional[MikroTikRouter]:
     if not tenant_access_allowed(router.tenant_id):
         return None
     return router
+
+
+def _tenant_setting_bool(key_name: str, default: bool = False) -> bool:
+    tenant_id = current_tenant_id()
+    query = AdminSystemSetting.query.filter_by(key=key_name)
+    if tenant_id is None:
+        query = query.filter(AdminSystemSetting.tenant_id.is_(None))
+    else:
+        query = query.filter(AdminSystemSetting.tenant_id == tenant_id)
+    row = query.first()
+    if row is None:
+        return default
+    value = row.value
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+
+
+def _change_control_guard(required_default: bool = True):
+    required = _tenant_setting_bool("change_control_required_for_live", default=required_default)
+    if not required:
+        return None
+
+    data = request.get_json(silent=True) or {}
+    ticket = str(
+        data.get('change_ticket')
+        or request.args.get('change_ticket')
+        or request.headers.get('X-Change-Ticket')
+        or ''
+    ).strip()
+    if ticket:
+        return None
+    return jsonify({'success': False, 'error': 'change_ticket is required for this action'}), 400
 
 
 def _pick_value(data: Dict[str, Any], *keys: str):
@@ -702,6 +737,10 @@ def enable_back_to_home(router_id):
     if not router:
         return jsonify({'success': False, 'error': 'Router not found'}), 404
 
+    guard_error = _change_control_guard(required_default=True)
+    if guard_error:
+        return guard_error
+
     data = request.get_json() or {}
     if not _as_bool(data.get('confirm'), default=False):
         return jsonify({'success': False, 'error': 'confirm=true is required'}), 400
@@ -740,6 +779,10 @@ def add_back_to_home_user(router_id):
     router = _router_for_request(router_id)
     if not router:
         return jsonify({'success': False, 'error': 'Router not found'}), 404
+
+    guard_error = _change_control_guard(required_default=True)
+    if guard_error:
+        return guard_error
 
     data = request.get_json() or {}
     if not _as_bool(data.get('confirm'), default=False):
@@ -788,6 +831,10 @@ def remove_back_to_home_user(router_id):
     if not router:
         return jsonify({'success': False, 'error': 'Router not found'}), 404
 
+    guard_error = _change_control_guard(required_default=True)
+    if guard_error:
+        return guard_error
+
     data = request.get_json() or {}
     if not _as_bool(data.get('confirm'), default=False):
         return jsonify({'success': False, 'error': 'confirm=true is required'}), 400
@@ -821,6 +868,10 @@ def bootstrap_back_to_home(router_id):
     router = _router_for_request(router_id)
     if not router:
         return jsonify({'success': False, 'error': 'Router not found'}), 404
+
+    guard_error = _change_control_guard(required_default=True)
+    if guard_error:
+        return guard_error
 
     data = request.get_json() or {}
     if not _as_bool(data.get('confirm'), default=False):
@@ -1269,6 +1320,9 @@ def test_connection(router_id):
 def reboot_router(router_id):
     """Reboot MikroTik router"""
     try:
+        guard_error = _change_control_guard(required_default=True)
+        if guard_error:
+            return guard_error
         with MikroTikService(router_id) as service:
             if not service.api:
                 return jsonify({'success': False, 'error': 'Could not connect to router'}), 500
@@ -1283,7 +1337,10 @@ def reboot_router(router_id):
 def execute_script(router_id):
     """Execute script on router"""
     try:
-        data = request.get_json()
+        guard_error = _change_control_guard(required_default=True)
+        if guard_error:
+            return guard_error
+        data = request.get_json() or {}
         script_content = data.get('script')
         
         if not script_content:
@@ -1751,6 +1808,11 @@ def apply_enterprise_hardening(router_id):
             site_profile = 'access'
         auto_rollback = _as_bool(data.get('auto_rollback'), default=True)
 
+        if not dry_run:
+            guard_error = _change_control_guard(required_default=True)
+            if guard_error:
+                return guard_error
+
         runbook = _build_hardening_runbook(profile, site_profile)
         commands = runbook['commands']
         rollback_commands = runbook['rollback_commands']
@@ -1877,6 +1939,9 @@ def rollback_enterprise_change(router_id, change_id):
     Rollback a previously registered enterprise change.
     """
     try:
+        guard_error = _change_control_guard(required_default=True)
+        if guard_error:
+            return guard_error
         entry = ENTERPRISE_CHANGE_INDEX.get(change_id)
         if not entry or str(entry.get('router_id')) != str(router_id):
             return jsonify({'success': False, 'error': 'Change not found for this router'}), 404
@@ -1915,6 +1980,9 @@ def run_enterprise_failover_test(router_id):
     Execute failover test by pinging multiple targets from the router.
     """
     try:
+        guard_error = _change_control_guard(required_default=True)
+        if guard_error:
+            return guard_error
         data = request.get_json() or {}
         raw_targets = data.get('targets') or ['1.1.1.1', '8.8.8.8', '9.9.9.9']
         if not isinstance(raw_targets, list):

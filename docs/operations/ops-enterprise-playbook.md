@@ -18,6 +18,13 @@ Este playbook define la capa de proceso para operar FASTISP con estandares tipo 
   - `live_confirm=true`
   - `change_ticket`
   - `preflight_ack=true`
+- MikroTik acciones criticas requieren `change_ticket`:
+  - reboot
+  - execute-script
+  - back-to-home (enable/add/remove/bootstrap)
+  - enterprise hardening live
+  - enterprise rollback
+  - enterprise failover-test
 - Ajustable por settings:
   - `change_control_required_for_live`
   - `require_preflight_for_live`
