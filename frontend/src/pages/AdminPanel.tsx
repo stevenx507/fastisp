@@ -19,6 +19,7 @@ import {
   MagnifyingGlassIcon,
   ChevronDownIcon,
   ChevronRightIcon,
+  AcademicCapIcon,
 } from '@heroicons/react/24/outline'
 import { useAuthStore } from '../store/authStore'
 import { safeStorage } from '../lib/storage'
@@ -53,6 +54,7 @@ import MaintenanceWindowsView from '../components/admin/MaintenanceWindowsView'
 import PermissionsView from '../components/admin/PermissionsView'
 import PlanChangeModal from '../components/admin/PlanChangeModal'
 import ManualPaymentModal from '../components/admin/ManualPaymentModal'
+import InteractiveDocs from '../components/admin/InteractiveDocs'
 import { apiClient } from '../lib/apiClient'
 import { normalizeRole } from '../lib/roles'
 
@@ -184,6 +186,7 @@ const AdminPanel: React.FC = () => {
     { id: 'staff', name: 'Staff', icon: UserGroupIcon },
     { id: 'network', name: 'Gestión MikroTik', icon: WifiIcon },
     { id: 'olt', name: 'Gestión OLT', icon: ServerIcon },
+    { id: 'academy', name: 'Documentacion Interactiva', icon: AcademicCapIcon },
     { id: 'maps', name: 'Mapa de Red', icon: MapIcon },
     { id: 'billing', name: 'Facturación', icon: CreditCardIcon },
     { id: 'monitoring', name: 'Monitoreo', icon: ServerIcon },
@@ -194,7 +197,7 @@ const AdminPanel: React.FC = () => {
     { id: 'settings', name: 'Configuración', icon: CogIcon }
   ]), [])
   const coreMenuIds = React.useMemo(
-    () => new Set(['dashboard','clients','network','olt','maps','billing','monitoring','noc','alerts','tickets','backups','settings']),
+    () => new Set(['dashboard','clients','network','olt','academy','maps','billing','monitoring','noc','alerts','tickets','backups','settings']),
     []
   )
   const groups = React.useMemo(() => {
@@ -311,6 +314,7 @@ const AdminPanel: React.FC = () => {
     staff: <StaffView />,
     network: <MikroTikManagement />,
     olt: <OltManagement />,
+    academy: <InteractiveDocs onNavigateToModule={(moduleId) => setActiveView(moduleId)} />,
     maps: <NetworkMap />,
     billing: (
       <div className="relative space-y-4">
