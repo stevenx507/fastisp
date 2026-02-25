@@ -104,6 +104,14 @@ class Config:
     
     # OpenAI
     OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
+
+    # ACS / TR-069
+    ACS_BASE_URL = os.environ.get('ACS_BASE_URL', '')
+    ACS_API_KEY = os.environ.get('ACS_API_KEY', '')
+    ACS_DEFAULT_HOST = os.environ.get('ACS_DEFAULT_HOST', '')
+    ACS_REPROVISION_PATH = os.environ.get('ACS_REPROVISION_PATH', '/api/v1/tr069/reprovision')
+    ACS_TIMEOUT_SECONDS = os.environ.get('ACS_TIMEOUT_SECONDS', '8')
+    ACS_VERIFY_TLS = _as_bool(os.environ.get('ACS_VERIFY_TLS'), default=True)
     
     # Celery
     CELERY_BROKER_URL = REDIS_URL

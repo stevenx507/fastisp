@@ -1,4 +1,5 @@
 import app.routes.olt as olt_routes
+import app.services.acs_service as acs_service
 
 from app import db
 from app.models import User
@@ -153,7 +154,7 @@ def test_tr064_test_reports_tcp_reachability(client, app, monkeypatch):
     assert payload["host"] == "127.0.0.1"
 
 
-def test_tr069_reprovision_returns_not_implemented_without_acs_adapter(client, app):
+def test_tr069_reprovision_simulate_returns_preview(client, app):
     headers = _admin_headers(client, app)
 
     response = client.post(
@@ -162,7 +163,78 @@ def test_tr069_reprovision_returns_not_implemented_without_acs_adapter(client, a
         headers=headers,
     )
 
-    assert response.status_code == 501
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["success"] is True
+    assert payload["run_mode"] == "simulate"
+    assert payload["payload"]["host"] == "acs.provider.local"
+    assert payload["acs_url"]
+
+
+def test_tr069_reprovision_live_requires_acs_base_url(client, app):
+    headers = _admin_headers(client, app)
+    with app.app_context():
+        app.config["ACS_BASE_URL"] = ""
+
+    response = client.post(
+        "/api/olt/devices/OLT-ZTE-001/tr069/reprovision",
+        json={"host": "acs.provider.local", "run_mode": "live", "live_confirm": True},
+        headers=headers,
+    )
+
+    assert response.status_code == 503
     payload = response.get_json()
     assert payload["success"] is False
-    assert "requires ACS integration" in payload["error"]
+    assert "ACS_BASE_URL" in payload["error"]
+
+
+class _DummyACSResponse:
+    def __init__(self, status_code=200, body=None):
+        self.status_code = status_code
+        self._body = body if body is not None else {"ok": True}
+        self.text = str(self._body)
+
+    def json(self):
+        return self._body
+
+
+def test_tr069_reprovision_live_calls_acs(client, app, monkeypatch):
+    headers = _admin_headers(client, app)
+    captured = {}
+
+    def _fake_post(url, json, headers, timeout, verify):  # noqa: A002
+        captured["url"] = url
+        captured["json"] = json
+        captured["headers"] = headers
+        captured["timeout"] = timeout
+        captured["verify"] = verify
+        return _DummyACSResponse(status_code=200, body={"job_id": "job-123", "status": "queued"})
+
+    monkeypatch.setattr(acs_service.requests, "post", _fake_post)
+    with app.app_context():
+        app.config["ACS_BASE_URL"] = "https://acs.local"
+        app.config["ACS_API_KEY"] = "secret-token"
+        app.config["ACS_REPROVISION_PATH"] = "/api/v1/tr069/reprovision"
+        app.config["ACS_TIMEOUT_SECONDS"] = 12
+        app.config["ACS_VERIFY_TLS"] = True
+
+    response = client.post(
+        "/api/olt/devices/OLT-ZTE-001/tr069/reprovision",
+        json={
+            "host": "acs.provider.local",
+            "serial": "ZTEG00000001",
+            "run_mode": "live",
+            "live_confirm": True,
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["success"] is True
+    assert payload["acs_status"] == 200
+    assert payload["response"]["job_id"] == "job-123"
+    assert captured["url"] == "https://acs.local/api/v1/tr069/reprovision"
+    assert captured["json"]["host"] == "acs.provider.local"
+    assert captured["json"]["serial"] == "ZTEG00000001"
+    assert captured["headers"]["Authorization"] == "Bearer secret-token"

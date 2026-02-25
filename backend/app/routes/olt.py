@@ -12,6 +12,7 @@ from flask_jwt_extended import get_jwt_identity
 from app import cache
 from app.models import AuditLog, User
 from app.routes.main_routes import admin_required
+from app.services.acs_service import ACSService
 from app.services.olt_script_service import OLTScriptService, SUPPORTED_VENDORS
 from app.tenancy import current_tenant_id
 
@@ -747,27 +748,64 @@ def tr069_reprovision(device_id):
         return live_guard
 
     host = str(data.get("host") or "").strip()
-    if not host:
+    serial = str(data.get("serial") or "").strip() or None
+    service = ACSService.from_app_config(current_app.config)
+
+    payload = service.build_payload(
+        device_id=device_id,
+        host=host,
+        serial=serial,
+        run_mode=run_mode,
+        tenant_id=current_tenant_id(),
+        requested_by=_resolve_actor_identity(),
+    )
+    if not str(payload.get("host") or "").strip():
         return jsonify({"success": False, "error": "host is required"}), 400
 
+    if run_mode in {"simulate", "dry-run"}:
+        simulated = {
+            "success": True,
+            "device_id": device_id,
+            "run_mode": run_mode,
+            "acs_configured": service.config.configured,
+            "acs_url": service.build_url(),
+            "payload": payload,
+            "message": "TR-069 reprovision simulado. Cambia run_mode=live para ejecutar en ACS.",
+        }
+        _audit(
+            "olt_tr069_reprovision",
+            entity_type="olt",
+            entity_id=device_id,
+            metadata={
+                "acs": payload.get("host"),
+                "run_mode": run_mode,
+                "supported": bool(service.config.configured),
+                "simulated": True,
+            },
+        )
+        return jsonify(simulated), 200
+
+    result, status = service.reprovision(payload)
+    result.update(
+        {
+            "device_id": device_id,
+            "run_mode": run_mode,
+            "payload": payload,
+        }
+    )
     _audit(
         "olt_tr069_reprovision",
         entity_type="olt",
         entity_id=device_id,
-        metadata={"acs": host, "run_mode": run_mode, "supported": False},
+        metadata={
+            "acs": payload.get("host"),
+            "run_mode": run_mode,
+            "supported": bool(service.config.configured),
+            "success": bool(result.get("success")),
+            "acs_status": result.get("acs_status"),
+        },
     )
-    return (
-        jsonify(
-            {
-                "success": False,
-                "device_id": device_id,
-                "acs": host,
-                "run_mode": run_mode,
-                "error": "TR-069 reprovision requires ACS integration in backend services.",
-            }
-        ),
-        501,
-    )
+    return jsonify(result), status
 
 
 @olt_bp.route("/devices/<device_id>/quick-login", methods=["GET"])
