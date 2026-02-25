@@ -26,7 +26,7 @@ const buildUrl = (endpoint: string) => {
 
 export const apiClient = {
   async request(endpoint: string, options: RequestInit = {}) {
-    const { token } = useAuthStore.getState()
+    const { token, tenantContextId } = useAuthStore.getState()
     const headers = new Headers(options.headers)
     const bodyIsFormData = typeof FormData !== 'undefined' && options.body instanceof FormData
     if (options.body && !bodyIsFormData && !headers.has('Content-Type')) {
@@ -35,6 +35,9 @@ export const apiClient = {
 
     if (token) {
       headers.set('Authorization', `Bearer ${token}`)
+    }
+    if (tenantContextId !== null && tenantContextId !== undefined) {
+      headers.set('X-Tenant-ID', String(tenantContextId))
     }
 
     // Add timeout to prevent indefinite hanging

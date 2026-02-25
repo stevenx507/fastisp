@@ -17,8 +17,10 @@ interface AuthState {
   user: User | null
   token: string | null
   isAuthenticated: boolean
+  tenantContextId: number | null
   login: (email: string, password: string) => Promise<void>
   logout: () => void
+  setTenantContext: (tenantId: number | null) => void
 }
 
 // Custom storage adapter that handles browser restrictions
@@ -54,6 +56,7 @@ export const useAuthStore = create<AuthState>()(
       user: null,
       token: null,
       isAuthenticated: false,
+      tenantContextId: null,
       login: async (email, password) => {
         const data = await apiClient.post('/auth/login', { email, password })
 
@@ -64,11 +67,14 @@ export const useAuthStore = create<AuthState>()(
           throw new Error('Respuesta de autenticación inválida.')
         }
 
-        set({ user, token, isAuthenticated: true })
+        set({ user, token, isAuthenticated: true, tenantContextId: null })
       },
       logout: () => {
-        set({ user: null, token: null, isAuthenticated: false })
-      }
+        set({ user: null, token: null, isAuthenticated: false, tenantContextId: null })
+      },
+      setTenantContext: (tenantId) => {
+        set({ tenantContextId: tenantId })
+      },
     }),
     {
       name: 'auth-storage',

@@ -605,10 +605,15 @@ def admin_required():
                 return jsonify({"error": "Token de usuario invalido."}), 401
             user = db.session.get(User, current_user_id)
             tenant_id = current_tenant_id()
-            if not user or user.role != 'admin':
+            is_platform_admin = bool(user and user.role == PLATFORM_ADMIN_ROLE)
+            if not user or (user.role != 'admin' and not is_platform_admin):
                 return jsonify({"error": "Acceso denegado. Se requiere rol de administrador."}), 403
-            if tenant_id is not None and user.tenant_id not in (None, tenant_id):
+            if is_platform_admin and tenant_id is None:
+                return jsonify({"error": "Platform admin debe seleccionar un tenant para entrar al panel ISP."}), 403
+            if not is_platform_admin and tenant_id is not None and user.tenant_id not in (None, tenant_id):
                 return jsonify({"error": "Acceso denegado para este tenant."}), 403
+            if not is_platform_admin and tenant_id is None and user.tenant_id is not None:
+                return jsonify({"error": "Admin ISP requiere contexto tenant valido."}), 403
             return fn(*args, **kwargs)
 
         return decorator
@@ -647,10 +652,15 @@ def staff_required():
                 return jsonify({"error": "Token de usuario invalido."}), 401
             user = db.session.get(User, current_user_id)
             tenant_id = current_tenant_id()
-            if not user or user.role not in STAFF_ALLOWED_ROLES:
+            is_platform_admin = bool(user and user.role == PLATFORM_ADMIN_ROLE)
+            if not user or (user.role not in STAFF_ALLOWED_ROLES and not is_platform_admin):
                 return jsonify({"error": "Acceso denegado. Se requiere rol operativo."}), 403
-            if tenant_id is not None and user.tenant_id not in (None, tenant_id):
+            if is_platform_admin and tenant_id is None:
+                return jsonify({"error": "Platform admin debe seleccionar un tenant para operar modulos ISP."}), 403
+            if not is_platform_admin and tenant_id is not None and user.tenant_id not in (None, tenant_id):
                 return jsonify({"error": "Acceso denegado para este tenant."}), 403
+            if not is_platform_admin and tenant_id is None and user.tenant_id is not None:
+                return jsonify({"error": "Rol operativo requiere contexto tenant valido."}), 403
             return fn(*args, **kwargs)
 
         return decorator

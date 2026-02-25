@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import toast from 'react-hot-toast'
+import { useNavigate } from 'react-router-dom'
 import {
   ArrowPathIcon,
   BuildingOffice2Icon,
@@ -93,7 +94,8 @@ const defaultOverview: PlatformOverview = {
 }
 
 const PlatformAdmin: React.FC = () => {
-  const { user, logout } = useAuthStore()
+  const navigate = useNavigate()
+  const { user, logout, setTenantContext } = useAuthStore()
   const [overview, setOverview] = useState<PlatformOverview>(defaultOverview)
   const [tenants, setTenants] = useState<PlatformTenantItem[]>([])
   const [planTemplates, setPlanTemplates] = useState<Record<string, TenantPlanTemplate>>(defaultPlanTemplates)
@@ -196,6 +198,10 @@ const PlatformAdmin: React.FC = () => {
       setLoading(false)
     }
   }, [])
+
+  useEffect(() => {
+    setTenantContext(null)
+  }, [setTenantContext])
 
   useEffect(() => {
     void loadPlatformData()
@@ -423,6 +429,16 @@ const PlatformAdmin: React.FC = () => {
     setAdminForm({ email: '', name: 'Admin ISP', password: '' })
   }
 
+  const openTenantAdminMode = (tenant: PlatformTenantItem) => {
+    if (!tenant.is_active) {
+      toast.error('Activa el tenant antes de entrar al modo Admin ISP')
+      return
+    }
+    setTenantContext(tenant.id)
+    toast.success(`Modo Admin ISP activo: ${tenant.name}`)
+    navigate('/admin')
+  }
+
   const submitCreateTenantAdmin = async (event: React.FormEvent) => {
     event.preventDefault()
     if (!adminTarget) return
@@ -607,6 +623,13 @@ const PlatformAdmin: React.FC = () => {
                         >
                           <UserPlusIcon className="h-4 w-4" />
                           Crear admin
+                        </button>
+                        <button
+                          onClick={() => openTenantAdminMode(tenant)}
+                          disabled={busy}
+                          className="inline-flex items-center gap-1 rounded-lg border border-amber-300/40 bg-amber-500/20 px-3 py-1.5 text-xs font-semibold text-amber-100 hover:bg-amber-500/30 disabled:opacity-60"
+                        >
+                          Entrar panel ISP
                         </button>
                       </div>
                     </div>

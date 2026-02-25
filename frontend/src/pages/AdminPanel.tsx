@@ -1,5 +1,6 @@
 ﻿import React, { useState, Fragment, useEffect } from 'react'
 import { Dialog, Transition, Menu } from '@headlessui/react'
+import { useNavigate } from 'react-router-dom'
 import {
   ChartBarIcon,
   UserGroupIcon,
@@ -51,6 +52,7 @@ import ManualPaymentModal from '../components/admin/ManualPaymentModal'
 import { apiClient } from '../lib/apiClient'
 
 const AdminPanel: React.FC = () => {
+  const navigate = useNavigate()
   const [activeView, setActiveView] = useState('dashboard')
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [showPlanModal, setShowPlanModal] = useState(false)
@@ -62,7 +64,7 @@ const AdminPanel: React.FC = () => {
     return saved ? saved === 'true' : false
   })
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({ core: true })
-  const { logout } = useAuthStore()
+  const { logout, user, tenantContextId, setTenantContext } = useAuthStore()
 
   type NotificationType = 'error' | 'warning' | 'info'
   interface Notification {
@@ -148,6 +150,12 @@ const AdminPanel: React.FC = () => {
   }, [loadNotifications])
 
   const unreadNotificationsCount = notifications.filter(n => !n.read).length
+  const isPlatformAdminMode = user?.role === 'platform_admin'
+
+  const handleExitTenantMode = () => {
+    setTenantContext(null)
+    navigate('/platform')
+  }
 
   const menuItems = React.useMemo(() => ([
     { id: 'dashboard', name: 'Dashboard', icon: ChartBarIcon },
@@ -388,8 +396,11 @@ const AdminPanel: React.FC = () => {
           <div className="flex-shrink-0 flex border-t border-white/10 p-4">
             <div className="flex items-center w-full">
               <div className="ml-3">
-                <p className="text-sm font-medium text-slate-100">Admin ISP</p>
-                <p className="text-xs text-slate-300">admin@ispmax.com</p>
+                <p className="text-sm font-medium text-slate-100">{user?.name || 'Admin ISP'}</p>
+                <p className="text-xs text-slate-300">{user?.email || 'admin@ispmax.com'}</p>
+                {isPlatformAdminMode && (
+                  <p className="text-[10px] text-amber-200">Tenant: {tenantContextId ?? 'no seleccionado'}</p>
+                )}
               </div>
             </div>
           </div>
@@ -398,6 +409,14 @@ const AdminPanel: React.FC = () => {
 
       {/* Main content */}
       <div className="lg:pl-64 flex flex-col enterprise-main relative z-10">
+        {isPlatformAdminMode && (
+          <div className="mx-4 mt-4 rounded-lg border border-amber-300/30 bg-amber-500/15 px-4 py-2 text-xs text-amber-100">
+            Modo Admin ISP por tenant. Tenant activo: {tenantContextId ?? 'no seleccionado'}.
+            <button onClick={handleExitTenantMode} className="ml-2 font-semibold underline">
+              Volver a Admin Total
+            </button>
+          </div>
+        )}
         {/* Top navbar */}
         <div className="sticky top-0 z-10 flex-shrink-0 flex h-16 enterprise-header border-b border-white/10">
           <button
@@ -470,6 +489,15 @@ const AdminPanel: React.FC = () => {
                 </Menu.Button>
                 <Transition as={Fragment} enter="transition ease-out duration-100" enterFrom="transform opacity-0 scale-95" enterTo="transform opacity-100 scale-100" leave="transition ease-in duration-75" leaveFrom="transform opacity-100 scale-100" leaveTo="transform opacity-0 scale-95">
                   <Menu.Items className="absolute right-0 z-10 mt-2 w-48 origin-top-right rounded-md bg-white py-1 shadow-lg ring-1 ring-black ring-opacity-5 focus:outline-none">
+                    {isPlatformAdminMode && (
+                      <Menu.Item>
+                        {({ active }) => (
+                          <button onClick={handleExitTenantMode} className={`${active ? 'bg-gray-100' : ''} group flex w-full items-center px-4 py-2 text-sm text-slate-700`}>
+                            <ArrowLeftOnRectangleIcon className="mr-2 h-5 w-5 text-slate-500" />Volver a Admin Total
+                          </button>
+                        )}
+                      </Menu.Item>
+                    )}
                     <Menu.Item>
                       {({ active }) => (
                         <button onClick={logout} className={`${active ? 'bg-white/10' : ''} group flex w-full items-center px-4 py-2 text-sm text-red-300`}>
