@@ -12,6 +12,116 @@ interface ClientRow {
   portal_access?: boolean
 }
 
+interface ImportPreview {
+  name?: string
+  email?: string | null
+  plan_name?: string
+  connection_type?: string
+  portal_access?: boolean
+}
+
+interface ImportResultRow {
+  row: number
+  success: boolean
+  error?: string
+  client_id?: number
+  name?: string
+  email?: string
+  preview?: ImportPreview
+}
+
+interface ImportSummary {
+  dryRun: boolean
+  requested: number
+  successCount: number
+  failedCount: number
+}
+
+const detectDelimiter = (headerLine: string): string => {
+  const commaCount = (headerLine.match(/,/g) || []).length
+  const semicolonCount = (headerLine.match(/;/g) || []).length
+  return semicolonCount > commaCount ? ";" : ","
+}
+
+const parseDelimitedRows = (content: string, delimiter: string): string[][] => {
+  const rows: string[][] = []
+  let currentRow: string[] = []
+  let currentField = ""
+  let inQuotes = false
+
+  for (let index = 0; index < content.length; index += 1) {
+    const char = content[index]
+    const nextChar = content[index + 1]
+
+    if (char === '"') {
+      if (inQuotes && nextChar === '"') {
+        currentField += '"'
+        index += 1
+      } else {
+        inQuotes = !inQuotes
+      }
+      continue
+    }
+
+    if (!inQuotes && char === delimiter) {
+      currentRow.push(currentField)
+      currentField = ""
+      continue
+    }
+
+    if (!inQuotes && (char === "\n" || char === "\r")) {
+      if (char === "\r" && nextChar === "\n") {
+        index += 1
+      }
+      currentRow.push(currentField)
+      const normalized = currentRow.map((item) => item.trim())
+      if (normalized.some((item) => item.length > 0)) {
+        rows.push(normalized)
+      }
+      currentRow = []
+      currentField = ""
+      continue
+    }
+
+    currentField += char
+  }
+
+  currentRow.push(currentField)
+  const normalized = currentRow.map((item) => item.trim())
+  if (normalized.some((item) => item.length > 0)) {
+    rows.push(normalized)
+  }
+
+  return rows
+}
+
+const parseCsvObjects = (content: string): Record<string, unknown>[] => {
+  const clean = content.replace(/^\uFEFF/, "")
+  const firstLine = clean.split(/\r?\n/, 1)[0] || ""
+  const delimiter = detectDelimiter(firstLine)
+  const rows = parseDelimitedRows(clean, delimiter)
+  if (rows.length < 2) return []
+
+  const headers = rows[0].map((header) => header.trim().toLowerCase())
+  const payload: Record<string, unknown>[] = []
+
+  for (const row of rows.slice(1)) {
+    const item: Record<string, unknown> = {}
+    headers.forEach((header, columnIndex) => {
+      if (!header) return
+      const value = (row[columnIndex] || "").trim()
+      if (value.length > 0) {
+        item[header] = value
+      }
+    })
+    if (Object.keys(item).length > 0) {
+      payload.push(item)
+    }
+  }
+
+  return payload
+}
+
 const SearchClients: React.FC = () => {
   const [query, setQuery] = useState("")
   const [statusFilter, setStatusFilter] = useState("")
@@ -21,6 +131,13 @@ const SearchClients: React.FC = () => {
   const [runningBulk, setRunningBulk] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [feedback, setFeedback] = useState("")
+
+  const [importRows, setImportRows] = useState<Record<string, unknown>[]>([])
+  const [importFileName, setImportFileName] = useState("")
+  const [importLoading, setImportLoading] = useState(false)
+  const [importFeedback, setImportFeedback] = useState("")
+  const [importResults, setImportResults] = useState<ImportResultRow[]>([])
+  const [importSummary, setImportSummary] = useState<ImportSummary | null>(null)
 
   const loadRows = async () => {
     setLoading(true)
@@ -41,14 +158,14 @@ const SearchClients: React.FC = () => {
 
   const filtered = useMemo(
     () =>
-      rows.filter((c) => {
+      rows.filter((clientRow) => {
         const token = query.toLowerCase().trim()
         if (!token) return true
         return (
-          (c.name || "").toLowerCase().includes(token) ||
-          String(c.id).includes(token) ||
-          (c.ip_address || "").toLowerCase().includes(token) ||
-          (c.email || "").toLowerCase().includes(token)
+          (clientRow.name || "").toLowerCase().includes(token) ||
+          String(clientRow.id).includes(token) ||
+          (clientRow.ip_address || "").toLowerCase().includes(token) ||
+          (clientRow.email || "").toLowerCase().includes(token)
         )
       }),
     [rows, query]
@@ -57,15 +174,17 @@ const SearchClients: React.FC = () => {
   const allFilteredSelected = filtered.length > 0 && filtered.every((row) => selectedIds.includes(row.id))
 
   const toggleRow = (clientId: number) => {
-    setSelectedIds((prev) => (prev.includes(clientId) ? prev.filter((id) => id !== clientId) : [...prev, clientId]))
+    setSelectedIds((previous) =>
+      previous.includes(clientId) ? previous.filter((id) => id !== clientId) : [...previous, clientId]
+    )
   }
 
   const toggleAllFiltered = () => {
-    setSelectedIds((prev) => {
+    setSelectedIds((previous) => {
       if (allFilteredSelected) {
-        return prev.filter((id) => !filtered.some((row) => row.id === id))
+        return previous.filter((id) => !filtered.some((row) => row.id === id))
       }
-      const merged = new Set(prev)
+      const merged = new Set(previous)
       filtered.forEach((row) => merged.add(row.id))
       return Array.from(merged.values())
     })
@@ -76,6 +195,7 @@ const SearchClients: React.FC = () => {
       setFeedback("Selecciona al menos un cliente.")
       return
     }
+
     setRunningBulk(true)
     setFeedback("")
     try {
@@ -122,9 +242,174 @@ const SearchClients: React.FC = () => {
     }
   }
 
+  const downloadCsvTemplate = () => {
+    const template = [
+      "name,plan_id,plan_name,router_id,router_name,connection_type,ip_address,email,create_portal_access,password,pppoe_username,pppoe_password",
+      "Cliente Demo,1,,,Router Principal,pppoe,,cliente.demo@isp.local,true,,,",
+    ].join("\n")
+    const blob = new Blob([template], { type: "text/csv;charset=utf-8" })
+    const url = window.URL.createObjectURL(blob)
+    const link = document.createElement("a")
+    link.href = url
+    link.download = "clientes-template.csv"
+    link.click()
+    window.URL.revokeObjectURL(url)
+  }
+
+  const onImportFileSelected = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    setImportFileName(file.name)
+    setImportResults([])
+    setImportSummary(null)
+    setImportFeedback("")
+
+    try {
+      const raw = await file.text()
+      const parsed = parseCsvObjects(raw)
+      setImportRows(parsed)
+      if (parsed.length === 0) {
+        setImportFeedback("El archivo no tiene filas validas para importar.")
+      } else {
+        setImportFeedback(`Archivo cargado: ${parsed.length} filas listas.`)
+      }
+    } catch {
+      setImportRows([])
+      setImportFeedback("No se pudo leer el archivo CSV.")
+    }
+  }
+
+  const runClientImport = async (dryRun: boolean) => {
+    if (importRows.length === 0) {
+      setImportFeedback("Carga un archivo CSV con filas validas.")
+      return
+    }
+
+    setImportLoading(true)
+    setImportFeedback("")
+    try {
+      const response = (await apiClient.post("/admin/clients/bulk-create", {
+        dry_run: dryRun,
+        rows: importRows,
+      })) as {
+        dry_run?: boolean
+        requested?: number
+        success_count?: number
+        failed_count?: number
+        results?: ImportResultRow[]
+      }
+
+      const summary: ImportSummary = {
+        dryRun: Boolean(response.dry_run),
+        requested: Number(response.requested || 0),
+        successCount: Number(response.success_count || 0),
+        failedCount: Number(response.failed_count || 0),
+      }
+      setImportSummary(summary)
+      setImportResults((response.results || []) as ImportResultRow[])
+      setImportFeedback(
+        `${summary.dryRun ? "Validacion" : "Importacion"} completada: ${summary.successCount} OK, ${summary.failedCount} con error.`
+      )
+
+      if (!summary.dryRun && summary.successCount > 0) {
+        await loadRows()
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "No se pudo ejecutar la importacion."
+      setImportFeedback(message)
+    } finally {
+      setImportLoading(false)
+    }
+  }
+
   return (
-    <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
-      <div className="mb-4 flex flex-col gap-3">
+    <div className="space-y-4 bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+      <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-sm font-semibold text-gray-900">Importacion masiva por CSV</h3>
+          <button
+            type="button"
+            onClick={downloadCsvTemplate}
+            className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-semibold text-gray-700"
+          >
+            Descargar template
+          </button>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <input type="file" accept=".csv,text/csv" onChange={onImportFileSelected} className="text-sm" />
+          {importFileName && <span className="text-xs text-gray-600">Archivo: {importFileName}</span>}
+          {importRows.length > 0 && <span className="text-xs text-gray-600">Filas: {importRows.length}</span>}
+        </div>
+        <p className="mt-2 text-xs text-gray-500">
+          Columnas soportadas: name, plan_id o plan_name, router_id o router_name, connection_type, ip_address, email,
+          create_portal_access, password, pppoe_username, pppoe_password.
+        </p>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => runClientImport(true)}
+            disabled={importLoading || importRows.length === 0}
+            className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-semibold text-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            Validar lote (dry run)
+          </button>
+          <button
+            type="button"
+            onClick={() => runClientImport(false)}
+            disabled={importLoading || importRows.length === 0}
+            className="rounded-lg bg-indigo-600 px-3 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            Importar lote
+          </button>
+          {importFeedback && <span className="text-sm text-slate-600">{importFeedback}</span>}
+        </div>
+
+        {importSummary && (
+          <div className="mt-3 rounded-lg border border-gray-200 bg-white p-3 text-sm text-gray-700">
+            <p>
+              Modo: <span className="font-semibold">{importSummary.dryRun ? "Validacion" : "Importacion"}</span> | Solicitadas:
+              <span className="font-semibold"> {importSummary.requested}</span> | OK:
+              <span className="font-semibold text-emerald-700"> {importSummary.successCount}</span> | Error:
+              <span className="font-semibold text-rose-700"> {importSummary.failedCount}</span>
+            </p>
+          </div>
+        )}
+
+        {importResults.length > 0 && (
+          <div className="mt-3 max-h-56 overflow-auto rounded-lg border border-gray-200 bg-white">
+            <table className="w-full text-xs">
+              <thead className="bg-gray-50 text-gray-600">
+                <tr>
+                  <th className="px-2 py-2 text-left">Fila</th>
+                  <th className="px-2 py-2 text-left">Estado</th>
+                  <th className="px-2 py-2 text-left">Detalle</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {importResults.map((item) => (
+                  <tr key={`import-${item.row}-${item.name || item.client_id || "row"}`}>
+                    <td className="px-2 py-2">{item.row}</td>
+                    <td className="px-2 py-2">
+                      <span className={item.success ? "text-emerald-700" : "text-rose-700"}>
+                        {item.success ? "OK" : "Error"}
+                      </span>
+                    </td>
+                    <td className="px-2 py-2 text-gray-700">
+                      {item.error ||
+                        item.name ||
+                        item.preview?.name ||
+                        (item.client_id ? `Cliente ID ${item.client_id}` : "Sin detalle")}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div className="mb-1 flex flex-col gap-3">
         <div className="flex flex-wrap items-center gap-3">
           <div className="flex min-w-[260px] flex-1 items-center gap-3">
             <MagnifyingGlassIcon className="h-5 w-5 text-gray-400" />
@@ -175,6 +460,7 @@ const SearchClients: React.FC = () => {
           {feedback && <span className="text-sm text-slate-600">{feedback}</span>}
         </div>
       </div>
+
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead className="bg-gray-50 text-gray-700">
@@ -200,18 +486,18 @@ const SearchClients: React.FC = () => {
               </tr>
             )}
             {!loading &&
-              filtered.map((c) => (
-                <tr key={c.id} className="hover:bg-gray-50">
+              filtered.map((item) => (
+                <tr key={item.id} className="hover:bg-gray-50">
                   <td className="px-3 py-2">
-                    <input type="checkbox" checked={selectedIds.includes(c.id)} onChange={() => toggleRow(c.id)} />
+                    <input type="checkbox" checked={selectedIds.includes(item.id)} onChange={() => toggleRow(item.id)} />
                   </td>
-                  <td className="px-3 py-2 font-semibold">{c.id}</td>
-                  <td className="px-3 py-2">{c.name}</td>
-                  <td className="px-3 py-2">{c.email || "-"}</td>
-                  <td className="px-3 py-2">{c.ip_address || "-"}</td>
-                  <td className="px-3 py-2">{c.plan || "-"}</td>
-                  <td className="px-3 py-2 capitalize">{c.status || "-"}</td>
-                  <td className="px-3 py-2">{c.portal_access ? "Si" : "No"}</td>
+                  <td className="px-3 py-2 font-semibold">{item.id}</td>
+                  <td className="px-3 py-2">{item.name}</td>
+                  <td className="px-3 py-2">{item.email || "-"}</td>
+                  <td className="px-3 py-2">{item.ip_address || "-"}</td>
+                  <td className="px-3 py-2">{item.plan || "-"}</td>
+                  <td className="px-3 py-2 capitalize">{item.status || "-"}</td>
+                  <td className="px-3 py-2">{item.portal_access ? "Si" : "No"}</td>
                 </tr>
               ))}
             {!loading && filtered.length === 0 && (

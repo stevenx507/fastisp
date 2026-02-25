@@ -3555,6 +3555,8 @@ def admin_create_client():
         create_portal_access = bool(email)
     if not name:
         return jsonify({"error": "name es requerido"}), 400
+    if connection_type not in {'pppoe', 'dhcp', 'static'}:
+        return jsonify({"error": "connection_type invalido"}), 400
     if not plan_id:
         return jsonify({"error": "plan_id es requerido"}), 400
     plan = db.session.get(Plan, plan_id)
@@ -3611,6 +3613,241 @@ def admin_create_client():
         payload["user"] = user.to_dict()
         payload["password"] = generated_password
     return jsonify(payload), 201
+
+
+def _resolve_plan_reference(plan_id_raw, plan_name_raw, tenant_id) -> tuple[Plan | None, str | None]:
+    plan_id = _parse_int(plan_id_raw)
+    plan_name = str(plan_name_raw or '').strip()
+    plan = db.session.get(Plan, plan_id) if plan_id else None
+
+    if plan is None and plan_name:
+        candidates = Plan.query.all()
+        lower_name = plan_name.lower()
+        for candidate in candidates:
+            if str(candidate.name or '').strip().lower() != lower_name:
+                continue
+            if tenant_id is None or candidate.tenant_id in (None, tenant_id):
+                plan = candidate
+                break
+
+    if plan is None:
+        return None, "Plan no encontrado"
+    if tenant_id is not None and plan.tenant_id not in (None, tenant_id):
+        return None, "Plan fuera del tenant"
+    return plan, None
+
+
+def _resolve_router_reference(router_id_raw, router_name_raw, tenant_id) -> tuple[MikroTikRouter | None, str | None]:
+    router_id = _parse_int(router_id_raw)
+    router_name = str(router_name_raw or '').strip()
+    router = db.session.get(MikroTikRouter, router_id) if router_id else None
+
+    if router is None and router_name:
+        candidates = MikroTikRouter.query.all()
+        lower_name = router_name.lower()
+        for candidate in candidates:
+            if str(candidate.name or '').strip().lower() != lower_name:
+                continue
+            if tenant_id is None or candidate.tenant_id in (None, tenant_id):
+                router = candidate
+                break
+
+    if router is None:
+        return None, None
+    if tenant_id is not None and router.tenant_id not in (None, tenant_id):
+        return None, "Router fuera del tenant"
+    return router, None
+
+
+def _normalize_bulk_client_row(raw_row, tenant_id, seen_emails: set[str]) -> tuple[dict | None, str | None]:
+    if not isinstance(raw_row, dict):
+        return None, "Fila invalida (debe ser objeto)"
+
+    name = str(raw_row.get('name') or raw_row.get('full_name') or '').strip()
+    if not name:
+        return None, "name es requerido"
+
+    connection_type = str(raw_row.get('connection_type') or 'pppoe').strip().lower()
+    if connection_type not in {'pppoe', 'dhcp', 'static'}:
+        return None, "connection_type invalido"
+
+    plan, plan_error = _resolve_plan_reference(
+        raw_row.get('plan_id'),
+        raw_row.get('plan_name') or raw_row.get('plan'),
+        tenant_id,
+    )
+    if plan_error:
+        return None, plan_error
+    if plan is None:
+        return None, "Plan no encontrado"
+
+    router, router_error = _resolve_router_reference(
+        raw_row.get('router_id'),
+        raw_row.get('router_name'),
+        tenant_id,
+    )
+    if router_error:
+        return None, router_error
+
+    email = str(raw_row.get('email') or '').strip().lower()
+    requested_password = str(raw_row.get('password') or '').strip()
+    create_portal_access = _parse_bool(raw_row.get('create_portal_access'))
+    if create_portal_access is None:
+        create_portal_access = bool(email)
+
+    if create_portal_access:
+        if not email:
+            return None, "email es requerido cuando create_portal_access=true"
+        if email in seen_emails:
+            return None, "email duplicado en el lote"
+        if User.query.filter_by(email=email).first():
+            return None, "email ya existe"
+        seen_emails.add(email)
+
+    ip = str(raw_row.get('ip_address') or '').strip() or None
+    pppoe_username = str(raw_row.get('pppoe_username') or '').strip() or None
+    pppoe_password = str(raw_row.get('pppoe_password') or '').strip() or None
+    if connection_type == 'pppoe':
+        base = _slugify(name) or 'cliente'
+        if not pppoe_username:
+            pppoe_username = f"{base[:12]}{secrets.randbelow(9999):04d}"
+        if not pppoe_password:
+            pppoe_password = secrets.token_hex(4)
+
+    return (
+        {
+            "name": name,
+            "connection_type": connection_type,
+            "ip_address": ip,
+            "plan": plan,
+            "router": router,
+            "email": email,
+            "create_portal_access": create_portal_access,
+            "requested_password": requested_password,
+            "pppoe_username": pppoe_username,
+            "pppoe_password": pppoe_password,
+        },
+        None,
+    )
+
+
+def _create_client_from_payload(payload: dict, tenant_id) -> tuple[Client, User | None, str | None]:
+    user = None
+    generated_password = None
+
+    if payload["create_portal_access"]:
+        generated_password = payload["requested_password"] or secrets.token_urlsafe(12)
+        user = User(
+            name=payload["name"],
+            email=payload["email"],
+            role='client',
+            tenant_id=tenant_id,
+        )
+        user.set_password(generated_password)
+        db.session.add(user)
+
+    router = payload.get("router")
+    client = Client(
+        full_name=payload["name"],
+        ip_address=payload["ip_address"],
+        connection_type=payload["connection_type"],
+        plan_id=payload["plan"].id,
+        router_id=router.id if router else None,
+        tenant_id=tenant_id,
+        pppoe_username=payload["pppoe_username"],
+        pppoe_password=payload["pppoe_password"],
+        user=user,
+    )
+    db.session.add(client)
+    db.session.commit()
+    return client, user, generated_password
+
+
+@main_bp.route('/admin/clients/bulk-create', methods=['POST'])
+@admin_required()
+def admin_bulk_create_clients():
+    data = request.get_json() or {}
+    rows = data.get('rows')
+    if not isinstance(rows, list) or not rows:
+        return jsonify({"error": "rows es requerido y debe ser una lista"}), 400
+    if len(rows) > 500:
+        return jsonify({"error": "maximo 500 filas por lote"}), 400
+
+    parsed_dry_run = _parse_bool(data.get('dry_run'))
+    dry_run = True if parsed_dry_run is None else parsed_dry_run
+    tenant_id = current_tenant_id()
+
+    results: list[dict] = []
+    normalized_rows: list[tuple[int, dict]] = []
+    seen_emails: set[str] = set()
+
+    for index, row in enumerate(rows, start=1):
+        payload, error = _normalize_bulk_client_row(row, tenant_id, seen_emails)
+        if error:
+            results.append({"row": index, "success": False, "error": error})
+            continue
+        assert payload is not None
+        normalized_rows.append((index, payload))
+        if dry_run:
+            results.append(
+                {
+                    "row": index,
+                    "success": True,
+                    "preview": {
+                        "name": payload["name"],
+                        "email": payload["email"] or None,
+                        "plan_id": payload["plan"].id,
+                        "plan_name": payload["plan"].name,
+                        "router_id": payload["router"].id if payload["router"] else None,
+                        "connection_type": payload["connection_type"],
+                        "portal_access": bool(payload["create_portal_access"]),
+                    },
+                }
+            )
+
+    if not dry_run:
+        for index, payload in normalized_rows:
+            try:
+                created_client, created_user, password = _create_client_from_payload(payload, tenant_id)
+                result_payload = {
+                    "row": index,
+                    "success": True,
+                    "client_id": created_client.id,
+                    "name": created_client.full_name,
+                }
+                if created_user:
+                    result_payload["user_id"] = created_user.id
+                    result_payload["email"] = created_user.email
+                    result_payload["password"] = password
+                results.append(result_payload)
+            except Exception as exc:
+                db.session.rollback()
+                current_app.logger.error("Error en importacion de cliente fila %s: %s", index, exc, exc_info=True)
+                results.append({"row": index, "success": False, "error": "No se pudo crear el cliente"})
+
+    success_count = len([item for item in results if item.get("success") is True])
+    failed_count = len(results) - success_count
+    _audit(
+        "clients_bulk_create",
+        entity_type="client",
+        metadata={
+            "dry_run": dry_run,
+            "requested": len(rows),
+            "success": success_count,
+            "failed": failed_count,
+        },
+    )
+
+    return jsonify(
+        {
+            "success": True,
+            "dry_run": dry_run,
+            "requested": len(rows),
+            "success_count": success_count,
+            "failed_count": failed_count,
+            "results": results,
+        }
+    ), 200
 
 
 @main_bp.route('/admin/clients/<int:client_id>/portal-access', methods=['POST'])

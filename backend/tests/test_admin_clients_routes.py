@@ -303,3 +303,108 @@ def test_admin_clients_bulk_action_suspend_and_activate(client, app, monkeypatch
         updated = Subscription.query.filter_by(client_id=ok_client_id).first()
         assert updated is not None
         assert updated.status == 'active'
+
+
+def test_admin_bulk_create_clients_dry_run_supports_plan_and_router_name(client, app):
+    admin_id, plan_id = _admin_and_plan(app, email_prefix='admin-clients-import-dry')
+    token = _token_for_user(app, admin_id)
+
+    with app.app_context():
+        router = MikroTikRouter(
+            name='Router Import Name',
+            ip_address='10.200.9.1',
+            username='admin',
+            tenant_id=None,
+        )
+        router.password = 'Secret#Router02'
+        db.session.add(router)
+        db.session.commit()
+        router_name = router.name
+
+    response = client.post(
+        '/api/admin/clients/bulk-create',
+        json={
+            'dry_run': True,
+            'rows': [
+                {
+                    'name': 'Cliente Import 1',
+                    'plan_name': f'Plan admin-clients-import-dry',
+                    'router_name': router_name,
+                    'email': 'cliente.import.1@test.local',
+                    'create_portal_access': True,
+                },
+                {
+                    'name': 'Cliente Import 2',
+                    'plan_id': plan_id,
+                    'connection_type': 'dhcp',
+                    'ip_address': '10.0.9.2',
+                    'create_portal_access': False,
+                },
+                {
+                    'plan_id': plan_id,
+                },
+            ],
+        },
+        headers={'Authorization': f'Bearer {token}'},
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['dry_run'] is True
+    assert payload['success_count'] == 2
+    assert payload['failed_count'] == 1
+    assert any(item.get('success') is False and 'name' in item.get('error', '') for item in payload['results'])
+
+    with app.app_context():
+        assert Client.query.filter(Client.full_name.like('Cliente Import%')).count() == 0
+
+
+def test_admin_bulk_create_clients_creates_partial_batch(client, app):
+    admin_id, plan_id = _admin_and_plan(app, email_prefix='admin-clients-import-create')
+    token = _token_for_user(app, admin_id)
+
+    with app.app_context():
+        existing_user = User(email='existing.import@test.local', role='client', name='Existing Import')
+        existing_user.set_password('existing-pass')
+        db.session.add(existing_user)
+        db.session.commit()
+
+    response = client.post(
+        '/api/admin/clients/bulk-create',
+        json={
+            'dry_run': False,
+            'rows': [
+                {
+                    'name': 'Cliente Crea 1',
+                    'plan_id': plan_id,
+                    'email': 'existing.import@test.local',
+                    'create_portal_access': True,
+                },
+                {
+                    'name': 'Cliente Crea 2',
+                    'plan_id': plan_id,
+                    'email': 'cliente.crea.2@test.local',
+                    'password': 'NewClientPass#1',
+                    'create_portal_access': True,
+                },
+                {
+                    'name': 'Cliente Crea 3',
+                    'plan_id': plan_id,
+                    'connection_type': 'dhcp',
+                    'create_portal_access': False,
+                },
+            ],
+        },
+        headers={'Authorization': f'Bearer {token}'},
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['dry_run'] is False
+    assert payload['success_count'] == 2
+    assert payload['failed_count'] == 1
+    assert any(item.get('success') is False and 'email ya existe' in item.get('error', '') for item in payload['results'])
+
+    with app.app_context():
+        assert Client.query.filter_by(full_name='Cliente Crea 2').first() is not None
+        assert Client.query.filter_by(full_name='Cliente Crea 3').first() is not None
+        created_user = User.query.filter_by(email='cliente.crea.2@test.local').first()
+        assert created_user is not None
