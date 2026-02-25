@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import os
 import secrets
 
 from app import db
@@ -71,8 +72,22 @@ def seed_data():
     db.session.commit()
 
     admin_password = secrets.token_urlsafe(12)
+    platform_admin_password = secrets.token_urlsafe(12)
     client_1_password = secrets.token_urlsafe(12)
     client_2_password = secrets.token_urlsafe(12)
+
+    create_platform_admin = str(os.environ.get("SEED_CREATE_PLATFORM_ADMIN", "true")).strip().lower() in {"1", "true", "yes", "on"}
+    platform_admin_email = str(os.environ.get("SEED_PLATFORM_ADMIN_EMAIL", "platform@ispfast.local")).strip().lower() or "platform@ispfast.local"
+
+    if create_platform_admin:
+        platform_admin_user = User(
+            name="Platform Admin",
+            email=platform_admin_email,
+            role="platform_admin",
+            tenant_id=None,
+        )
+        platform_admin_user.set_password(platform_admin_password)
+        db.session.add(platform_admin_user)
 
     admin_user = User(
         name="Admin Principal",
@@ -181,6 +196,8 @@ def seed_data():
     db.session.commit()
     print("Sample data has been successfully seeded to the database!")
     print("Seed credentials (store securely):")
+    if create_platform_admin:
+        print(f"  {platform_admin_email} / {platform_admin_password} (platform_admin)")
     print(f"  admin@ispfast.local / {admin_password}")
     print(f"  cliente@ispfast.local / {client_1_password}")
     print(f"  ana.gomez@example.com / {client_2_password}")

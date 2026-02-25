@@ -77,3 +77,10 @@ GEOIP_ALLOWLIST=   # ej. CO,PE,CL si quieres filtrar países
 - Conectar gateway de pago local definitivo (Yape/Nequi/transferencia con comprobante).
 - Activar almacenamiento de backups en bucket S3/Backblaze.
 - Añadir suite E2E (Playwright) y pruebas de carga (k6) en CI.
+
+## Acceso por roles
+- Guia operativa completa: `docs/operations/role-access.md`
+- Roles activos:
+  - `platform_admin` (admin total, panel `/platform`)
+  - `admin` (admin ISP, panel `/admin`)
+  - `client` (panel cliente `/dashboard`)
