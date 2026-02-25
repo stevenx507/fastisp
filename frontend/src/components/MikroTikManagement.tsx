@@ -373,7 +373,11 @@ const MikroTikManagement: React.FC = () => {
       if (tenantContextId !== null && tenantContextId !== undefined) {
         headers['X-Tenant-ID'] = String(tenantContextId)
       }
-      const url = path.startsWith('http') ? path : `${API_BASE}${path}`
+      let normalizedPath = path.startsWith('/') ? path : `/${path}`
+      if (API_BASE.endsWith('/api') && (normalizedPath === '/api' || normalizedPath.startsWith('/api/'))) {
+        normalizedPath = normalizedPath.slice(4) || '/'
+      }
+      const url = path.startsWith('http') ? path : `${API_BASE}${normalizedPath}`
       return fetch(url, { ...options, headers }).then(async (res) => {
         if (res.status === 401) {
           safeStorage.removeItem('token')
