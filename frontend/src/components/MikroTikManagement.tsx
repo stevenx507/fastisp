@@ -297,7 +297,7 @@ const MikroTikManagement: React.FC = () => {
   const [bthAllowLan, setBthAllowLan] = useState(true)
   const [changeTicket, setChangeTicket] = useState('')
   const [preflightAck, setPreflightAck] = useState(false)
-  const [wireGuardWriteProbe, setWireGuardWriteProbe] = useState(true)
+  const [wireGuardWriteProbe, setWireGuardWriteProbe] = useState(false)
   const [wireGuardBootstrapOnboard, setWireGuardBootstrapOnboard] = useState(false)
   const [wireGuardOnboarding, setWireGuardOnboarding] = useState(false)
   const [routerForm, setRouterForm] = useState<RouterFormState>({
@@ -762,7 +762,12 @@ const MikroTikManagement: React.FC = () => {
         addToast('success', `WireGuard importado: ${payload.source_file || archiveFile.name}`)
       } catch (error) {
         console.error('Error importing WireGuard archive:', error)
-        addToast('error', 'Error de red importando WireGuard')
+        const message = error instanceof Error ? error.message : ''
+        if (message.toLowerCase().includes('abort')) {
+          addToast('error', 'Solicitud interrumpida. Reintenta con sesion activa.')
+        } else {
+          addToast('error', 'Error de red importando WireGuard')
+        }
       } finally {
         setWireGuardImporting(false)
       }
@@ -838,7 +843,12 @@ const MikroTikManagement: React.FC = () => {
         }
       } catch (error) {
         console.error('Error onboarding WireGuard archive:', error)
-        addToast('error', 'Error de red durante onboarding')
+        const message = error instanceof Error ? error.message : ''
+        if (message.toLowerCase().includes('abort')) {
+          addToast('error', 'Solicitud interrumpida. Reingresa y prueba nuevamente.')
+        } else {
+          addToast('error', 'Error de red durante onboarding')
+        }
       } finally {
         setWireGuardOnboarding(false)
       }
@@ -1182,18 +1192,18 @@ const MikroTikManagement: React.FC = () => {
               </p>
             </div>
             <button
-              onClick={handleWireGuardFilePick}
-              disabled={wireGuardImporting}
-              className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
-            >
-              {wireGuardImporting ? 'Importando...' : 'Importar ZIP WireGuard'}
-            </button>
-            <button
               onClick={handleWireGuardOnboardFilePick}
               disabled={wireGuardOnboarding}
               className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-60"
             >
-              {wireGuardOnboarding ? 'Onboarding...' : 'Onboarding 1 clic'}
+              {wireGuardOnboarding ? 'Conectando...' : 'Importar + conexion auto'}
+            </button>
+            <button
+              onClick={handleWireGuardFilePick}
+              disabled={wireGuardImporting}
+              className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
+            >
+              {wireGuardImporting ? 'Importando...' : 'Solo previsualizar ZIP'}
             </button>
             <input
               ref={wireGuardFileInputRef}
