@@ -14,8 +14,10 @@ from app.tenancy import current_tenant_id, tenant_access_allowed
 import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+import io
 import re
 import uuid
+import zipfile
 
 mikrotik_bp = Blueprint('mikrotik', __name__)
 logger = logging.getLogger(__name__)
@@ -24,6 +26,136 @@ logger = logging.getLogger(__name__)
 # For production deployments this can be moved to DB or Redis.
 ENTERPRISE_CHANGELOG: Dict[str, List[Dict[str, Any]]] = {}
 ENTERPRISE_CHANGE_INDEX: Dict[str, Dict[str, Any]] = {}
+WIREGUARD_IMPORT_MAX_BYTES = 2 * 1024 * 1024
+
+
+def _decode_text_payload(raw_payload: bytes) -> str:
+    for encoding in ('utf-8-sig', 'utf-8', 'latin-1'):
+        try:
+            return raw_payload.decode(encoding)
+        except Exception:
+            continue
+    return raw_payload.decode('utf-8', errors='ignore')
+
+
+def _split_csv_values(raw_value: str) -> List[str]:
+    return [part.strip() for part in str(raw_value or '').split(',') if part.strip()]
+
+
+def _parse_wireguard_endpoint(raw_endpoint: str) -> Dict[str, Any]:
+    endpoint = str(raw_endpoint or '').strip()
+    if not endpoint:
+        return {'endpoint': '', 'host': '', 'port': None}
+
+    host = endpoint
+    port: Optional[int] = None
+
+    ipv6_match = re.match(r'^\[(?P<host>.+)\](?::(?P<port>\d{1,5}))?$', endpoint)
+    if ipv6_match:
+        host = str(ipv6_match.group('host') or '').strip()
+        raw_port = ipv6_match.group('port')
+        if raw_port:
+            try:
+                parsed = int(raw_port)
+                if 1 <= parsed <= 65535:
+                    port = parsed
+            except Exception:
+                pass
+        return {'endpoint': endpoint, 'host': host, 'port': port}
+
+    if ':' in endpoint:
+        possible_host, possible_port = endpoint.rsplit(':', 1)
+        if possible_port.isdigit():
+            parsed = int(possible_port)
+            if 1 <= parsed <= 65535:
+                host = possible_host.strip()
+                port = parsed
+
+    return {'endpoint': endpoint, 'host': host.strip(), 'port': port}
+
+
+def _parse_wireguard_config(config_text: str) -> Dict[str, Any]:
+    section = ''
+    interface: Dict[str, str] = {}
+    peer: Dict[str, str] = {}
+    peer_found = False
+
+    for raw_line in str(config_text or '').splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith('#') or line.startswith(';'):
+            continue
+        if line.startswith('[') and line.endswith(']'):
+            section = line[1:-1].strip().lower()
+            if section == 'peer' and not peer_found:
+                peer_found = True
+            continue
+        if '=' not in line:
+            continue
+        key, value = line.split('=', 1)
+        normalized_key = key.strip().lower().replace(' ', '_')
+        normalized_value = value.strip()
+        if section == 'interface':
+            interface[normalized_key] = normalized_value
+        elif section == 'peer' and peer_found:
+            if normalized_key not in peer:
+                peer[normalized_key] = normalized_value
+
+    endpoint_payload = _parse_wireguard_endpoint(peer.get('endpoint', ''))
+    addresses = _split_csv_values(interface.get('address', ''))
+    allowed_ips = _split_csv_values(peer.get('allowedips', ''))
+
+    has_core_fields = bool(interface.get('privatekey')) and bool(peer.get('publickey'))
+    return {
+        'is_wireguard_config': has_core_fields,
+        'interface_private_key': interface.get('privatekey', ''),
+        'interface_addresses': addresses,
+        'interface_dns': _split_csv_values(interface.get('dns', '')),
+        'peer_public_key': peer.get('publickey', ''),
+        'peer_allowed_ips': allowed_ips,
+        'peer_persistent_keepalive': peer.get('persistentkeepalive', ''),
+        'endpoint': endpoint_payload.get('endpoint', ''),
+        'endpoint_host': endpoint_payload.get('host', ''),
+        'endpoint_port': endpoint_payload.get('port'),
+    }
+
+
+def _read_wireguard_config_from_upload() -> tuple[str, str]:
+    upload = request.files.get('archive') or request.files.get('file')
+    if upload is None:
+        raise ValueError('archive file is required')
+
+    raw_payload = upload.read() or b''
+    if len(raw_payload) == 0:
+        raise ValueError('archive file is empty')
+    if len(raw_payload) > WIREGUARD_IMPORT_MAX_BYTES:
+        raise ValueError('archive exceeds 2MB limit')
+
+    source_name = str(upload.filename or 'wireguard')
+    lowered_name = source_name.lower()
+    is_zip = lowered_name.endswith('.zip') or raw_payload.startswith(b'PK')
+
+    if not is_zip:
+        return _decode_text_payload(raw_payload), source_name
+
+    with zipfile.ZipFile(io.BytesIO(raw_payload)) as archive:
+        members = [name for name in archive.namelist() if not name.endswith('/')]
+        if not members:
+            raise ValueError('zip archive has no files')
+
+        conf_candidates = [name for name in members if name.lower().endswith(('.conf', '.txt', '.cfg'))]
+        ordered_members = conf_candidates + [name for name in members if name not in conf_candidates]
+
+        for member in ordered_members:
+            try:
+                payload = archive.read(member)
+            except Exception:
+                continue
+            text = _decode_text_payload(payload)
+            lowered = text.lower()
+            if '[interface]' in lowered and '[peer]' in lowered:
+                return text, member
+
+    raise ValueError('no WireGuard configuration found in archive')
 
 def _test_router_connection(router: MikroTikRouter) -> bool:
     try:
@@ -313,6 +445,48 @@ def _register_change(
     del log[250:]
     ENTERPRISE_CHANGE_INDEX[change_id] = entry
     return entry
+
+
+@mikrotik_bp.route('/wireguard/import', methods=['POST'])
+@admin_required()
+def import_wireguard_archive():
+    """
+    Import a WireGuard export (zip/conf) and return quick onboarding suggestions.
+    """
+    try:
+        config_text, source_file = _read_wireguard_config_from_upload()
+        parsed = _parse_wireguard_config(config_text)
+        if not parsed.get('is_wireguard_config'):
+            return jsonify({'success': False, 'error': 'File is not a valid WireGuard config'}), 400
+
+        endpoint_host = str(parsed.get('endpoint_host') or '').strip()
+        safe_host = re.sub(r'[^a-zA-Z0-9.-]+', '-', endpoint_host).strip('-') if endpoint_host else ''
+        suggested_name = f'Nodo-{safe_host}'[:80] if safe_host else ''
+
+        suggestions = {
+            'router_name': suggested_name,
+            'router_ip_or_host': endpoint_host,
+            'api_port': 8728,
+            'bth_private_key': str(parsed.get('interface_private_key') or ''),
+            'bth_user_name': 'noc-vps',
+        }
+
+        return jsonify(
+            {
+                'success': True,
+                'source_file': source_file,
+                'wireguard': parsed,
+                'suggestions': suggestions,
+            }
+        ), 200
+    except zipfile.BadZipFile:
+        return jsonify({'success': False, 'error': 'Invalid zip archive'}), 400
+    except ValueError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    except Exception as exc:
+        logger.error('Error importing WireGuard archive: %s', exc, exc_info=True)
+        return jsonify({'success': False, 'error': 'Could not parse WireGuard archive'}), 500
+
 
 @mikrotik_bp.route('/routers', methods=['GET'])
 @admin_required()

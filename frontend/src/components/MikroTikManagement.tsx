@@ -164,6 +164,31 @@ interface EnterpriseChangeLogResponse {
   error?: string
 }
 
+interface WireGuardImportData {
+  endpoint?: string
+  endpoint_host?: string
+  endpoint_port?: number | null
+  interface_addresses?: string[]
+  interface_private_key?: string
+  peer_allowed_ips?: string[]
+}
+
+interface WireGuardImportSuggestions {
+  router_name?: string
+  router_ip_or_host?: string
+  api_port?: number
+  bth_private_key?: string
+  bth_user_name?: string
+}
+
+interface WireGuardImportResponse {
+  success?: boolean
+  error?: string
+  source_file?: string
+  wireguard?: WireGuardImportData
+  suggestions?: WireGuardImportSuggestions
+}
+
 interface RouterFormState {
   name: string
   ip_address: string
@@ -222,6 +247,7 @@ const MikroTikManagement: React.FC = () => {
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [confirmMessage, setConfirmMessage] = useState('')
   const confirmActionRef = useRef<(() => void) | null>(null)
+  const wireGuardFileInputRef = useRef<HTMLInputElement | null>(null)
   const [sidePanel, setSidePanel] = useState<'none' | 'logs' | 'dhcp' | 'wifi'>('none')
   const [quickConnect, setQuickConnect] = useState<RouterQuickConnectResponse | null>(null)
   const [bootstrapResult, setBootstrapResult] = useState<RouterBackToHomeBootstrapData | null>(null)
@@ -248,6 +274,8 @@ const MikroTikManagement: React.FC = () => {
   const [failoverCount, setFailoverCount] = useState('4')
   const [failoverResult, setFailoverResult] = useState<EnterpriseFailoverReport | null>(null)
   const [enterpriseChangeLog, setEnterpriseChangeLog] = useState<EnterpriseChangeLogEntry[]>([])
+  const [wireGuardImporting, setWireGuardImporting] = useState(false)
+  const [wireGuardImportSummary, setWireGuardImportSummary] = useState<WireGuardImportResponse | null>(null)
   const tenantContextId = useAuthStore((state) => state.tenantContextId)
 
   const addToast = useCallback((type: Toast['type'], message: string) => {
@@ -618,6 +646,67 @@ const MikroTikManagement: React.FC = () => {
     }
   }
 
+  const importWireGuardArchive = useCallback(
+    async (archiveFile: File) => {
+      if (!archiveFile) return
+      setWireGuardImporting(true)
+      try {
+        const formData = new FormData()
+        formData.append('archive', archiveFile)
+        const response = await apiFetch('/api/mikrotik/wireguard/import', {
+          method: 'POST',
+          body: formData,
+        })
+        const payload = (await safeJson(response)) as WireGuardImportResponse | null
+        if (!response.ok || !payload?.success) {
+          addToast('error', payload?.error || `No se pudo importar archivo WireGuard (${response.status})`)
+          return
+        }
+
+        setWireGuardImportSummary(payload)
+        const suggestions = payload.suggestions || {}
+        setRouterForm((prev) => ({
+          ...prev,
+          name: prev.name.trim() ? prev.name : String(suggestions.router_name || prev.name || ''),
+          ip_address: prev.ip_address.trim() ? prev.ip_address : String(suggestions.router_ip_or_host || prev.ip_address || ''),
+          api_port: String(suggestions.api_port || prev.api_port || '8728'),
+        }))
+
+        const importedPrivateKey = String(suggestions.bth_private_key || '').trim()
+        if (importedPrivateKey && !bthPrivateKey.trim()) {
+          setBthPrivateKey(importedPrivateKey)
+        }
+        const importedBthUser = String(suggestions.bth_user_name || '').trim()
+        if (importedBthUser && !bthUserName.trim()) {
+          setBthUserName(importedBthUser)
+        }
+
+        addToast('success', `WireGuard importado: ${payload.source_file || archiveFile.name}`)
+      } catch (error) {
+        console.error('Error importing WireGuard archive:', error)
+        addToast('error', 'Error de red importando WireGuard')
+      } finally {
+        setWireGuardImporting(false)
+      }
+    },
+    [addToast, apiFetch, bthPrivateKey, bthUserName, safeJson]
+  )
+
+  const handleWireGuardFilePick = useCallback(() => {
+    wireGuardFileInputRef.current?.click()
+  }, [])
+
+  const handleWireGuardFileChange = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      const archiveFile = event.target.files?.[0]
+      if (archiveFile) {
+        void importWireGuardArchive(archiveFile)
+      }
+      event.target.value = ''
+    },
+    [importWireGuardArchive]
+  )
+
   const createRouter = async () => {
     if (!routerForm.name.trim() || !routerForm.ip_address.trim() || !routerForm.username.trim() || !routerForm.password.trim()) {
       addToast('error', 'Completa nombre, IP, usuario y password')
@@ -898,6 +987,45 @@ const MikroTikManagement: React.FC = () => {
         <p className="mb-3 text-sm text-gray-600">
           Agrega routers nuevos con sus credenciales de API. Luego usa la pestana Configuracion para scripts de conexion remota.
         </p>
+        <div className="mb-3 rounded-lg border border-blue-200 bg-blue-50 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-blue-800">Importar WireGuard</p>
+              <p className="text-xs text-blue-700">
+                Carga ZIP/CONF exportado para autocompletar host del router y private key para bootstrap BTH.
+              </p>
+            </div>
+            <button
+              onClick={handleWireGuardFilePick}
+              disabled={wireGuardImporting}
+              className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
+            >
+              {wireGuardImporting ? 'Importando...' : 'Importar ZIP WireGuard'}
+            </button>
+            <input
+              ref={wireGuardFileInputRef}
+              type="file"
+              accept=".zip,.conf,.cfg,.txt"
+              className="hidden"
+              onChange={handleWireGuardFileChange}
+            />
+          </div>
+          {wireGuardImportSummary?.success && (
+            <div className="mt-2 rounded border border-blue-300 bg-white p-2 text-xs text-blue-900">
+              <p>
+                Archivo: <strong>{wireGuardImportSummary.source_file || '-'}</strong>
+              </p>
+              <p>
+                Endpoint: <strong>{wireGuardImportSummary.wireguard?.endpoint_host || '-'}</strong>
+                {wireGuardImportSummary.wireguard?.endpoint_port ? `:${wireGuardImportSummary.wireguard?.endpoint_port}` : ''}
+              </p>
+              <p>
+                Allowed IPs:{' '}
+                <strong>{(wireGuardImportSummary.wireguard?.peer_allowed_ips || []).join(', ') || '-'}</strong>
+              </p>
+            </div>
+          )}
+        </div>
         <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
           <input
             value={routerForm.name}

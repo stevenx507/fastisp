@@ -1,4 +1,8 @@
-﻿import app.routes.mikrotik as mikrotik_routes
+import app.routes.mikrotik as mikrotik_routes
+
+import io
+import zipfile
+
 
 from app import db
 from app.models import AdminSystemSetting, User
@@ -358,3 +362,52 @@ def test_change_ticket_guard_can_be_disabled_by_setting(client, app, monkeypatch
     )
     assert reboot_response.status_code == 200
     assert reboot_response.get_json()['success'] is True
+
+
+def test_wireguard_zip_import_returns_onboarding_suggestions(client, app):
+    headers = _admin_headers(client, app)
+    archive_buffer = io.BytesIO()
+    with zipfile.ZipFile(archive_buffer, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            'wg/client.conf',
+            '\n'.join(
+                [
+                    '[Interface]',
+                    'PrivateKey = ABC123PRIVATE',
+                    'Address = 10.66.66.2/32',
+                    '',
+                    '[Peer]',
+                    'PublicKey = XYZ456PUBLIC',
+                    'Endpoint = edge-router.fastisp.cloud:51820',
+                    'AllowedIPs = 0.0.0.0/0, ::/0',
+                    'PersistentKeepalive = 25',
+                ]
+            ),
+        )
+    archive_buffer.seek(0)
+
+    response = client.post(
+        '/api/mikrotik/wireguard/import',
+        data={'archive': (archive_buffer, 'wireguard-export.zip')},
+        headers=headers,
+        content_type='multipart/form-data',
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['success'] is True
+    assert payload['wireguard']['endpoint_host'] == 'edge-router.fastisp.cloud'
+    assert payload['wireguard']['endpoint_port'] == 51820
+    assert payload['suggestions']['router_ip_or_host'] == 'edge-router.fastisp.cloud'
+    assert payload['suggestions']['bth_private_key'] == 'ABC123PRIVATE'
+
+
+def test_wireguard_zip_import_requires_archive_file(client, app):
+    headers = _admin_headers(client, app)
+    response = client.post(
+        '/api/mikrotik/wireguard/import',
+        data={},
+        headers=headers,
+        content_type='multipart/form-data',
+    )
+    assert response.status_code == 400
+    assert 'archive file is required' in str(response.get_json().get('error', ''))
