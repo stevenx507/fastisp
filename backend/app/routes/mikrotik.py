@@ -119,6 +119,122 @@ def _parse_wireguard_config(config_text: str) -> Dict[str, Any]:
     }
 
 
+def _probe_write_access(service: MikroTikService) -> Dict[str, Any]:
+    """
+    Probe write permissions by creating/removing a temporary system script.
+    """
+    script_name = f'fastisp-write-probe-{uuid.uuid4().hex[:8]}'
+    script_api = None
+    try:
+        script_api = service.api.get_resource('/system/script')
+        script_api.add(name=script_name, source=':put "fastisp-write-probe"', comment='fastisp-write-probe')
+        created = script_api.get(name=script_name) or []
+        if not created:
+            return {'ok': False, 'detail': 'No se pudo confirmar creacion de script temporal.', 'severity': 'critical'}
+        return {'ok': True, 'detail': 'Permisos de escritura API confirmados.', 'severity': 'ok'}
+    except Exception as exc:
+        return {'ok': False, 'detail': f'Sin permisos de escritura API: {exc}', 'severity': 'critical'}
+    finally:
+        try:
+            if script_api is not None:
+                created = script_api.get(name=script_name) or []
+                for item in created:
+                    script_id = str(item.get('.id') or item.get('id') or '').strip()
+                    if script_id:
+                        script_api.remove(id=script_id)
+        except Exception:
+            pass
+
+
+def _build_router_readiness_payload(service: MikroTikService, run_write_probe: bool = False) -> Dict[str, Any]:
+    checks: List[Dict[str, Any]] = []
+    recommendations: List[str] = []
+
+    runtime = _collect_back_to_home_runtime(service)
+    reachable = bool(runtime.get('reachable'))
+    checks.append(
+        {
+            'id': 'api_connectivity',
+            'ok': reachable,
+            'detail': 'Router reachable via API.' if reachable else 'Router API unreachable from backend.',
+            'severity': 'critical' if not reachable else 'ok',
+        }
+    )
+
+    version_text = str(runtime.get('routeros_version') or '').strip()
+    supports_bth = bool(runtime.get('supported'))
+    supports_bth_users = bool(runtime.get('bth_users_supported'))
+    checks.append(
+        {
+            'id': 'routeros_bth_support',
+            'ok': supports_bth,
+            'detail': f'RouterOS {version_text or "unknown"} (BTH requiere 7.12+).',
+            'severity': 'warning' if not supports_bth else 'ok',
+        }
+    )
+    checks.append(
+        {
+            'id': 'routeros_bth_users_support',
+            'ok': supports_bth_users,
+            'detail': f'BTH users API {"disponible" if supports_bth_users else "no disponible"} (7.14+ recomendado).',
+            'severity': 'warning' if not supports_bth_users else 'ok',
+        }
+    )
+
+    ddns_enabled = bool(runtime.get('ddns_enabled'))
+    checks.append(
+        {
+            'id': 'cloud_ddns',
+            'ok': ddns_enabled,
+            'detail': 'DDNS habilitado en /ip cloud.' if ddns_enabled else 'DDNS no habilitado en /ip cloud.',
+            'severity': 'warning' if not ddns_enabled else 'ok',
+        }
+    )
+
+    if run_write_probe and reachable:
+        write_probe = _probe_write_access(service)
+        checks.append({'id': 'api_write_access', **write_probe})
+    else:
+        checks.append(
+            {
+                'id': 'api_write_access',
+                'ok': False,
+                'detail': 'Write probe omitido. Usa write_probe=true para validar permisos de escritura.',
+                'severity': 'warning',
+            }
+        )
+
+    if not reachable:
+        recommendations.append('Validar ruta VPN/BTH y firewall de gestion para permitir API desde el backend.')
+    if reachable and run_write_probe and not checks[-1].get('ok'):
+        recommendations.append('Otorgar permisos write/policy al usuario API en MikroTik.')
+    if not supports_bth:
+        recommendations.append('Actualizar RouterOS a 7.12+ para soporte Back To Home.')
+    if supports_bth and not supports_bth_users:
+        recommendations.append('Actualizar RouterOS a 7.14+ para gestion API de usuarios BTH.')
+    if not ddns_enabled:
+        recommendations.append('Habilitar DDNS en /ip cloud para mejorar operacion remota.')
+
+    critical_checks = [item for item in checks if str(item.get('severity') or '') == 'critical']
+    blockers = [{'id': item.get('id'), 'detail': item.get('detail')} for item in critical_checks if not item.get('ok')]
+
+    total_score = 0
+    for item in checks:
+        if item.get('ok'):
+            total_score += 100
+    score = int(round(total_score / max(1, len(checks))))
+
+    return {
+        'score': score,
+        'checks': checks,
+        'blockers': blockers,
+        'recommendations': recommendations,
+        'routeros_version': version_text or None,
+        'runtime': runtime,
+        'write_probe_enabled': bool(run_write_probe),
+    }
+
+
 def _read_wireguard_config_from_upload() -> tuple[str, str]:
     upload = request.files.get('archive') or request.files.get('file')
     if upload is None:
@@ -280,8 +396,10 @@ def _change_control_guard(required_default: bool = True):
         return None
 
     data = request.get_json(silent=True) or {}
+    form = request.form or {}
     ticket = str(
         data.get('change_ticket')
+        or form.get('change_ticket')
         or request.args.get('change_ticket')
         or request.headers.get('X-Change-Ticket')
         or ''
@@ -297,7 +415,11 @@ def _preflight_guard(required_default: bool = True):
         return None
 
     data = request.get_json(silent=True) or {}
-    preflight_ack = _as_bool(data.get('preflight_ack'), default=False)
+    form = request.form or {}
+    raw_preflight_ack = data.get('preflight_ack')
+    if raw_preflight_ack in (None, ''):
+        raw_preflight_ack = form.get('preflight_ack')
+    preflight_ack = _as_bool(raw_preflight_ack, default=False)
     if preflight_ack:
         return None
     return jsonify({'success': False, 'error': 'preflight_ack=true is required for this action'}), 400
@@ -486,6 +608,186 @@ def import_wireguard_archive():
     except Exception as exc:
         logger.error('Error importing WireGuard archive: %s', exc, exc_info=True)
         return jsonify({'success': False, 'error': 'Could not parse WireGuard archive'}), 500
+
+
+@mikrotik_bp.route('/wireguard/onboard', methods=['POST'])
+@admin_required()
+def onboard_router_from_wireguard_archive():
+    """
+    One-click onboarding:
+    1) parse WireGuard export
+    2) create/update router inventory
+    3) run readiness checks
+    4) optional Back To Home bootstrap
+    """
+    try:
+        config_text, source_file = _read_wireguard_config_from_upload()
+        parsed = _parse_wireguard_config(config_text)
+        if not parsed.get('is_wireguard_config'):
+            return jsonify({'success': False, 'error': 'File is not a valid WireGuard config'}), 400
+    except zipfile.BadZipFile:
+        return jsonify({'success': False, 'error': 'Invalid zip archive'}), 400
+    except ValueError as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 400
+    except Exception as exc:
+        logger.error('Error parsing WireGuard archive for onboarding: %s', exc, exc_info=True)
+        return jsonify({'success': False, 'error': 'Could not parse WireGuard archive'}), 500
+
+    form = request.form or {}
+    endpoint_host = str(form.get('ip_address') or parsed.get('endpoint_host') or '').strip()
+    if not endpoint_host:
+        return jsonify({'success': False, 'error': 'ip_address or WireGuard endpoint host is required'}), 400
+
+    safe_host = re.sub(r'[^a-zA-Z0-9.-]+', '-', endpoint_host).strip('-')
+    suggested_name = f'Nodo-{safe_host}'[:80] if safe_host else 'Nodo-MikroTik'
+
+    name = str(form.get('name') or suggested_name).strip() or suggested_name
+    username = str(form.get('username') or '').strip()
+    password = str(form.get('password') or '').strip()
+    if not username:
+        return jsonify({'success': False, 'error': 'username is required'}), 400
+    if not password:
+        return jsonify({'success': False, 'error': 'password is required'}), 400
+
+    try:
+        api_port = int(form.get('api_port') or 8728)
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': 'api_port must be integer'}), 400
+    if api_port < 1 or api_port > 65535:
+        return jsonify({'success': False, 'error': 'api_port must be between 1 and 65535'}), 400
+
+    update_existing = _as_bool(form.get('update_existing'), default=True)
+    run_write_probe = _as_bool(form.get('write_probe'), default=True)
+    bootstrap_bth = _as_bool(form.get('bootstrap_bth'), default=False)
+    bth_user_name = str(form.get('bth_user_name') or 'noc-vps').strip() or 'noc-vps'
+    bth_private_key = str(form.get('bth_private_key') or parsed.get('interface_private_key') or '').strip()
+    bth_allow_lan = _as_bool(form.get('bth_allow_lan'), default=True)
+    replace_existing_user = _as_bool(form.get('replace_existing_user'), default=True)
+    update_time = _as_bool(form.get('update_time'), default=True)
+    ddns_enabled = _as_bool(form.get('ddns_enabled'), default=True)
+    enable_vpn = _as_bool(form.get('enable_vpn'), default=True)
+    comment = str(form.get('comment') or 'FastISP VPS').strip() or 'FastISP VPS'
+
+    if bootstrap_bth:
+        guard_error = _live_guard(require_preflight=True, required_default=True)
+        if guard_error:
+            return guard_error
+        if not bth_private_key:
+            return jsonify({'success': False, 'error': 'bth_private_key is required for bootstrap'}), 400
+
+    tenant_id = current_tenant_id()
+    existing = _tenant_router_query().filter_by(ip_address=endpoint_host).first()
+    created = False
+    reused_existing = False
+
+    if existing:
+        router = existing
+        reused_existing = True
+        if not update_existing:
+            return jsonify({'success': False, 'error': 'Router with this IP already exists'}), 409
+        router.name = name
+        router.username = username
+        router.password = password
+        router.api_port = api_port
+        router.is_active = True
+        db.session.add(router)
+        db.session.commit()
+    else:
+        router = MikroTikRouter(
+            name=name,
+            ip_address=endpoint_host,
+            username=username,
+            api_port=api_port,
+            is_active=True,
+            tenant_id=tenant_id,
+        )
+        router.password = password
+        db.session.add(router)
+        db.session.commit()
+        created = True
+
+    readiness_payload: Dict[str, Any] = {
+        'score': 0,
+        'checks': [],
+        'blockers': [{'id': 'api_connectivity', 'detail': 'No se pudo evaluar readiness'}],
+        'recommendations': ['Validar conectividad API con el router.'],
+        'runtime': {'reachable': False},
+        'write_probe_enabled': run_write_probe,
+    }
+    bootstrap_payload: Optional[Dict[str, Any]] = None
+
+    try:
+        with MikroTikService(router.id) as service:
+            readiness_payload = _build_router_readiness_payload(service, run_write_probe=run_write_probe)
+
+            if bootstrap_bth:
+                if not service.api:
+                    return jsonify({'success': False, 'error': 'Could not connect to router for bootstrap'}), 502
+
+                safe_name = _script_escape(bth_user_name)
+                safe_key = _script_escape(bth_private_key)
+                safe_comment = _script_escape(comment)
+                script_lines: List[str] = []
+                if ddns_enabled:
+                    script_lines.append(f"/ip/cloud/set ddns-enabled=yes update-time={'yes' if update_time else 'no'}")
+                if enable_vpn:
+                    script_lines.append('/ip/cloud/set back-to-home-vpn=enabled')
+                if replace_existing_user:
+                    script_lines.append(f'/ip/cloud/back-to-home-users/remove [find where name="{safe_name}"]')
+                script_lines.append(
+                    f'/ip/cloud/back-to-home-users/add name="{safe_name}" private-key="{safe_key}" '
+                    f'allow-lan={"yes" if bth_allow_lan else "no"} comment="{safe_comment}" disabled=no'
+                )
+                script_lines.append('/ip/cloud/print')
+                script_content = '\n'.join(script_lines)
+
+                exec_result = service.execute_script(script_content)
+                result = exec_result if isinstance(exec_result, dict) else {'success': bool(exec_result), 'result': str(exec_result)}
+                runtime = _collect_back_to_home_runtime(service)
+                users = runtime.get('users') if isinstance(runtime.get('users'), list) else []
+                user_visible = any(str(item.get('name') or '').strip() == bth_user_name for item in users)
+
+                bootstrap_payload = {
+                    'success': bool(result.get('success')),
+                    'script': script_content,
+                    'result': result,
+                    'runtime': runtime,
+                    'user_name': bth_user_name,
+                    'user_visible_after_run': user_visible,
+                }
+    except Exception as exc:
+        logger.error('Error on WireGuard onboarding for router %s: %s', router.id, exc, exc_info=True)
+
+    payload: Dict[str, Any] = {
+        'success': True,
+        'created': created,
+        'reused_existing': reused_existing,
+        'updated_existing': bool(reused_existing and update_existing),
+        'router': router.to_dict(),
+        'source_file': source_file,
+        'wireguard': parsed,
+        'readiness': readiness_payload,
+    }
+    if bootstrap_payload is not None:
+        payload['bootstrap'] = bootstrap_payload
+    return jsonify(payload), 200
+
+
+@mikrotik_bp.route('/routers/<router_id>/readiness', methods=['GET'])
+@admin_required()
+def router_readiness(router_id):
+    router = _router_for_request(router_id)
+    if not router:
+        return jsonify({'success': False, 'error': 'Router not found'}), 404
+
+    run_write_probe = _as_bool(request.args.get('write_probe'), default=False)
+    try:
+        with MikroTikService(router.id) as service:
+            readiness = _build_router_readiness_payload(service, run_write_probe=run_write_probe)
+        return jsonify({'success': True, 'router': router.to_dict(), 'readiness': readiness}), 200
+    except Exception as exc:
+        logger.error('Error calculating readiness for router %s: %s', router_id, exc, exc_info=True)
+        return jsonify({'success': False, 'error': str(exc)}), 500
 
 
 @mikrotik_bp.route('/routers', methods=['GET'])

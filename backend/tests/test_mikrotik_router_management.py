@@ -8,6 +8,32 @@ from app import db
 from app.models import AdminSystemSetting, User
 
 
+def _build_wireguard_archive(
+    endpoint: str = 'edge-router.fastisp.cloud:51820',
+    private_key: str = 'ABC123PRIVATE',
+) -> io.BytesIO:
+    archive_buffer = io.BytesIO()
+    with zipfile.ZipFile(archive_buffer, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            'wg/client.conf',
+            '\n'.join(
+                [
+                    '[Interface]',
+                    f'PrivateKey = {private_key}',
+                    'Address = 10.66.66.2/32',
+                    '',
+                    '[Peer]',
+                    'PublicKey = XYZ456PUBLIC',
+                    f'Endpoint = {endpoint}',
+                    'AllowedIPs = 0.0.0.0/0, ::/0',
+                    'PersistentKeepalive = 25',
+                ]
+            ),
+        )
+    archive_buffer.seek(0)
+    return archive_buffer
+
+
 def _admin_headers(client, app):
     with app.app_context():
         user = User(email='mk-admin@test.local', role='admin', name='MK Admin')
@@ -237,6 +263,24 @@ class _DummyMikrotikRiskService:
         return {'success': True, 'result': 'ok'}
 
 
+class _DummyMikrotikOnboardService:
+    scripts = []
+
+    def __init__(self, router_id):
+        self.router_id = router_id
+        self.api = object()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def execute_script(self, script_content):
+        self.__class__.scripts.append(str(script_content))
+        return {'success': True, 'result': 'ok'}
+
+
 def test_change_ticket_guard_required_for_high_risk_mikrotik_actions(client, app, monkeypatch):
     headers = _admin_headers(client, app)
     monkeypatch.setattr(mikrotik_routes, 'MikroTikService', _DummyMikrotikRiskService)
@@ -366,25 +410,7 @@ def test_change_ticket_guard_can_be_disabled_by_setting(client, app, monkeypatch
 
 def test_wireguard_zip_import_returns_onboarding_suggestions(client, app):
     headers = _admin_headers(client, app)
-    archive_buffer = io.BytesIO()
-    with zipfile.ZipFile(archive_buffer, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr(
-            'wg/client.conf',
-            '\n'.join(
-                [
-                    '[Interface]',
-                    'PrivateKey = ABC123PRIVATE',
-                    'Address = 10.66.66.2/32',
-                    '',
-                    '[Peer]',
-                    'PublicKey = XYZ456PUBLIC',
-                    'Endpoint = edge-router.fastisp.cloud:51820',
-                    'AllowedIPs = 0.0.0.0/0, ::/0',
-                    'PersistentKeepalive = 25',
-                ]
-            ),
-        )
-    archive_buffer.seek(0)
+    archive_buffer = _build_wireguard_archive()
 
     response = client.post(
         '/api/mikrotik/wireguard/import',
@@ -411,3 +437,184 @@ def test_wireguard_zip_import_requires_archive_file(client, app):
     )
     assert response.status_code == 400
     assert 'archive file is required' in str(response.get_json().get('error', ''))
+
+
+def test_router_readiness_endpoint_returns_payload(client, app, monkeypatch):
+    headers = _admin_headers(client, app)
+    create_response = client.post(
+        '/api/mikrotik/routers',
+        json={
+            'name': 'Nodo-Readiness',
+            'ip_address': '10.10.80.1',
+            'username': 'api-admin',
+            'password': 'router-pass',
+            'api_port': 8728,
+            'test_connection': False,
+        },
+        headers=headers,
+    )
+    assert create_response.status_code == 201
+    router_id = str(create_response.get_json()['router']['id'])
+
+    call_trace = {'write_probe': False}
+
+    def _fake_build_readiness(service, run_write_probe=False):
+        call_trace['write_probe'] = bool(run_write_probe)
+        return {
+            'score': 84,
+            'checks': [{'id': 'api_connectivity', 'ok': True, 'severity': 'ok'}],
+            'blockers': [],
+            'recommendations': [],
+            'runtime': {'reachable': True},
+            'write_probe_enabled': bool(run_write_probe),
+        }
+
+    monkeypatch.setattr(mikrotik_routes, 'MikroTikService', _DummyMikrotikOnboardService)
+    monkeypatch.setattr(mikrotik_routes, '_build_router_readiness_payload', _fake_build_readiness)
+
+    response = client.get(f'/api/mikrotik/routers/{router_id}/readiness?write_probe=true', headers=headers)
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['success'] is True
+    assert payload['readiness']['score'] == 84
+    assert payload['readiness']['write_probe_enabled'] is True
+    assert call_trace['write_probe'] is True
+
+
+def test_wireguard_onboard_creates_router_and_bootstraps_bth(client, app, monkeypatch):
+    headers = _admin_headers(client, app)
+    _DummyMikrotikOnboardService.scripts = []
+    monkeypatch.setattr(mikrotik_routes, 'MikroTikService', _DummyMikrotikOnboardService)
+    monkeypatch.setattr(
+        mikrotik_routes,
+        '_build_router_readiness_payload',
+        lambda _service, run_write_probe=False: {
+            'score': 92,
+            'checks': [{'id': 'api_connectivity', 'ok': True, 'severity': 'ok'}],
+            'blockers': [],
+            'recommendations': [],
+            'runtime': {'reachable': True},
+            'write_probe_enabled': bool(run_write_probe),
+        },
+    )
+    monkeypatch.setattr(
+        mikrotik_routes,
+        '_collect_back_to_home_runtime',
+        lambda _service: {
+            'reachable': True,
+            'supported': True,
+            'bth_users_supported': True,
+            'ddns_enabled': True,
+            'users': [{'name': 'noc-vps', 'allow-lan': True, 'disabled': False}],
+        },
+    )
+
+    response = client.post(
+        '/api/mikrotik/wireguard/onboard',
+        data={
+            'archive': (_build_wireguard_archive(), 'wireguard-export.zip'),
+            'username': 'api-admin',
+            'password': 'router-pass',
+            'api_port': '8728',
+            'write_probe': 'true',
+            'bootstrap_bth': 'true',
+            'bth_user_name': 'noc-vps',
+            'change_ticket': 'CHG-ONBOARD-001',
+            'preflight_ack': 'true',
+        },
+        headers=headers,
+        content_type='multipart/form-data',
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['success'] is True
+    assert payload['created'] is True
+    assert payload['router']['ip_address'] == 'edge-router.fastisp.cloud'
+    assert payload['readiness']['score'] == 92
+    assert payload['bootstrap']['user_name'] == 'noc-vps'
+    assert payload['bootstrap']['success'] is True
+    assert any('/ip/cloud/back-to-home-users/add' in script for script in _DummyMikrotikOnboardService.scripts)
+
+
+def test_wireguard_onboard_updates_existing_router(client, app, monkeypatch):
+    headers = _admin_headers(client, app)
+    _DummyMikrotikOnboardService.scripts = []
+    monkeypatch.setattr(mikrotik_routes, 'MikroTikService', _DummyMikrotikOnboardService)
+    monkeypatch.setattr(
+        mikrotik_routes,
+        '_build_router_readiness_payload',
+        lambda _service, run_write_probe=False: {
+            'score': 75,
+            'checks': [{'id': 'api_connectivity', 'ok': True, 'severity': 'ok'}],
+            'blockers': [],
+            'recommendations': [],
+            'runtime': {'reachable': True},
+            'write_probe_enabled': bool(run_write_probe),
+        },
+    )
+
+    create_response = client.post(
+        '/api/mikrotik/routers',
+        json={
+            'name': 'Nodo-Existente',
+            'ip_address': 'edge-router.fastisp.cloud',
+            'username': 'old-user',
+            'password': 'old-pass',
+            'api_port': 8728,
+            'test_connection': False,
+        },
+        headers=headers,
+    )
+    assert create_response.status_code == 201
+
+    response = client.post(
+        '/api/mikrotik/wireguard/onboard',
+        data={
+            'archive': (_build_wireguard_archive(), 'wireguard-export.zip'),
+            'name': 'Nodo-Actualizado',
+            'username': 'new-user',
+            'password': 'new-pass',
+            'update_existing': 'true',
+            'write_probe': 'false',
+        },
+        headers=headers,
+        content_type='multipart/form-data',
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['success'] is True
+    assert payload['created'] is False
+    assert payload['reused_existing'] is True
+    assert payload['updated_existing'] is True
+    assert payload['router']['name'] == 'Nodo-Actualizado'
+
+
+def test_wireguard_onboard_returns_conflict_if_router_exists_and_update_disabled(client, app):
+    headers = _admin_headers(client, app)
+    create_response = client.post(
+        '/api/mikrotik/routers',
+        json={
+            'name': 'Nodo-Existente-Conflict',
+            'ip_address': 'edge-router.fastisp.cloud',
+            'username': 'old-user',
+            'password': 'old-pass',
+            'api_port': 8728,
+            'test_connection': False,
+        },
+        headers=headers,
+    )
+    assert create_response.status_code == 201
+
+    response = client.post(
+        '/api/mikrotik/wireguard/onboard',
+        data={
+            'archive': (_build_wireguard_archive(), 'wireguard-export.zip'),
+            'username': 'new-user',
+            'password': 'new-pass',
+            'update_existing': 'false',
+        },
+        headers=headers,
+        content_type='multipart/form-data',
+    )
+    assert response.status_code == 409
+    assert 'already exists' in str(response.get_json().get('error', ''))

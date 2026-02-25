@@ -189,6 +189,45 @@ interface WireGuardImportResponse {
   suggestions?: WireGuardImportSuggestions
 }
 
+interface RouterReadinessCheck {
+  id: string
+  ok: boolean
+  detail?: string
+  severity?: string
+}
+
+interface RouterReadinessBlocker {
+  id: string
+  detail?: string
+}
+
+interface RouterReadinessPayload {
+  score?: number
+  checks?: RouterReadinessCheck[]
+  blockers?: RouterReadinessBlocker[]
+  recommendations?: string[]
+  write_probe_enabled?: boolean
+}
+
+interface RouterReadinessResponse {
+  success?: boolean
+  error?: string
+  readiness?: RouterReadinessPayload
+}
+
+interface WireGuardOnboardResponse {
+  success?: boolean
+  error?: string
+  created?: boolean
+  reused_existing?: boolean
+  updated_existing?: boolean
+  source_file?: string
+  wireguard?: WireGuardImportData
+  router?: unknown
+  readiness?: RouterReadinessPayload
+  bootstrap?: RouterBackToHomeBootstrapData
+}
+
 interface RouterFormState {
   name: string
   ip_address: string
@@ -248,14 +287,20 @@ const MikroTikManagement: React.FC = () => {
   const [confirmMessage, setConfirmMessage] = useState('')
   const confirmActionRef = useRef<(() => void) | null>(null)
   const wireGuardFileInputRef = useRef<HTMLInputElement | null>(null)
+  const wireGuardOnboardFileInputRef = useRef<HTMLInputElement | null>(null)
   const [sidePanel, setSidePanel] = useState<'none' | 'logs' | 'dhcp' | 'wifi'>('none')
   const [quickConnect, setQuickConnect] = useState<RouterQuickConnectResponse | null>(null)
+  const [routerReadiness, setRouterReadiness] = useState<RouterReadinessPayload | null>(null)
+  const [readinessLoading, setReadinessLoading] = useState(false)
   const [bootstrapResult, setBootstrapResult] = useState<RouterBackToHomeBootstrapData | null>(null)
   const [bthUserName, setBthUserName] = useState('noc-vps')
   const [bthPrivateKey, setBthPrivateKey] = useState('')
   const [bthAllowLan, setBthAllowLan] = useState(true)
   const [changeTicket, setChangeTicket] = useState('')
   const [preflightAck, setPreflightAck] = useState(false)
+  const [wireGuardWriteProbe, setWireGuardWriteProbe] = useState(true)
+  const [wireGuardBootstrapOnboard, setWireGuardBootstrapOnboard] = useState(false)
+  const [wireGuardOnboarding, setWireGuardOnboarding] = useState(false)
   const [routerForm, setRouterForm] = useState<RouterFormState>({
     name: '',
     ip_address: '',
@@ -415,6 +460,34 @@ const MikroTikManagement: React.FC = () => {
     [apiFetch, safeJson]
   )
 
+  const loadRouterReadiness = useCallback(
+    async (routerId: string, runWriteProbe = false) => {
+      setReadinessLoading(true)
+      try {
+        const query = runWriteProbe ? '?write_probe=true' : ''
+        const response = await apiFetch(`/api/mikrotik/routers/${routerId}/readiness${query}`)
+        const payload = (await safeJson(response)) as RouterReadinessResponse | null
+        if (response.ok && payload?.success && payload.readiness) {
+          setRouterReadiness(payload.readiness)
+        } else {
+          setRouterReadiness(null)
+          if (runWriteProbe) {
+            addToast('error', payload?.error || 'No se pudo ejecutar write probe')
+          }
+        }
+      } catch (error) {
+        console.error('Error loading router readiness:', error)
+        setRouterReadiness(null)
+        if (runWriteProbe) {
+          addToast('error', 'Error de red ejecutando readiness')
+        }
+      } finally {
+        setReadinessLoading(false)
+      }
+    },
+    [addToast, apiFetch, safeJson]
+  )
+
   const loadEnterpriseProfiles = useCallback(
     async (routerId: string) => {
       try {
@@ -464,14 +537,16 @@ const MikroTikManagement: React.FC = () => {
     if (!selectedRouter) return
     loadRouterStats(selectedRouter.id)
     loadQuickConnect(selectedRouter.id)
+    loadRouterReadiness(selectedRouter.id)
     loadEnterpriseProfiles(selectedRouter.id)
     loadEnterpriseChangeLog(selectedRouter.id)
     setAiAnalysis(null)
     setAiError(null)
     setBootstrapResult(null)
+    setRouterReadiness(null)
     setHardeningResult(null)
     setFailoverResult(null)
-  }, [loadEnterpriseChangeLog, loadEnterpriseProfiles, loadQuickConnect, loadRouterStats, selectedRouter])
+  }, [loadEnterpriseChangeLog, loadEnterpriseProfiles, loadQuickConnect, loadRouterReadiness, loadRouterStats, selectedRouter])
 
   const applyEnterpriseHardening = async () => {
     if (!selectedRouter) return
@@ -692,8 +767,105 @@ const MikroTikManagement: React.FC = () => {
     [addToast, apiFetch, bthPrivateKey, bthUserName, safeJson]
   )
 
+  const onboardRouterFromWireGuardArchive = useCallback(
+    async (archiveFile: File) => {
+      if (!archiveFile) return
+      if (!routerForm.username.trim() || !routerForm.password.trim()) {
+        addToast('error', 'Ingresa usuario y password API antes de onboarding')
+        return
+      }
+      if (wireGuardBootstrapOnboard && !changeTicket.trim()) {
+        addToast('error', 'Para bootstrap en vivo debes ingresar Change Ticket')
+        return
+      }
+      if (wireGuardBootstrapOnboard && !preflightAck) {
+        addToast('error', 'Activa preflight_ack para bootstrap en vivo')
+        return
+      }
+
+      setWireGuardOnboarding(true)
+      try {
+        const formData = new FormData()
+        formData.append('archive', archiveFile)
+        if (routerForm.name.trim()) formData.append('name', routerForm.name.trim())
+        if (routerForm.ip_address.trim()) formData.append('ip_address', routerForm.ip_address.trim())
+        formData.append('username', routerForm.username.trim())
+        formData.append('password', routerForm.password)
+        formData.append('api_port', String(Number(routerForm.api_port || '8728')))
+        formData.append('write_probe', wireGuardWriteProbe ? 'true' : 'false')
+        formData.append('bootstrap_bth', wireGuardBootstrapOnboard ? 'true' : 'false')
+        if (wireGuardBootstrapOnboard) {
+          formData.append('bth_user_name', bthUserName.trim() || 'noc-vps')
+          if (bthPrivateKey.trim()) formData.append('bth_private_key', bthPrivateKey.trim())
+          formData.append('bth_allow_lan', bthAllowLan ? 'true' : 'false')
+          formData.append('change_ticket', changeTicket.trim())
+          formData.append('preflight_ack', preflightAck ? 'true' : 'false')
+        }
+
+        const response = await apiFetch('/api/mikrotik/wireguard/onboard', {
+          method: 'POST',
+          body: formData,
+        })
+        const payload = (await safeJson(response)) as WireGuardOnboardResponse | null
+        if (!response.ok || !payload?.success) {
+          addToast('error', payload?.error || `No se pudo completar onboarding (${response.status})`)
+          return
+        }
+
+        setRouterReadiness(payload.readiness || null)
+        if (payload.bootstrap) {
+          setBootstrapResult(payload.bootstrap)
+        }
+        setWireGuardImportSummary({
+          success: true,
+          source_file: payload.source_file,
+          wireguard: payload.wireguard,
+        })
+
+        const outcome = payload.created ? 'creado' : payload.updated_existing ? 'actualizado' : 'procesado'
+        addToast('success', `Router ${outcome}. Readiness: ${payload.readiness?.score ?? 0}%`)
+
+        await loadRouters()
+        if (payload.router) {
+          const onboardedRouter = normalizeRouterItem(payload.router)
+          if (onboardedRouter.id) {
+            setSelectedRouter(onboardedRouter)
+            setActiveTab('config')
+          }
+        }
+      } catch (error) {
+        console.error('Error onboarding WireGuard archive:', error)
+        addToast('error', 'Error de red durante onboarding')
+      } finally {
+        setWireGuardOnboarding(false)
+      }
+    },
+    [
+      addToast,
+      apiFetch,
+      bthAllowLan,
+      bthPrivateKey,
+      bthUserName,
+      changeTicket,
+      loadRouters,
+      preflightAck,
+      routerForm.api_port,
+      routerForm.ip_address,
+      routerForm.name,
+      routerForm.password,
+      routerForm.username,
+      safeJson,
+      wireGuardBootstrapOnboard,
+      wireGuardWriteProbe,
+    ]
+  )
+
   const handleWireGuardFilePick = useCallback(() => {
     wireGuardFileInputRef.current?.click()
+  }, [])
+
+  const handleWireGuardOnboardFilePick = useCallback(() => {
+    wireGuardOnboardFileInputRef.current?.click()
   }, [])
 
   const handleWireGuardFileChange = useCallback(
@@ -705,6 +877,17 @@ const MikroTikManagement: React.FC = () => {
       event.target.value = ''
     },
     [importWireGuardArchive]
+  )
+
+  const handleWireGuardOnboardFileChange = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      const archiveFile = event.target.files?.[0]
+      if (archiveFile) {
+        void onboardRouterFromWireGuardArchive(archiveFile)
+      }
+      event.target.value = ''
+    },
+    [onboardRouterFromWireGuardArchive]
   )
 
   const createRouter = async () => {
@@ -1002,6 +1185,13 @@ const MikroTikManagement: React.FC = () => {
             >
               {wireGuardImporting ? 'Importando...' : 'Importar ZIP WireGuard'}
             </button>
+            <button
+              onClick={handleWireGuardOnboardFilePick}
+              disabled={wireGuardOnboarding}
+              className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-60"
+            >
+              {wireGuardOnboarding ? 'Onboarding...' : 'Onboarding 1 clic'}
+            </button>
             <input
               ref={wireGuardFileInputRef}
               type="file"
@@ -1009,6 +1199,33 @@ const MikroTikManagement: React.FC = () => {
               className="hidden"
               onChange={handleWireGuardFileChange}
             />
+            <input
+              ref={wireGuardOnboardFileInputRef}
+              type="file"
+              accept=".zip,.conf,.cfg,.txt"
+              className="hidden"
+              onChange={handleWireGuardOnboardFileChange}
+            />
+          </div>
+          <div className="mt-2 grid grid-cols-1 gap-2 text-xs text-blue-800 md:grid-cols-2">
+            <label className="flex items-center gap-2 rounded border border-blue-200 bg-white px-2 py-1">
+              <input
+                type="checkbox"
+                checked={wireGuardWriteProbe}
+                onChange={(e) => setWireGuardWriteProbe(e.target.checked)}
+                className="h-4 w-4"
+              />
+              Ejecutar write probe API durante onboarding
+            </label>
+            <label className="flex items-center gap-2 rounded border border-blue-200 bg-white px-2 py-1">
+              <input
+                type="checkbox"
+                checked={wireGuardBootstrapOnboard}
+                onChange={(e) => setWireGuardBootstrapOnboard(e.target.checked)}
+                className="h-4 w-4"
+              />
+              Bootstrap Back To Home automatico
+            </label>
           </div>
           {wireGuardImportSummary?.success && (
             <div className="mt-2 rounded border border-blue-300 bg-white p-2 text-xs text-blue-900">
@@ -1024,6 +1241,11 @@ const MikroTikManagement: React.FC = () => {
                 <strong>{(wireGuardImportSummary.wireguard?.peer_allowed_ips || []).join(', ') || '-'}</strong>
               </p>
             </div>
+          )}
+          {wireGuardBootstrapOnboard && (
+            <p className="mt-2 text-xs text-blue-700">
+              Bootstrap en vivo requiere `change_ticket` y `preflight_ack=true` en este panel.
+            </p>
           )}
         </div>
         <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
@@ -1156,6 +1378,70 @@ const MikroTikManagement: React.FC = () => {
                 {activeTab === 'config' && (
                   <div className="space-y-4">
                     <h4 className="text-lg font-semibold text-gray-900">Conexion remota rapida</h4>
+                    <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+                      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                        <p className="text-sm font-semibold text-gray-800">Readiness remoto del router</p>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            onClick={() => selectedRouter && void loadRouterReadiness(selectedRouter.id)}
+                            disabled={readinessLoading}
+                            className="rounded bg-slate-700 px-2 py-1 text-xs font-semibold text-white hover:bg-slate-800 disabled:opacity-60"
+                          >
+                            Refrescar
+                          </button>
+                          <button
+                            onClick={() => selectedRouter && void loadRouterReadiness(selectedRouter.id, true)}
+                            disabled={readinessLoading}
+                            className="rounded bg-indigo-600 px-2 py-1 text-xs font-semibold text-white hover:bg-indigo-700 disabled:opacity-60"
+                          >
+                            Refrescar + write probe
+                          </button>
+                        </div>
+                      </div>
+                      {readinessLoading && <p className="text-xs text-gray-500">Evaluando readiness...</p>}
+                      {!readinessLoading && !routerReadiness && (
+                        <p className="text-xs text-gray-500">Sin datos de readiness para este router.</p>
+                      )}
+                      {!readinessLoading && routerReadiness && (
+                        <div className="space-y-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="rounded-full bg-blue-100 px-2 py-1 text-xs font-semibold text-blue-700">
+                              Score {routerReadiness.score ?? 0}%
+                            </span>
+                            <span className="rounded-full bg-slate-200 px-2 py-1 text-xs font-semibold text-slate-700">
+                              Blockers {(routerReadiness.blockers || []).length}
+                            </span>
+                          </div>
+                          <ul className="space-y-1 text-xs text-gray-700">
+                            {(routerReadiness.checks || []).map((check) => {
+                              const severity = check.severity || (check.ok ? 'ok' : 'warning')
+                              const toneClass =
+                                severity === 'critical'
+                                  ? 'bg-rose-100 text-rose-700'
+                                  : severity === 'warning'
+                                    ? 'bg-amber-100 text-amber-700'
+                                    : 'bg-emerald-100 text-emerald-700'
+                              return (
+                                <li key={check.id} className="flex flex-wrap items-center gap-2">
+                                  <span className={`rounded px-2 py-0.5 font-semibold ${toneClass}`}>{check.id}</span>
+                                  <span>{check.detail || '-'}</span>
+                                </li>
+                              )
+                            })}
+                          </ul>
+                          {(routerReadiness.recommendations || []).length > 0 && (
+                            <div className="rounded border border-amber-200 bg-amber-50 p-2">
+                              <p className="text-xs font-semibold uppercase text-amber-700">Recomendaciones</p>
+                              <ul className="mt-1 space-y-1 text-xs text-amber-800">
+                                {(routerReadiness.recommendations || []).map((item, idx) => (
+                                  <li key={`${item}-${idx}`}>- {item}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
                     {quickLoading && <p className="text-sm text-gray-500">Cargando scripts...</p>}
                     {!quickLoading && !quickConnect?.scripts && (
                       <p className="text-sm text-rose-600">No se pudieron cargar scripts para este router.</p>
