@@ -9,6 +9,7 @@ import {
 import toast from 'react-hot-toast'
 import { apiClient } from '../lib/apiClient'
 import { useAuthStore } from '../store/authStore'
+import { normalizeRole } from '../lib/roles'
 
 type ActiveTab = 'preferences' | 'security' | 'account'
 
@@ -443,7 +444,7 @@ const SettingsView: React.FC = () => {
                     className="mt-1 w-full rounded-lg border border-gray-300 px-4 py-2"
                   />
                 </label>
-                <p className="text-sm text-gray-600">Rol: {user?.role === 'admin' ? 'Administrador' : 'Cliente'}</p>
+                <p className="text-sm text-gray-600">Rol: {normalizeRole(user?.role) === 'admin' ? 'Administrador' : 'Cliente'}</p>
                 <button
                   onClick={saveProfile}
                   disabled={!canSaveProfile || savingProfile}

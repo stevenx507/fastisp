@@ -13,11 +13,12 @@ import PlatformAdmin from './pages/PlatformAdmin'
 import PlatformBootstrap from './pages/PlatformBootstrap'
 import { useAuthStore } from './store/authStore'
 import ProtectedRoute from './components/ProtectedRoute'
+import { roleHomePath } from './lib/roles'
 
 
 function App() {
   const { isAuthenticated, user } = useAuthStore()
-  const authHome = user?.role === 'platform_admin' ? '/platform' : user?.role === 'admin' ? '/admin' : '/dashboard'
+  const authHome = roleHomePath(user?.role)
 
   return (
     <ThemeProvider>

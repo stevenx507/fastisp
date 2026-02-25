@@ -4,6 +4,7 @@ import toast from 'react-hot-toast'
 import { CheckCircleIcon, KeyIcon, LockClosedIcon, ShieldCheckIcon, UserCircleIcon } from '@heroicons/react/24/outline'
 import { apiClient } from '../lib/apiClient'
 import { useAuthStore } from '../store/authStore'
+import { roleHomePath } from '../lib/roles'
 
 interface BootstrapStatus {
   master_context: boolean
@@ -27,8 +28,7 @@ const PlatformBootstrap: React.FC = () => {
 
   useEffect(() => {
     if (isAuthenticated) {
-      const nextPath = user?.role === 'platform_admin' ? '/platform' : user?.role === 'admin' ? '/admin' : '/dashboard'
-      navigate(nextPath)
+      navigate(roleHomePath(user?.role))
     }
   }, [isAuthenticated, navigate, user?.role])
 

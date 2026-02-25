@@ -7,6 +7,7 @@ import { useAuthStore } from '../store/authStore'
 import { safeStorage } from '../lib/storage'
 import { apiClient } from '../lib/apiClient'
 import { config } from '../lib/config'
+import { roleHomePath } from '../lib/roles'
 
 declare global {
   interface Window {
@@ -322,8 +323,7 @@ const Login: React.FC = () => {
 
   useEffect(() => {
     if (isAuthenticated) {
-      const nextPath = user?.role === 'platform_admin' ? '/platform' : user?.role === 'admin' ? '/admin' : '/dashboard'
-      navigate(nextPath)
+      navigate(roleHomePath(user?.role))
     }
   }, [isAuthenticated, navigate, user?.role])
 

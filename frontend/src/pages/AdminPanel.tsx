@@ -50,6 +50,7 @@ import StaffView from '../components/admin/StaffView'
 import PlanChangeModal from '../components/admin/PlanChangeModal'
 import ManualPaymentModal from '../components/admin/ManualPaymentModal'
 import { apiClient } from '../lib/apiClient'
+import { normalizeRole } from '../lib/roles'
 
 const AdminPanel: React.FC = () => {
   const navigate = useNavigate()
@@ -150,7 +151,7 @@ const AdminPanel: React.FC = () => {
   }, [loadNotifications])
 
   const unreadNotificationsCount = notifications.filter(n => !n.read).length
-  const isPlatformAdminMode = user?.role === 'platform_admin'
+  const isPlatformAdminMode = normalizeRole(user?.role) === 'platform_admin'
 
   const handleExitTenantMode = () => {
     setTenantContext(null)
