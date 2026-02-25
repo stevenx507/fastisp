@@ -107,6 +107,8 @@ const OltManagement: React.FC = () => {
   const [selectedDeviceId, setSelectedDeviceId] = useState('')
   const [runMode, setRunMode] = useState<RunMode>('simulate')
   const [liveConfirm, setLiveConfirm] = useState(false)
+  const [changeTicket, setChangeTicket] = useState('')
+  const [preflightAck, setPreflightAck] = useState(false)
   const [loadingCatalog, setLoadingCatalog] = useState(false)
   const [busy, setBusy] = useState(false)
   const [savingDevice, setSavingDevice] = useState(false)
@@ -165,7 +167,7 @@ const OltManagement: React.FC = () => {
     [templateOptions, selectedTemplateId]
   )
 
-  const liveModeBlocked = runMode === 'live' && !liveConfirm
+  const liveModeBlocked = runMode === 'live' && (!liveConfirm || !preflightAck || !changeTicket.trim())
 
   const buildBasePayload = () => {
     const effectiveLineProfile = lineProfile.trim() || selectedTemplate?.line_profile || ''
@@ -185,14 +187,22 @@ const OltManagement: React.FC = () => {
 
   const withRunMode = (payload: Record<string, unknown> = {}) => {
     const merged: Record<string, unknown> = { ...payload, run_mode: runMode }
-    if (runMode === 'live') merged.live_confirm = liveConfirm
+    if (runMode === 'live') {
+      merged.live_confirm = liveConfirm
+      merged.change_ticket = changeTicket.trim()
+      merged.preflight_ack = preflightAck
+    }
     return merged
   }
 
   const buildRunModeParams = () => {
     const params = new URLSearchParams()
     params.set('run_mode', runMode)
-    if (runMode === 'live' && liveConfirm) params.set('live_confirm', 'true')
+    if (runMode === 'live' && liveConfirm) {
+      params.set('live_confirm', 'true')
+      if (changeTicket.trim()) params.set('change_ticket', changeTicket.trim())
+      if (preflightAck) params.set('preflight_ack', 'true')
+    }
     return params
   }
 
@@ -652,6 +662,24 @@ const OltManagement: React.FC = () => {
             />
             Confirmar ejecucion live
           </label>
+          {runMode === 'live' && (
+            <>
+              <input
+                value={changeTicket}
+                onChange={(e) => setChangeTicket(e.target.value)}
+                placeholder="Ticket de cambio (ej. CHG-2026-001)"
+                className="mt-2 w-full rounded-lg border border-white/10 bg-slate-800 px-3 py-2 text-sm text-slate-100"
+              />
+              <label className="mt-2 flex items-center gap-2 text-xs text-slate-300">
+                <input
+                  type="checkbox"
+                  checked={preflightAck}
+                  onChange={(e) => setPreflightAck(e.target.checked)}
+                />
+                Preflight revisado y aprobado
+              </label>
+            </>
+          )}
         </div>
 
         <div className="flex flex-col justify-center gap-2 rounded-xl border border-white/10 bg-slate-900/70 p-4">
@@ -718,7 +746,9 @@ const OltManagement: React.FC = () => {
           </div>
 
           {liveModeBlocked && (
-            <p className="text-xs text-amber-300">Modo live activo: marca confirmacion para habilitar ejecucion.</p>
+            <p className="text-xs text-amber-300">
+              Modo live activo: requiere confirmacion, ticket de cambio y preflight aprobado.
+            </p>
           )}
         </div>
 

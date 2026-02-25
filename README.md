@@ -54,6 +54,7 @@ GEOIP_ALLOWLIST=   # ej. CO,PE,CL si quieres filtrar países
    - Frontend: https://fastisp.cloud  
    - API: https://api.fastisp.cloud/api/health  
    - Grafana/NOC: valor en `VITE_GRAFANA_URL`
+5. Opcional: despliegue remoto desde GitHub Actions con `Deploy VPS` (`.github/workflows/deploy-vps.yml`) y secrets `VPS_HOST`, `VPS_USER`, `VPS_SSH_KEY`, `VPS_APP_DIR`.
 
 ## Operación diaria
 - Panel admin: `/admin` → pestañas NOC, Alertas, Tickets, Facturación, MikroTik/OLT.
@@ -88,6 +89,7 @@ GEOIP_ALLOWLIST=   # ej. CO,PE,CL si quieres filtrar países
 
 ## Acceso por roles
 - Guia operativa completa: `docs/operations/role-access.md`
+- Playbook enterprise de procesos (SOP, cambios, preflight, SLO): `docs/operations/ops-enterprise-playbook.md`
 - Roles activos:
   - `platform_admin` (admin total, panel `/platform`)
   - `admin` (admin ISP, panel `/admin`)

@@ -143,6 +143,38 @@ def _password_rotation_length() -> int:
     return max(16, min(configured, 64))
 
 
+def _effective_system_settings(tenant_id) -> dict:
+    defaults = _default_system_settings()
+    overrides = _load_system_settings_overrides_db(tenant_id)
+    if not overrides:
+        overrides = _load_cached_dict(_system_settings_key(tenant_id))
+    return {**defaults, **(overrides or {})}
+
+
+def _password_policy_min_length(tenant_id) -> int:
+    settings = _effective_system_settings(tenant_id)
+    raw_value = settings.get("password_policy_min_length", 10)
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        parsed = 10
+    return max(8, min(parsed, 64))
+
+
+def _validate_password_policy(password: str, tenant_id) -> tuple[bool, str]:
+    secret = str(password or "")
+    minimum = _password_policy_min_length(tenant_id)
+    if len(secret) < minimum:
+        return False, f"La contrasena debe tener al menos {minimum} caracteres."
+    has_upper = any(ch.isupper() for ch in secret)
+    has_lower = any(ch.islower() for ch in secret)
+    has_digit = any(ch.isdigit() for ch in secret)
+    has_symbol = any(not ch.isalnum() for ch in secret)
+    if not (has_upper and has_lower and has_digit and has_symbol):
+        return False, "La contrasena debe incluir mayuscula, minuscula, numero y simbolo."
+    return True, ""
+
+
 def _generate_router_password(length: int | None = None) -> str:
     target_length = length or _password_rotation_length()
     target_length = max(16, target_length)
@@ -449,8 +481,25 @@ SCREEN_ALERT_ALLOWED_SEVERITY = {"info", "warning", "critical", "success"}
 SCREEN_ALERT_ALLOWED_AUDIENCE = {"all", "active", "overdue", "suspended"}
 EXTRA_SERVICE_ALLOWED_STATUS = {"active", "disabled"}
 HOTSPOT_VOUCHER_ALLOWED_STATUS = {"generated", "sold", "used", "expired", "cancelled"}
-SYSTEM_ALLOWED_JOBS = {"backup", "cleanup_leases", "rotate_passwords", "recalc_balances", "enforce_billing"}
+SYSTEM_ALLOWED_JOBS = {
+    "backup",
+    "cleanup_leases",
+    "rotate_passwords",
+    "recalc_balances",
+    "enforce_billing",
+    "backup_restore_drill",
+}
 TICKET_ALLOWED_PRIORITIES = {"low", "medium", "high", "urgent"}
+OPS_CHANGE_ALLOWED_STATUS = {
+    "requested",
+    "approved",
+    "scheduled",
+    "executing",
+    "done",
+    "rolled_back",
+    "rejected",
+    "cancelled",
+}
 
 ROLE_BASE_PERMISSIONS: dict[str, set[str]] = {
     PLATFORM_ADMIN_ROLE: {
@@ -465,6 +514,10 @@ ROLE_BASE_PERMISSIONS: dict[str, set[str]] = {
         "network.alerts.read",
         "network.maintenance.read",
         "network.maintenance.write",
+        "ops.preflight.read",
+        "ops.slo.read",
+        "ops.sops.read",
+        "ops.change.read",
         "tickets.read",
     },
     "tech": {
@@ -472,6 +525,8 @@ ROLE_BASE_PERMISSIONS: dict[str, set[str]] = {
         "clients.read",
         "installations.read",
         "installations.write",
+        "ops.sops.read",
+        "ops.change.read",
         "tickets.read",
         "tickets.write",
         "network.read",
@@ -522,6 +577,13 @@ PERMISSION_CATALOG = sorted(
         "installations.write",
         "network.maintenance.read",
         "network.maintenance.write",
+        "ops.sops.read",
+        "ops.sops.write",
+        "ops.change.read",
+        "ops.change.write",
+        "ops.change.approve",
+        "ops.preflight.read",
+        "ops.slo.read",
         "payments.review",
         "security.permissions.read",
         "security.permissions.write",
@@ -568,6 +630,14 @@ def _system_settings_key(tenant_id) -> str:
 
 def _system_jobs_key(tenant_id) -> str:
     return _tenant_cache_key("admin_system_jobs", tenant_id)
+
+
+def _ops_sops_key(tenant_id) -> str:
+    return _tenant_cache_key("admin_ops_sops", tenant_id)
+
+
+def _ops_change_requests_key(tenant_id) -> str:
+    return _tenant_cache_key("admin_ops_change_requests", tenant_id)
 
 
 def _load_staff_meta(tenant_id) -> dict:
@@ -633,6 +703,114 @@ def _save_system_settings_overrides_db(tenant_id, overrides: dict, updated_by=No
             row.updated_at = datetime.utcnow()
         db.session.add(row)
     db.session.commit()
+
+
+def _system_setting_value(tenant_id, key_name: str, default=None):
+    row = _tenant_scoped_query(AdminSystemSetting, tenant_id).filter_by(key=key_name).first()
+    if row is not None:
+        return row.value
+    cached = _load_cached_dict(_system_settings_key(tenant_id))
+    if key_name in cached:
+        return cached.get(key_name)
+    return default
+
+
+def _upsert_system_setting_value(tenant_id, key_name: str, value, updated_by=None) -> None:
+    row = _tenant_scoped_query(AdminSystemSetting, tenant_id).filter_by(key=key_name).first()
+    if row is None:
+        row = AdminSystemSetting(
+            tenant_id=tenant_id,
+            key=key_name,
+            value=value,
+            updated_by=updated_by,
+            updated_at=datetime.utcnow(),
+        )
+    else:
+        row.value = value
+        row.updated_by = updated_by
+        row.updated_at = datetime.utcnow()
+    db.session.add(row)
+    db.session.commit()
+
+    cached_settings = _load_cached_dict(_system_settings_key(tenant_id))
+    cached_settings[key_name] = value
+    _save_cached_dict(_system_settings_key(tenant_id), cached_settings)
+
+
+def _default_ops_sops() -> list[dict]:
+    return [
+        {
+            "id": "alta-cliente",
+            "title": "Alta de Cliente",
+            "category": "provisioning",
+            "owner_role": "admin",
+            "checklist": [
+                {"id": "validar-documento", "label": "Validar documento e identidad", "required": True},
+                {"id": "validar-cobertura", "label": "Validar cobertura tecnica", "required": True},
+                {"id": "asignar-plan", "label": "Asignar plan y politica comercial", "required": True},
+                {"id": "probar-activacion", "label": "Probar navegacion y throughput", "required": True},
+            ],
+        },
+        {
+            "id": "cambio-plan",
+            "title": "Cambio de Plan",
+            "category": "billing",
+            "owner_role": "billing",
+            "checklist": [
+                {"id": "confirmar-saldo", "label": "Confirmar saldo y facturacion", "required": True},
+                {"id": "prorrateo", "label": "Aplicar prorrateo documentado", "required": True},
+                {"id": "ajuste-red", "label": "Ejecutar ajuste de velocidad en red", "required": True},
+            ],
+        },
+        {
+            "id": "ventana-mantenimiento",
+            "title": "Ventana de Mantenimiento NOC",
+            "category": "noc",
+            "owner_role": "noc",
+            "checklist": [
+                {"id": "comunicacion-previa", "label": "Comunicar alcance y horario", "required": True},
+                {"id": "plan-rollback", "label": "Definir plan de rollback", "required": True},
+                {"id": "ticket-cambio", "label": "Registrar ticket/cambio aprobado", "required": True},
+                {"id": "cierre-post", "label": "Registrar postmortem y cierre", "required": True},
+            ],
+        },
+    ]
+
+
+def _load_ops_sops(tenant_id) -> list[dict]:
+    source = _system_setting_value(tenant_id, "ops_sops", default=None)
+    if isinstance(source, list):
+        payload = [item for item in source if isinstance(item, dict)]
+        if payload:
+            return payload
+    cached = _load_cached_list(_ops_sops_key(tenant_id))
+    if cached:
+        return cached
+    defaults = _default_ops_sops()
+    _save_cached_list(_ops_sops_key(tenant_id), defaults, max_items=200)
+    return defaults
+
+
+def _save_ops_sops(tenant_id, items: list[dict], updated_by=None) -> None:
+    cleaned = [item for item in items if isinstance(item, dict)]
+    _upsert_system_setting_value(tenant_id, "ops_sops", cleaned, updated_by=updated_by)
+    _save_cached_list(_ops_sops_key(tenant_id), cleaned, max_items=200)
+
+
+def _load_ops_change_requests(tenant_id) -> list[dict]:
+    source = _system_setting_value(tenant_id, "ops_change_requests", default=[])
+    if isinstance(source, list):
+        payload = [item for item in source if isinstance(item, dict)]
+        if payload:
+            return payload
+    cached = _load_cached_list(_ops_change_requests_key(tenant_id))
+    return [item for item in cached if isinstance(item, dict)]
+
+
+def _save_ops_change_requests(tenant_id, items: list[dict], updated_by=None) -> None:
+    cleaned = [item for item in items if isinstance(item, dict)]
+    _upsert_system_setting_value(tenant_id, "ops_change_requests", cleaned, updated_by=updated_by)
+    _save_cached_list(_ops_change_requests_key(tenant_id), cleaned, max_items=500)
 
 
 def _load_system_jobs_db(tenant_id, status_filter: str = '', job_filter: str = '') -> list[dict]:
@@ -1389,6 +1567,11 @@ def login():
 
     user = query.first()
     if user and user.check_password(data.get('password')):
+        settings = _effective_system_settings(tenant_id)
+        admin_mfa_required = bool(settings.get("admin_mfa_required", False))
+        if admin_mfa_required and user.role in STAFF_ALLOWED_ROLES.union({"admin", PLATFORM_ADMIN_ROLE}) and not user.mfa_enabled:
+            return jsonify({"error": "MFA obligatorio para cuentas administrativas.", "mfa_setup_required": True}), 403
+
         # MFA: si esta habilitado, validar codigo
         if user.mfa_enabled:
             mfa_code = str(data.get('mfa_code') or '').strip()
@@ -1476,9 +1659,6 @@ def reset_password():
         return jsonify({"error": "token es requerido"}), 400
     if not new_password:
         return jsonify({"error": "new_password es requerido"}), 400
-    if len(new_password) < 8:
-        return jsonify({"error": "La nueva contraseña debe tener al menos 8 caracteres."}), 400
-
     key = _password_reset_key(token)
     token_data = cache.get(key)
     if not isinstance(token_data, dict):
@@ -1501,6 +1681,10 @@ def reset_password():
 
     if user.check_password(new_password):
         return jsonify({"error": "La nueva contraseña debe ser diferente a la actual."}), 400
+
+    valid_password, password_error = _validate_password_policy(new_password, user.tenant_id)
+    if not valid_password:
+        return jsonify({"error": password_error}), 400
 
     user.set_password(new_password)
     db.session.add(user)
@@ -1554,8 +1738,9 @@ def platform_bootstrap():
     password = str(data.get('password') or '')
     if not name or not email or not password:
         return jsonify({"error": "name, email y password son requeridos."}), 400
-    if len(password) < 10:
-        return jsonify({"error": "password debe tener al menos 10 caracteres."}), 400
+    valid_password, password_error = _validate_password_policy(password, tenant_id=None)
+    if not valid_password:
+        return jsonify({"error": password_error}), 400
     if User.query.filter_by(email=email).first():
         return jsonify({"error": "email ya existe."}), 409
 
@@ -1861,6 +2046,9 @@ def platform_create_tenant_admin(tenant_id):
         return jsonify({"error": "email ya existe"}), 409
 
     password = str(data.get('password') or '').strip() or secrets.token_urlsafe(12)
+    valid_password, password_error = _validate_password_policy(password, tenant.id)
+    if not valid_password:
+        return jsonify({"error": password_error}), 400
     user = User(
         name=name,
         email=email,
@@ -1905,6 +2093,10 @@ def register():
     existing = User.query.filter_by(email=email).first()
     if existing:
         return jsonify({"error": "El correo ya esta registrado."}), 400
+
+    valid_password, password_error = _validate_password_policy(password, tenant_id)
+    if not valid_password:
+        return jsonify({"error": password_error}), 400
 
     user = User(
         name=name,
@@ -2203,8 +2395,6 @@ def update_password():
 
     if not current_password or not new_password:
         return jsonify({"error": "Contraseña actual y nueva contraseña son requeridas."}), 400
-    if len(new_password) < 8:
-        return jsonify({"error": "La nueva contraseña debe tener al menos 8 caracteres."}), 400
 
     user = db.session.get(User, current_user_id)
     if not user:
@@ -2217,6 +2407,10 @@ def update_password():
         return jsonify({"error": "La contraseña actual es incorrecta."}), 400
     if user.check_password(new_password):
         return jsonify({"error": "La nueva contraseña debe ser diferente a la actual."}), 400
+
+    valid_password, password_error = _validate_password_policy(new_password, user.tenant_id)
+    if not valid_password:
+        return jsonify({"error": password_error}), 400
 
     user.set_password(new_password)
     db.session.add(user)
@@ -4597,6 +4791,10 @@ def admin_staff_create():
 
     supplied_password = (data.get('password') or '').strip()
     temporary_password = supplied_password or secrets.token_urlsafe(10)
+    valid_password, password_error = _validate_password_policy(temporary_password, tenant_id)
+    if not valid_password:
+        return jsonify({"error": password_error}), 400
+
     mfa_enabled = _parse_bool(data.get('mfa_enabled', False))
     if mfa_enabled is None:
         return jsonify({"error": "mfa_enabled debe ser booleano"}), 400
@@ -4669,7 +4867,11 @@ def admin_staff_update(staff_id):
             user.mfa_secret = None
 
     if data.get('password'):
-        user.set_password(str(data.get('password')))
+        proposed_password = str(data.get('password') or '')
+        valid_password, password_error = _validate_password_policy(proposed_password, tenant_id)
+        if not valid_password:
+            return jsonify({"error": password_error}), 400
+        user.set_password(proposed_password)
 
     metadata_map = _load_staff_meta(tenant_id)
     current_meta = metadata_map.get(str(user.id), {})
@@ -6304,6 +6506,14 @@ def _default_system_settings() -> dict:
         "default_ticket_priority": "medium",
         "backup_retention_days": 14,
         "metrics_poll_interval_sec": 60,
+        "change_control_required_for_live": True,
+        "require_preflight_for_live": True,
+        "admin_mfa_required": False,
+        "password_policy_min_length": 10,
+        "backup_restore_drill_days": 30,
+        "slo_router_availability_target": 99,
+        "slo_ticket_sla_target": 95,
+        "slo_provision_success_target": 98,
     }
 
 
@@ -6567,6 +6777,120 @@ def _enforce_billing_for_tenant(tenant_id) -> tuple[str, dict]:
     return 'completed', summary
 
 
+def _backup_artifacts_summary() -> dict:
+    backup_dir = current_app.config.get('BACKUP_DIR') or os.environ.get('BACKUP_DIR', '/app/backups')
+    path = Path(str(backup_dir))
+    if not path.exists() or not path.is_dir():
+        return {"backup_dir": str(path), "exists": False, "files": [], "latest": None}
+
+    files = []
+    for file_path in path.iterdir():
+        if not file_path.is_file():
+            continue
+        try:
+            stat = file_path.stat()
+            files.append(
+                {
+                    "name": file_path.name,
+                    "size": int(stat.st_size),
+                    "modified_at": datetime.utcfromtimestamp(stat.st_mtime).isoformat() + "Z",
+                    "modified_ts": float(stat.st_mtime),
+                }
+            )
+        except Exception:
+            continue
+    files.sort(key=lambda item: item.get("modified_ts", 0), reverse=True)
+    latest = files[0] if files else None
+    return {"backup_dir": str(path), "exists": True, "files": files[:200], "latest": latest}
+
+
+def _run_backup_restore_drill(tenant_id) -> tuple[str, dict]:
+    settings = _effective_system_settings(tenant_id)
+    max_days = int(settings.get("backup_restore_drill_days", 30) or 30)
+    max_days = max(1, min(max_days, 365))
+    max_age_hours = max_days * 24
+
+    artifacts = _backup_artifacts_summary()
+    checks = []
+
+    latest = artifacts.get("latest")
+    if latest and latest.get("modified_ts"):
+        age_hours = round((time.time() - float(latest["modified_ts"])) / 3600, 2)
+        checks.append(
+            {
+                "id": "latest_backup_age",
+                "ok": age_hours <= max_age_hours,
+                "detail": f"Ultimo backup hace {age_hours}h (max {max_age_hours}h)",
+                "severity": "critical" if age_hours > max_age_hours else "ok",
+            }
+        )
+    else:
+        checks.append(
+            {
+                "id": "latest_backup_age",
+                "ok": False,
+                "detail": "No se encontraron archivos de backup.",
+                "severity": "critical",
+            }
+        )
+
+    db_files = [f for f in artifacts.get("files", []) if str(f.get("name", "")).startswith("db_")]
+    olt_files = [f for f in artifacts.get("files", []) if str(f.get("name", "")).startswith("olt_")]
+    checks.append(
+        {
+            "id": "db_backup_present",
+            "ok": len(db_files) > 0,
+            "detail": f"Backups DB detectados: {len(db_files)}",
+            "severity": "critical" if len(db_files) == 0 else "ok",
+        }
+    )
+    checks.append(
+        {
+            "id": "olt_backup_present",
+            "ok": len(olt_files) > 0,
+            "detail": f"Backups OLT detectados: {len(olt_files)}",
+            "severity": "warning" if len(olt_files) == 0 else "ok",
+        }
+    )
+
+    latest_db = db_files[0] if db_files else None
+    if latest_db:
+        db_backup_path = Path(str(artifacts.get("backup_dir") or "")) / str(latest_db.get("name"))
+        content_ok = False
+        sample = ""
+        try:
+            with open(db_backup_path, "r", encoding="utf-8", errors="ignore") as fh:
+                sample = fh.read(2048)
+            markers = ("postgresql", "create table", "insert into", "set search_path")
+            content_ok = any(marker in sample.lower() for marker in markers)
+        except Exception:
+            content_ok = False
+        checks.append(
+            {
+                "id": "db_backup_readable",
+                "ok": content_ok,
+                "detail": "Cabecera SQL valida para restore drill." if content_ok else "No se pudo validar cabecera SQL del backup DB.",
+                "severity": "critical" if not content_ok else "ok",
+            }
+        )
+
+    passed = all(bool(item.get("ok")) for item in checks if item.get("severity") == "critical")
+    status = "completed" if passed else "completed_with_errors"
+    summary = {
+        "tenant_id": tenant_id,
+        "timestamp": _iso_utc_now(),
+        "max_backup_age_hours": max_age_hours,
+        "checks": checks,
+        "artifacts": {
+            "backup_dir": artifacts.get("backup_dir"),
+            "total_files": len(artifacts.get("files", [])),
+            "latest": artifacts.get("latest"),
+        },
+        "passed": passed,
+    }
+    return status, summary
+
+
 def _execute_system_job(job: str, tenant_id) -> tuple[str, dict]:
     try:
         if job == 'backup':
@@ -6580,6 +6904,8 @@ def _execute_system_job(job: str, tenant_id) -> tuple[str, dict]:
             return 'completed', _recalculate_invoice_balances(tenant_id)
         if job == 'rotate_passwords':
             return _rotate_mikrotik_passwords(tenant_id)
+        if job == 'backup_restore_drill':
+            return _run_backup_restore_drill(tenant_id)
         return 'failed', {"error": f"job no soportado: {job}"}
     except Exception as exc:
         current_app.logger.error("System job execution failed for %s: %s", job, exc, exc_info=True)
@@ -6686,13 +7012,26 @@ def admin_system_settings_update():
         "notifications_push_enabled": "bool",
         "notifications_email_enabled": "bool",
         "allow_self_signup": "bool",
+        "change_control_required_for_live": "bool",
+        "require_preflight_for_live": "bool",
+        "admin_mfa_required": "bool",
         "default_ticket_priority": "str",
         "backup_retention_days": "int",
         "metrics_poll_interval_sec": "int",
+        "password_policy_min_length": "int",
+        "backup_restore_drill_days": "int",
+        "slo_router_availability_target": "int",
+        "slo_ticket_sla_target": "int",
+        "slo_provision_success_target": "int",
     }
     integer_limits = {
         "backup_retention_days": (1, 365),
         "metrics_poll_interval_sec": (15, 3600),
+        "password_policy_min_length": (8, 64),
+        "backup_restore_drill_days": (1, 365),
+        "slo_router_availability_target": (1, 100),
+        "slo_ticket_sla_target": (1, 100),
+        "slo_provision_success_target": (1, 100),
     }
 
     overrides = _load_system_settings_overrides_db(tenant_id)
@@ -6781,6 +7120,467 @@ def admin_system_jobs_run():
         return jsonify({"error": f"job debe ser {' | '.join(sorted(SYSTEM_ALLOWED_JOBS))}"}), 400
     payload, code = _run_system_job_request(job, tenant_id, _current_user_id())
     return jsonify(payload), code
+
+
+def _ops_score_from_checks(checks: list[dict]) -> int:
+    if not checks:
+        return 0
+    total = 0
+    count = 0
+    for item in checks:
+        count += 1
+        total += 100 if item.get("ok") else 0
+    return int(round(total / max(1, count)))
+
+
+@main_bp.route('/admin/ops/sops', methods=['GET'])
+@permission_required('ops.sops.read')
+def admin_ops_sops_list():
+    tenant_id = current_tenant_id()
+    sops = _load_ops_sops(tenant_id)
+    return jsonify({"items": sops, "count": len(sops)}), 200
+
+
+@main_bp.route('/admin/ops/sops', methods=['POST'])
+@permission_required('ops.sops.write')
+def admin_ops_sops_upsert():
+    tenant_id = current_tenant_id()
+    data = request.get_json() or {}
+    incoming = data.get("items") if isinstance(data.get("items"), list) else data.get("sops")
+    if not isinstance(incoming, list):
+        return jsonify({"error": "items (lista) es requerido"}), 400
+
+    normalized = []
+    for index, row in enumerate(incoming):
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get("title") or "").strip()
+        if not title:
+            continue
+        checklist_raw = row.get("checklist")
+        checklist = []
+        if isinstance(checklist_raw, list):
+            for item_index, item in enumerate(checklist_raw):
+                if isinstance(item, dict):
+                    label = str(item.get("label") or "").strip()
+                    if not label:
+                        continue
+                    checklist.append(
+                        {
+                            "id": str(item.get("id") or _slugify(label) or f"item-{item_index + 1}"),
+                            "label": label,
+                            "required": bool(item.get("required", True)),
+                        }
+                    )
+                else:
+                    label = str(item or "").strip()
+                    if not label:
+                        continue
+                    checklist.append(
+                        {
+                            "id": _slugify(label) or f"item-{item_index + 1}",
+                            "label": label,
+                            "required": True,
+                        }
+                    )
+        normalized.append(
+            {
+                "id": str(row.get("id") or _slugify(title) or f"sop-{index + 1}"),
+                "title": title,
+                "category": str(row.get("category") or "general").strip().lower(),
+                "owner_role": str(row.get("owner_role") or "admin").strip().lower(),
+                "checklist": checklist,
+                "updated_at": _iso_utc_now(),
+            }
+        )
+
+    if not normalized:
+        return jsonify({"error": "No se enviaron SOPs validos"}), 400
+
+    _save_ops_sops(tenant_id, normalized, updated_by=_current_user_id())
+    _audit("ops_sops_upsert", entity_type="ops_sops", metadata={"count": len(normalized)})
+    return jsonify({"success": True, "items": normalized, "count": len(normalized)}), 200
+
+
+@main_bp.route('/admin/ops/change-requests', methods=['GET'])
+@permission_required('ops.change.read')
+def admin_ops_change_requests_list():
+    tenant_id = current_tenant_id()
+    status_filter = str(request.args.get("status") or "").strip().lower()
+    requests_list = _load_ops_change_requests(tenant_id)
+    if status_filter:
+        requests_list = [item for item in requests_list if str(item.get("status") or "").lower() == status_filter]
+    requests_list = sorted(requests_list, key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    return jsonify({"items": requests_list[:300], "count": len(requests_list)}), 200
+
+
+@main_bp.route('/admin/ops/change-requests', methods=['POST'])
+@permission_required('ops.change.write')
+def admin_ops_change_requests_create():
+    tenant_id = current_tenant_id()
+    data = request.get_json() or {}
+    title = str(data.get("title") or "").strip()
+    if not title:
+        return jsonify({"error": "title es requerido"}), 400
+
+    window_start = _parse_iso_datetime(data.get("window_start"))
+    window_end = _parse_iso_datetime(data.get("window_end"))
+    if window_start and window_end and window_end <= window_start:
+        return jsonify({"error": "window_end debe ser mayor a window_start"}), 400
+
+    status = str(data.get("status") or "requested").strip().lower()
+    if status not in OPS_CHANGE_ALLOWED_STATUS:
+        return jsonify({"error": f"status invalido. permitidos: {', '.join(sorted(OPS_CHANGE_ALLOWED_STATUS))}"}), 400
+
+    checklist = data.get("checklist")
+    if not isinstance(checklist, list):
+        checklist = []
+
+    actor_user = db.session.get(User, _current_user_id()) if _current_user_id() else None
+    created = {
+        "id": f"chg-{secrets.token_hex(6)}",
+        "title": title,
+        "scope": str(data.get("scope") or "network").strip().lower(),
+        "risk_level": str(data.get("risk_level") or "medium").strip().lower(),
+        "status": status,
+        "ticket_ref": str(data.get("ticket_ref") or "").strip(),
+        "window_start": window_start.isoformat() if window_start else None,
+        "window_end": window_end.isoformat() if window_end else None,
+        "rollback_plan": str(data.get("rollback_plan") or "").strip(),
+        "execution_plan": str(data.get("execution_plan") or "").strip(),
+        "checklist": checklist[:100],
+        "created_at": _iso_utc_now(),
+        "updated_at": _iso_utc_now(),
+        "created_by": _current_user_id(),
+        "created_by_name": actor_user.name if actor_user else None,
+        "created_by_email": actor_user.email if actor_user else None,
+    }
+
+    entries = _load_ops_change_requests(tenant_id)
+    entries.insert(0, created)
+    _save_ops_change_requests(tenant_id, entries[:500], updated_by=_current_user_id())
+    _audit("ops_change_request_create", entity_type="ops_change_request", entity_id=created["id"], metadata=created)
+    return jsonify({"success": True, "item": created}), 201
+
+
+@main_bp.route('/admin/ops/change-requests/<change_id>', methods=['PATCH'])
+@permission_required('ops.change.write')
+def admin_ops_change_requests_update(change_id):
+    tenant_id = current_tenant_id()
+    data = request.get_json() or {}
+    entries = _load_ops_change_requests(tenant_id)
+    index = next((idx for idx, item in enumerate(entries) if str(item.get("id")) == str(change_id)), None)
+    if index is None:
+        return jsonify({"error": "change_request no encontrado"}), 404
+
+    row = dict(entries[index])
+    if "title" in data:
+        title = str(data.get("title") or "").strip()
+        if not title:
+            return jsonify({"error": "title no puede estar vacio"}), 400
+        row["title"] = title
+    if "status" in data:
+        status = str(data.get("status") or "").strip().lower()
+        if status not in OPS_CHANGE_ALLOWED_STATUS:
+            return jsonify({"error": f"status invalido. permitidos: {', '.join(sorted(OPS_CHANGE_ALLOWED_STATUS))}"}), 400
+        row["status"] = status
+    if "ticket_ref" in data:
+        row["ticket_ref"] = str(data.get("ticket_ref") or "").strip()
+    if "rollback_plan" in data:
+        row["rollback_plan"] = str(data.get("rollback_plan") or "").strip()
+    if "execution_plan" in data:
+        row["execution_plan"] = str(data.get("execution_plan") or "").strip()
+    if "window_start" in data:
+        start = _parse_iso_datetime(data.get("window_start"))
+        row["window_start"] = start.isoformat() if start else None
+    if "window_end" in data:
+        end = _parse_iso_datetime(data.get("window_end"))
+        row["window_end"] = end.isoformat() if end else None
+    if "checklist" in data and isinstance(data.get("checklist"), list):
+        row["checklist"] = data.get("checklist")[:100]
+
+    row["updated_at"] = _iso_utc_now()
+    row["updated_by"] = _current_user_id()
+    entries[index] = row
+    _save_ops_change_requests(tenant_id, entries[:500], updated_by=_current_user_id())
+    _audit("ops_change_request_update", entity_type="ops_change_request", entity_id=change_id, metadata={"changes": list(data.keys())})
+    return jsonify({"success": True, "item": row}), 200
+
+
+@main_bp.route('/admin/ops/change-requests/<change_id>/approve', methods=['POST'])
+@permission_required('ops.change.approve')
+def admin_ops_change_requests_approve(change_id):
+    tenant_id = current_tenant_id()
+    data = request.get_json() or {}
+    approved = _parse_bool(data.get("approved", True))
+    if approved is None:
+        approved = True
+    entries = _load_ops_change_requests(tenant_id)
+    index = next((idx for idx, item in enumerate(entries) if str(item.get("id")) == str(change_id)), None)
+    if index is None:
+        return jsonify({"error": "change_request no encontrado"}), 404
+    row = dict(entries[index])
+    row["status"] = "approved" if approved else "rejected"
+    row["approval_note"] = str(data.get("note") or "").strip()
+    row["approved_by"] = _current_user_id()
+    row["approved_at"] = _iso_utc_now()
+    row["updated_at"] = _iso_utc_now()
+    entries[index] = row
+    _save_ops_change_requests(tenant_id, entries[:500], updated_by=_current_user_id())
+    _audit("ops_change_request_approve", entity_type="ops_change_request", entity_id=change_id, metadata={"approved": approved})
+    return jsonify({"success": True, "item": row}), 200
+
+
+@main_bp.route('/admin/ops/preflight/summary', methods=['GET'])
+@permission_required('ops.preflight.read')
+def admin_ops_preflight_summary():
+    tenant_id = current_tenant_id()
+    settings = _effective_system_settings(tenant_id)
+    checks = []
+
+    change_required = bool(settings.get("change_control_required_for_live", True))
+    requests_list = _load_ops_change_requests(tenant_id)
+    approved_changes = [
+        item for item in requests_list
+        if str(item.get("status") or "").lower() in {"approved", "scheduled", "executing"}
+    ]
+    checks.append(
+        {
+            "id": "change_control",
+            "ok": (not change_required) or len(approved_changes) > 0,
+            "detail": (
+                f"Cambios aprobados disponibles: {len(approved_changes)}"
+                if change_required
+                else "Control de cambios opcional por configuracion."
+            ),
+            "severity": "critical" if change_required and len(approved_changes) == 0 else "ok",
+        }
+    )
+
+    staff_q = User.query.filter(User.role.in_(("admin", "noc", "tech", "support", "billing", "operator")))
+    if tenant_id is not None:
+        staff_q = staff_q.filter_by(tenant_id=tenant_id)
+    staff = staff_q.all()
+    mfa_enabled = [user for user in staff if bool(user.mfa_enabled)]
+    mfa_ratio = round((len(mfa_enabled) / max(1, len(staff))) * 100, 1)
+    enforce_admin_mfa = bool(settings.get("admin_mfa_required", False))
+    checks.append(
+        {
+            "id": "mfa_coverage",
+            "ok": mfa_ratio >= 100 if enforce_admin_mfa else mfa_ratio >= 60,
+            "detail": f"Cobertura MFA staff: {mfa_ratio}% ({len(mfa_enabled)}/{len(staff)})",
+            "severity": "critical" if enforce_admin_mfa and mfa_ratio < 100 else ("warning" if mfa_ratio < 60 else "ok"),
+        }
+    )
+
+    backup_drill_days = int(settings.get("backup_restore_drill_days", 30) or 30)
+    backup_drill_days = max(1, min(backup_drill_days, 365))
+    artifacts = _backup_artifacts_summary()
+    latest = artifacts.get("latest")
+    backup_ok = False
+    if latest and latest.get("modified_ts"):
+        age_hours = round((time.time() - float(latest["modified_ts"])) / 3600, 2)
+        backup_ok = age_hours <= (backup_drill_days * 24)
+        backup_detail = f"Ultimo backup hace {age_hours}h."
+    else:
+        backup_detail = "No se detectaron backups."
+    checks.append(
+        {
+            "id": "backup_recency",
+            "ok": backup_ok,
+            "detail": backup_detail,
+            "severity": "critical" if not backup_ok else "ok",
+        }
+    )
+
+    routers_q = MikroTikRouter.query
+    if tenant_id is not None:
+        routers_q = routers_q.filter_by(tenant_id=tenant_id)
+    routers_down = routers_q.filter_by(is_active=False).count()
+    checks.append(
+        {
+            "id": "routers_health",
+            "ok": routers_down == 0,
+            "detail": f"Routers down: {routers_down}",
+            "severity": "warning" if routers_down > 0 else "ok",
+        }
+    )
+
+    score = _ops_score_from_checks(checks)
+    blockers = [item for item in checks if (not item.get("ok")) and item.get("severity") == "critical"]
+    return jsonify(
+        {
+            "score": score,
+            "checks": checks,
+            "blockers": blockers,
+            "settings": {
+                "change_control_required_for_live": change_required,
+                "require_preflight_for_live": bool(settings.get("require_preflight_for_live", True)),
+                "admin_mfa_required": enforce_admin_mfa,
+                "backup_restore_drill_days": backup_drill_days,
+            },
+            "approved_changes": approved_changes[:50],
+        }
+    ), 200
+
+
+@main_bp.route('/admin/ops/slo-summary', methods=['GET'])
+@permission_required('ops.slo.read')
+def admin_ops_slo_summary():
+    tenant_id = current_tenant_id()
+    settings = _effective_system_settings(tenant_id)
+
+    try:
+        days = int(request.args.get("days", 7) or 7)
+    except (TypeError, ValueError):
+        days = 7
+    days = max(1, min(days, 30))
+    since = datetime.utcnow() - timedelta(days=days)
+
+    routers_q = MikroTikRouter.query
+    if tenant_id is not None:
+        routers_q = routers_q.filter_by(tenant_id=tenant_id)
+    total_routers = routers_q.count()
+    routers_up = routers_q.filter_by(is_active=True).count()
+    router_availability = round((routers_up / max(1, total_routers)) * 100, 2)
+
+    tickets_q = Ticket.query.filter(Ticket.created_at >= since)
+    if tenant_id is not None:
+        tickets_q = tickets_q.filter_by(tenant_id=tenant_id)
+    resolved = tickets_q.filter(Ticket.status.in_(("resolved", "closed"))).all()
+    resolved_in_sla = 0
+    for ticket in resolved:
+        due = ticket.sla_due_at
+        finished = ticket.updated_at or ticket.created_at
+        if due is None or (finished and finished <= due):
+            resolved_in_sla += 1
+    ticket_sla = round((resolved_in_sla / max(1, len(resolved))) * 100, 2)
+
+    audit_q = AuditLog.query.filter(AuditLog.created_at >= since).filter(
+        or_(AuditLog.action.like("olt_%"), AuditLog.action.like("mikrotik_%"))
+    )
+    if tenant_id is not None:
+        audit_q = audit_q.filter(AuditLog.tenant_id == tenant_id)
+    operations = audit_q.order_by(AuditLog.created_at.desc()).limit(2000).all()
+    total_ops = len(operations)
+    success_ops = 0
+    for entry in operations:
+        metadata = entry.meta if isinstance(entry.meta, dict) else {}
+        success = metadata.get("success")
+        if success is None:
+            success_ops += 1
+        elif bool(success):
+            success_ops += 1
+    provision_success = round((success_ops / max(1, total_ops)) * 100, 2)
+
+    targets = {
+        "router_availability": int(settings.get("slo_router_availability_target", 99) or 99),
+        "ticket_sla": int(settings.get("slo_ticket_sla_target", 95) or 95),
+        "provision_success": int(settings.get("slo_provision_success_target", 98) or 98),
+    }
+    metrics = {
+        "router_availability": router_availability,
+        "ticket_sla": ticket_sla,
+        "provision_success": provision_success,
+    }
+    checks = [
+        {
+            "id": "router_availability",
+            "value": router_availability,
+            "target": targets["router_availability"],
+            "ok": router_availability >= targets["router_availability"],
+        },
+        {
+            "id": "ticket_sla",
+            "value": ticket_sla,
+            "target": targets["ticket_sla"],
+            "ok": ticket_sla >= targets["ticket_sla"],
+        },
+        {
+            "id": "provision_success",
+            "value": provision_success,
+            "target": targets["provision_success"],
+            "ok": provision_success >= targets["provision_success"],
+        },
+    ]
+    score = _ops_score_from_checks([{"ok": item["ok"]} for item in checks])
+    return jsonify(
+        {
+            "window_days": days,
+            "since": since.isoformat() + "Z",
+            "targets": targets,
+            "metrics": metrics,
+            "checks": checks,
+            "score": score,
+            "samples": {
+                "routers_total": total_routers,
+                "tickets_resolved": len(resolved),
+                "provision_operations": total_ops,
+            },
+        }
+    ), 200
+
+
+@main_bp.route('/admin/ops/collections-summary', methods=['GET'])
+@permission_required('billing.promises.read')
+def admin_ops_collections_summary():
+    tenant_id = current_tenant_id()
+    subs_q = Subscription.query
+    invoices_q = Invoice.query
+    promises_q = BillingPromise.query
+    if tenant_id is not None:
+        subs_q = subs_q.filter_by(tenant_id=tenant_id)
+        invoices_q = invoices_q.join(Subscription, Invoice.subscription_id == Subscription.id).filter(Subscription.tenant_id == tenant_id)
+        promises_q = promises_q.filter_by(tenant_id=tenant_id)
+
+    payload = {
+        "subscriptions": {
+            "active": subs_q.filter_by(status='active').count(),
+            "past_due": subs_q.filter_by(status='past_due').count(),
+            "suspended": subs_q.filter_by(status='suspended').count(),
+        },
+        "invoices": {
+            "pending": invoices_q.filter_by(status='pending').count(),
+            "paid": invoices_q.filter_by(status='paid').count(),
+            "cancelled": invoices_q.filter_by(status='cancelled').count(),
+        },
+        "promises": {
+            "pending": promises_q.filter_by(status='pending').count(),
+            "kept": promises_q.filter_by(status='kept').count(),
+            "broken": promises_q.filter_by(status='broken').count(),
+            "cancelled": promises_q.filter_by(status='cancelled').count(),
+        },
+        "generated_at": _iso_utc_now(),
+    }
+    return jsonify(payload), 200
+
+
+@main_bp.route('/admin/ops/support-sla-summary', methods=['GET'])
+@permission_required('tickets.read')
+def admin_ops_support_sla_summary():
+    tenant_id = current_tenant_id()
+    now_dt = datetime.utcnow()
+    tickets_q = Ticket.query
+    if tenant_id is not None:
+        tickets_q = tickets_q.filter_by(tenant_id=tenant_id)
+
+    open_q = tickets_q.filter(Ticket.status.in_(('open', 'in_progress')))
+    open_count = open_q.count()
+    overdue_count = open_q.filter(Ticket.sla_due_at.isnot(None), Ticket.sla_due_at < now_dt).count()
+    next_four_hours = now_dt + timedelta(hours=4)
+    due_soon_count = open_q.filter(
+        Ticket.sla_due_at.isnot(None),
+        Ticket.sla_due_at >= now_dt,
+        Ticket.sla_due_at <= next_four_hours,
+    ).count()
+    payload = {
+        "open": open_count,
+        "overdue": overdue_count,
+        "due_soon_4h": due_soon_count,
+        "sla_compliance_estimate": round(((open_count - overdue_count) / max(1, open_count)) * 100, 2),
+        "generated_at": _iso_utc_now(),
+    }
+    return jsonify(payload), 200
 
 
 # ==================== TICKETS CON SLA ====================

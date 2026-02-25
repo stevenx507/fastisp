@@ -178,7 +178,13 @@ def test_tr069_reprovision_live_requires_acs_base_url(client, app):
 
     response = client.post(
         "/api/olt/devices/OLT-ZTE-001/tr069/reprovision",
-        json={"host": "acs.provider.local", "run_mode": "live", "live_confirm": True},
+        json={
+            "host": "acs.provider.local",
+            "run_mode": "live",
+            "live_confirm": True,
+            "change_ticket": "CHG-TEST-001",
+            "preflight_ack": True,
+        },
         headers=headers,
     )
 
@@ -225,6 +231,8 @@ def test_tr069_reprovision_live_calls_acs(client, app, monkeypatch):
             "serial": "ZTEG00000001",
             "run_mode": "live",
             "live_confirm": True,
+            "change_ticket": "CHG-TEST-002",
+            "preflight_ack": True,
         },
         headers=headers,
     )

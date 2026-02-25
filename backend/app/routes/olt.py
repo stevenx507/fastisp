@@ -14,7 +14,7 @@ from flask import Blueprint, current_app, jsonify, request
 from flask_jwt_extended import get_jwt_identity
 
 from app import cache
-from app.models import AuditLog, User
+from app.models import AdminSystemSetting, AuditLog, User
 from app.routes.main_routes import admin_required
 from app.services.acs_service import ACSService
 from app.services.olt_script_service import OLTScriptService, SUPPORTED_VENDORS
@@ -125,6 +125,14 @@ def _validate_live_confirm(run_mode: str, data):
     if run_mode != "live":
         return None
     if _as_bool((data or {}).get("live_confirm")):
+        if _tenant_setting_bool("change_control_required_for_live", default=True):
+            change_ticket = str((data or {}).get("change_ticket") or "").strip()
+            if not change_ticket:
+                return jsonify({"success": False, "error": "change_ticket is required when live mode is enabled"}), 400
+        if _tenant_setting_bool("require_preflight_for_live", default=True):
+            preflight_ack = _as_bool((data or {}).get("preflight_ack"))
+            if not preflight_ack:
+                return jsonify({"success": False, "error": "preflight_ack=true is required for live mode"}), 400
         return None
     return jsonify({"success": False, "error": "live_confirm is required for live mode"}), 400
 
@@ -310,6 +318,24 @@ def _service() -> OLTScriptService:
     except TypeError:
         # Backward-compatible fallback for tests monkeypatching OLTScriptService with minimal stubs.
         return OLTScriptService()
+
+
+def _tenant_setting_bool(key_name: str, default: bool = False) -> bool:
+    tenant_id = current_tenant_id()
+    query = AdminSystemSetting.query.filter_by(key=key_name)
+    if tenant_id is None:
+        query = query.filter(AdminSystemSetting.tenant_id.is_(None))
+    else:
+        query = query.filter(AdminSystemSetting.tenant_id == tenant_id)
+    row = query.first()
+    if row is None:
+        return default
+    value = row.value
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _probe_tcp(host: str, port: int, timeout_seconds: float = 2.5) -> dict:
