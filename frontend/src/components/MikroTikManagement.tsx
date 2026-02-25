@@ -13,7 +13,6 @@ import ConnectionsTab from './ConnectionsTab'
 import OverviewTab from './OverviewTab'
 import QueuesTab from './QueuesTab'
 import SidePanels from './SidePanels'
-import { safeStorage } from '../lib/storage'
 import config from '../lib/config'
 import { useAuthStore } from '../store/authStore'
 import { RouterItem, RouterStats, Toast } from './types'
@@ -321,7 +320,9 @@ const MikroTikManagement: React.FC = () => {
   const [enterpriseChangeLog, setEnterpriseChangeLog] = useState<EnterpriseChangeLogEntry[]>([])
   const [wireGuardImporting, setWireGuardImporting] = useState(false)
   const [wireGuardImportSummary, setWireGuardImportSummary] = useState<WireGuardImportResponse | null>(null)
+  const token = useAuthStore((state) => state.token)
   const tenantContextId = useAuthStore((state) => state.tenantContextId)
+  const logout = useAuthStore((state) => state.logout)
 
   const addToast = useCallback((type: Toast['type'], message: string) => {
     const id = Date.now() + Math.floor(Math.random() * 1000)
@@ -336,9 +337,8 @@ const MikroTikManagement: React.FC = () => {
   }
 
   const authHeaders = useCallback(() => {
-    const token = safeStorage.getItem('token')
     return token ? { Authorization: `Bearer ${token}` } : {}
-  }, [])
+  }, [token])
 
   const API_BASE = useMemo(() => {
     const raw = config.API_BASE_URL || '/api'
@@ -380,14 +380,13 @@ const MikroTikManagement: React.FC = () => {
       const url = path.startsWith('http') ? path : `${API_BASE}${normalizedPath}`
       return fetch(url, { ...options, headers }).then(async (res) => {
         if (res.status === 401) {
-          safeStorage.removeItem('token')
-          window.location.href = '/login'
+          logout()
           throw new Error('Unauthorized')
         }
         return res
       })
     },
-    [API_BASE, authHeaders, tenantContextId]
+    [API_BASE, authHeaders, logout, tenantContextId]
   )
 
   const loadRouters = useCallback(async () => {
