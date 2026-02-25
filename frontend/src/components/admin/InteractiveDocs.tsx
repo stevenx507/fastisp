@@ -56,6 +56,7 @@ interface InteractiveDocsProps {
 }
 
 const PROGRESS_STORAGE_KEY = 'interactive_docs_progress_v1'
+const GUIDED_MODE_STORAGE_KEY = 'interactive_docs_guided_mode_v1'
 
 const SECTION_META: Array<{ id: SectionId; label: string; description: string }> = [
   {
@@ -328,6 +329,7 @@ const InteractiveDocs: React.FC<InteractiveDocsProps> = ({ onNavigateToModule })
   const [activeSection, setActiveSection] = useState<SectionId>('mikrotik')
   const [search, setSearch] = useState('')
   const [selectedStepId, setSelectedStepId] = useState('')
+  const [guidedMode, setGuidedMode] = useState(() => safeStorage.getItem(GUIDED_MODE_STORAGE_KEY) === 'true')
   const [progress, setProgress] = useState<ProgressState>(() => parseStoredProgress(safeStorage.getItem(PROGRESS_STORAGE_KEY)))
 
   const stepsById = useMemo(() => {
@@ -340,6 +342,10 @@ const InteractiveDocs: React.FC<InteractiveDocsProps> = ({ onNavigateToModule })
   useEffect(() => {
     safeStorage.setItem(PROGRESS_STORAGE_KEY, JSON.stringify(progress))
   }, [progress])
+
+  useEffect(() => {
+    safeStorage.setItem(GUIDED_MODE_STORAGE_KEY, guidedMode ? 'true' : 'false')
+  }, [guidedMode])
 
   const sectionSteps = useMemo(() => {
     return GUIDE_STEPS.filter((step) => step.section === activeSection)
@@ -372,6 +378,18 @@ const InteractiveDocs: React.FC<InteractiveDocsProps> = ({ onNavigateToModule })
   const selectedStep = useMemo(() => {
     return filteredSteps.find((step) => step.id === selectedStepId) || filteredSteps[0] || null
   }, [filteredSteps, selectedStepId])
+
+  const firstPendingStep = useMemo(() => {
+    return sectionSteps.find((step) => !progress[step.id]?.done) || sectionSteps[0] || null
+  }, [progress, sectionSteps])
+
+  useEffect(() => {
+    if (!guidedMode) return
+    setSearch('')
+    const inCurrentSection = sectionSteps.some((step) => step.id === selectedStepId)
+    if (inCurrentSection) return
+    if (firstPendingStep) setSelectedStepId(firstPendingStep.id)
+  }, [activeSection, firstPendingStep, guidedMode, sectionSteps, selectedStepId])
 
   const sectionProgress = useMemo(() => {
     const total = sectionSteps.length
@@ -445,6 +463,26 @@ const InteractiveDocs: React.FC<InteractiveDocsProps> = ({ onNavigateToModule })
     [stepsById]
   )
 
+  const markStepDone = useCallback(
+    (stepId: string) => {
+      setProgress((prev) => {
+        const step = stepsById[stepId]
+        if (!step) return prev
+        const current = prev[stepId] || { done: false, checks: {} }
+        const checks = { ...current.checks }
+        for (const item of step.checklist) checks[item.id] = true
+        return {
+          ...prev,
+          [stepId]: {
+            done: true,
+            checks,
+          },
+        }
+      })
+    },
+    [stepsById]
+  )
+
   const resetCurrentSection = useCallback(() => {
     setProgress((prev) => {
       const next = { ...prev }
@@ -468,6 +506,45 @@ const InteractiveDocs: React.FC<InteractiveDocsProps> = ({ onNavigateToModule })
     },
     [onNavigateToModule]
   )
+
+  const startGuidedMode = useCallback(() => {
+    if (!firstPendingStep) {
+      toast('No hay pasos disponibles en esta seccion.')
+      return
+    }
+    setGuidedMode(true)
+    setSearch('')
+    setSelectedStepId(firstPendingStep.id)
+    toast.success('Asistente guiado iniciado.')
+  }, [firstPendingStep])
+
+  const stopGuidedMode = useCallback(() => {
+    setGuidedMode(false)
+    toast('Asistente guiado detenido.')
+  }, [])
+
+  const goToNextGuidedStep = useCallback(() => {
+    if (!sectionSteps.length) return
+    if (!selectedStep) {
+      const nextFromStart = sectionSteps.find((step) => !progress[step.id]?.done) || sectionSteps[0]
+      setSelectedStepId(nextFromStart.id)
+      return
+    }
+    const currentIndex = sectionSteps.findIndex((step) => step.id === selectedStep.id)
+    const next = currentIndex >= 0 ? sectionSteps[currentIndex + 1] : null
+    if (next) {
+      setSelectedStepId(next.id)
+      return
+    }
+    setGuidedMode(false)
+    toast.success('Completaste esta guia.')
+  }, [progress, sectionSteps, selectedStep])
+
+  const completeAndContinue = useCallback(() => {
+    if (!selectedStep) return
+    markStepDone(selectedStep.id)
+    goToNextGuidedStep()
+  }, [goToNextGuidedStep, markStepDone, selectedStep])
 
   const copyStepGuide = useCallback(async () => {
     if (!selectedStep) return
@@ -546,6 +623,63 @@ const InteractiveDocs: React.FC<InteractiveDocsProps> = ({ onNavigateToModule })
             </button>
           )
         })}
+      </div>
+
+      <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold text-emerald-900">Asistente guiado de implementacion</p>
+            <p className="text-xs text-emerald-800">
+              Te lleva paso a paso: abre modulo, marca checklist y avanza al siguiente.
+            </p>
+          </div>
+          {!guidedMode ? (
+            <button
+              onClick={startGuidedMode}
+              className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700"
+            >
+              Iniciar guia de esta seccion
+            </button>
+          ) : (
+            <button
+              onClick={stopGuidedMode}
+              className="rounded-lg border border-emerald-400 bg-white px-3 py-2 text-xs font-semibold text-emerald-900 hover:bg-emerald-100"
+            >
+              Detener guia
+            </button>
+          )}
+        </div>
+
+        {guidedMode && selectedStep && (
+          <div className="mt-3 rounded-lg border border-emerald-300 bg-white p-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-emerald-700">Paso actual</p>
+            <p className="mt-1 text-sm font-semibold text-gray-900">{selectedStep.title}</p>
+            <p className="mt-1 text-xs text-gray-700">{selectedStep.summary}</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {selectedStep.moduleId && (
+                <button
+                  onClick={() => openModule(selectedStep.moduleId)}
+                  className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white hover:bg-indigo-700"
+                >
+                  {selectedStep.moduleLabel || 'Abrir modulo'}
+                  <ArrowTopRightOnSquareIcon className="h-4 w-4" />
+                </button>
+              )}
+              <button
+                onClick={completeAndContinue}
+                className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700"
+              >
+                Marcar completado y continuar
+              </button>
+              <button
+                onClick={goToNextGuidedStep}
+                className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50"
+              >
+                Saltar al siguiente paso
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="rounded-xl border border-gray-200 bg-white p-4">

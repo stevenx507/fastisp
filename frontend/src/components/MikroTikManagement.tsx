@@ -1,4 +1,4 @@
-﻿import React, { useCallback, useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ChartBarIcon,
   CogIcon,
@@ -14,6 +14,8 @@ import OverviewTab from './OverviewTab'
 import QueuesTab from './QueuesTab'
 import SidePanels from './SidePanels'
 import { safeStorage } from '../lib/storage'
+import config from '../lib/config'
+import { useAuthStore } from '../store/authStore'
 import { RouterItem, RouterStats, Toast } from './types'
 
 interface RouterListResponse {
@@ -246,6 +248,7 @@ const MikroTikManagement: React.FC = () => {
   const [failoverCount, setFailoverCount] = useState('4')
   const [failoverResult, setFailoverResult] = useState<EnterpriseFailoverReport | null>(null)
   const [enterpriseChangeLog, setEnterpriseChangeLog] = useState<EnterpriseChangeLogEntry[]>([])
+  const tenantContextId = useAuthStore((state) => state.tenantContextId)
 
   const addToast = useCallback((type: Toast['type'], message: string) => {
     const id = Date.now() + Math.floor(Math.random() * 1000)
@@ -264,7 +267,10 @@ const MikroTikManagement: React.FC = () => {
     return token ? { Authorization: `Bearer ${token}` } : {}
   }, [])
 
-  const API_BASE = (import.meta as { env?: { VITE_API_BASE_URL?: string } }).env?.VITE_API_BASE_URL || ''
+  const API_BASE = useMemo(() => {
+    const raw = config.API_BASE_URL || '/api'
+    return raw.endsWith('/') ? raw.slice(0, -1) : raw
+  }, [])
 
   const withChangeTicket = useCallback(
     (payload: Record<string, unknown> = {}) => {
@@ -291,6 +297,9 @@ const MikroTikManagement: React.FC = () => {
         ...(authHeaders() as Record<string, string>),
         ...((options.headers as Record<string, string>) || {}),
       }
+      if (tenantContextId !== null && tenantContextId !== undefined) {
+        headers['X-Tenant-ID'] = String(tenantContextId)
+      }
       const url = path.startsWith('http') ? path : `${API_BASE}${path}`
       return fetch(url, { ...options, headers }).then(async (res) => {
         if (res.status === 401) {
@@ -301,7 +310,7 @@ const MikroTikManagement: React.FC = () => {
         return res
       })
     },
-    [API_BASE, authHeaders]
+    [API_BASE, authHeaders, tenantContextId]
   )
 
   const loadRouters = useCallback(async () => {
