@@ -11,7 +11,7 @@ from flask import Blueprint, jsonify, request, Response, current_app
 from flask_jwt_extended import create_access_token, get_jwt_identity, jwt_required
 
 from app.models import Client, User, Subscription, MikroTikRouter, Plan, AuditLog, Ticket, Invoice, PaymentRecord, TicketComment, Tenant
-from app import limiter, cache, db
+from app import limiter, cache, db, mail
 import pyotp
 import requests
 from app.services.mikrotik_service import MikroTikService
@@ -75,6 +75,20 @@ def _parse_bool(value) -> bool | None:
     if token in {'0', 'false', 'no', 'n', 'off'}:
         return False
     return None
+
+
+def _password_reset_token_ttl_seconds() -> int:
+    default_minutes = 30
+    try:
+        configured = int(current_app.config.get('PASSWORD_RESET_TOKEN_TTL_MINUTES', default_minutes))
+    except (TypeError, ValueError):
+        configured = default_minutes
+    safe_minutes = max(5, min(configured, 240))
+    return safe_minutes * 60
+
+
+def _password_reset_key(token: str) -> str:
+    return f"password_reset:{token}"
 
 
 def _password_rotation_dry_run_enabled() -> bool:
@@ -1069,6 +1083,106 @@ def login():
         return jsonify({"token": access_token, "user": user.to_dict()}), 200
 
     return jsonify({"error": "Credenciales incorrectas."}), 401
+
+
+@main_bp.route('/auth/password/forgot', methods=['POST'])
+@limiter.limit("10/minute")
+def forgot_password():
+    data = request.get_json() or {}
+    email = str(data.get('email') or '').strip().lower()
+    if not email:
+        return jsonify({"error": "email es requerido"}), 400
+
+    tenant_id = current_tenant_id()
+    query = User.query.filter_by(email=email)
+    if tenant_id is not None:
+        query = query.filter_by(tenant_id=tenant_id)
+    user = query.first()
+
+    reset_token = None
+    if user:
+        reset_token = secrets.token_urlsafe(32)
+        ttl_seconds = _password_reset_token_ttl_seconds()
+        cache.set(
+            _password_reset_key(reset_token),
+            {"user_id": user.id, "tenant_id": user.tenant_id},
+            timeout=ttl_seconds,
+        )
+        try:
+            if mail and current_app.config.get('MAIL_SERVER') and user.email:
+                app_name = str(current_app.config.get('APP_NAME') or 'ISPFAST').strip()
+                ttl_minutes = max(1, ttl_seconds // 60)
+                reset_url = f"{current_app.config.get('FRONTEND_URL') or ''}/login?reset_token={reset_token}"
+                message = Message(
+                    subject=f'{app_name}: recuperacion de password',
+                    recipients=[user.email],
+                    body=(
+                        "Recibimos una solicitud para restablecer tu password.\n\n"
+                        f"Token: {reset_token}\n"
+                        f"Enlace: {reset_url}\n"
+                        f"Este token expira en {ttl_minutes} minutos."
+                    ),
+                    sender=current_app.config.get('MAIL_DEFAULT_SENDER'),
+                )
+                mail.send(message)
+        except Exception:
+            current_app.logger.warning("No se pudo enviar correo de recuperacion de password")
+
+    payload = {
+        "success": True,
+        "message": "Si el correo existe, enviaremos instrucciones para restablecer el acceso.",
+    }
+    allow_token_response = bool(
+        current_app.config.get('TESTING')
+        or current_app.config.get('ALLOW_INSECURE_PASSWORD_RESET_TOKEN_RESPONSE', False)
+    )
+    if reset_token and allow_token_response:
+        payload["reset_token"] = reset_token
+    return jsonify(payload), 200
+
+
+@main_bp.route('/auth/password/reset', methods=['POST'])
+@limiter.limit("10/minute")
+def reset_password():
+    data = request.get_json() or {}
+    token = str(data.get('token') or '').strip()
+    new_password = str(data.get('new_password') or '')
+
+    if not token:
+        return jsonify({"error": "token es requerido"}), 400
+    if not new_password:
+        return jsonify({"error": "new_password es requerido"}), 400
+    if len(new_password) < 8:
+        return jsonify({"error": "La nueva contraseña debe tener al menos 8 caracteres."}), 400
+
+    key = _password_reset_key(token)
+    token_data = cache.get(key)
+    if not isinstance(token_data, dict):
+        return jsonify({"error": "Token invalido o expirado."}), 400
+
+    user_id = _parse_int(token_data.get('user_id'))
+    if not user_id:
+        cache.delete(key)
+        return jsonify({"error": "Token invalido o expirado."}), 400
+
+    user = db.session.get(User, user_id)
+    if not user:
+        cache.delete(key)
+        return jsonify({"error": "Token invalido o expirado."}), 400
+
+    tenant_id = current_tenant_id()
+    token_tenant = _parse_int(token_data.get('tenant_id'))
+    if tenant_id is not None and token_tenant not in (None, tenant_id):
+        return jsonify({"error": "Token invalido o expirado."}), 400
+
+    if user.check_password(new_password):
+        return jsonify({"error": "La nueva contraseña debe ser diferente a la actual."}), 400
+
+    user.set_password(new_password)
+    db.session.add(user)
+    db.session.commit()
+    cache.delete(key)
+    return jsonify({"success": True}), 200
 
 
 @main_bp.route('/platform/bootstrap/status', methods=['GET'])

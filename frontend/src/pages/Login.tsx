@@ -37,6 +37,11 @@ const LoginForm: React.FC = () => {
   const [rememberMe, setRememberMe] = useState(!!safeStorage.getItem('rememberedEmail'))
   const [isLoading, setIsLoading] = useState(false)
   const [isGoogleReady, setIsGoogleReady] = useState(false)
+  const [showRecovery, setShowRecovery] = useState(false)
+  const [recoveryEmail, setRecoveryEmail] = useState('')
+  const [recoveryToken, setRecoveryToken] = useState('')
+  const [recoveryPassword, setRecoveryPassword] = useState('')
+  const [isRecovering, setIsRecovering] = useState(false)
   const { login } = useAuthStore()
 
   const handleRememberMeChange = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -67,6 +72,58 @@ const LoginForm: React.FC = () => {
     }
   }
 
+  const handleRequestPasswordReset = async () => {
+    if (!recoveryEmail.trim()) {
+      toast.error('Ingresa tu correo para recuperar password')
+      return
+    }
+
+    setIsRecovering(true)
+    try {
+      const response = (await apiClient.post('/auth/password/forgot', {
+        email: recoveryEmail.trim().toLowerCase(),
+      })) as { message?: string; reset_token?: string }
+      toast.success(response?.message || 'Si el correo existe, te enviaremos instrucciones.')
+      if (response?.reset_token) {
+        setRecoveryToken(response.reset_token)
+        toast.success('Token de recuperacion recibido para este entorno.')
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo iniciar recuperacion'
+      toast.error(message)
+    } finally {
+      setIsRecovering(false)
+    }
+  }
+
+  const handleResetPassword = async () => {
+    if (!recoveryToken.trim()) {
+      toast.error('Ingresa el token de recuperacion')
+      return
+    }
+    if (recoveryPassword.length < 8) {
+      toast.error('La nueva password debe tener al menos 8 caracteres')
+      return
+    }
+
+    setIsRecovering(true)
+    try {
+      await apiClient.post('/auth/password/reset', {
+        token: recoveryToken.trim(),
+        new_password: recoveryPassword,
+      })
+      toast.success('Password actualizada. Ya puedes iniciar sesion.')
+      setShowRecovery(false)
+      setRecoveryToken('')
+      setRecoveryPassword('')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo restablecer password'
+      toast.error(message)
+    } finally {
+      setIsRecovering(false)
+    }
+  }
+
   const handleGoogleCredential = useCallback(async (credential: string) => {
     if (!credential) {
       toast.error('No se recibio token de Google')
@@ -79,6 +136,19 @@ const LoginForm: React.FC = () => {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Error iniciando con Google'
       toast.error(message)
+    }
+  }, [])
+
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search)
+      const token = (params.get('reset_token') || '').trim()
+      if (token) {
+        setRecoveryToken(token)
+        setShowRecovery(true)
+      }
+    } catch {
+      // ignore malformed URLs in unsupported environments
     }
   }, [])
 
@@ -163,12 +233,58 @@ const LoginForm: React.FC = () => {
         </div>
         <button
           type="button"
-          onClick={() => toast('Recuperacion de password en desarrollo')}
+          onClick={() => {
+            setRecoveryEmail((prev) => prev || email)
+            setShowRecovery((prev) => !prev)
+          }}
           className="text-sm font-medium text-emerald-300 hover:text-white"
         >
           Olvide mi password
         </button>
       </div>
+
+      {showRecovery && (
+        <div className="space-y-3 rounded-xl border border-white/15 bg-white/5 p-4">
+          <p className="text-sm font-semibold text-white">Recuperar password</p>
+          <input
+            type="email"
+            value={recoveryEmail}
+            onChange={(event) => setRecoveryEmail(event.target.value)}
+            className="block w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white placeholder:text-white/50 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-400"
+            placeholder="correo@ejemplo.com"
+          />
+          <button
+            type="button"
+            onClick={() => void handleRequestPasswordReset()}
+            disabled={isRecovering}
+            className="w-full rounded-xl border border-white/20 bg-white/10 px-3 py-2 text-sm font-semibold text-white hover:bg-white/20 disabled:opacity-60"
+          >
+            {isRecovering ? 'Enviando...' : 'Solicitar token de recuperacion'}
+          </button>
+
+          <input
+            value={recoveryToken}
+            onChange={(event) => setRecoveryToken(event.target.value)}
+            className="block w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white placeholder:text-white/50 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-400"
+            placeholder="Token de recuperacion"
+          />
+          <input
+            type="password"
+            value={recoveryPassword}
+            onChange={(event) => setRecoveryPassword(event.target.value)}
+            className="block w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white placeholder:text-white/50 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-400"
+            placeholder="Nueva password"
+          />
+          <button
+            type="button"
+            onClick={() => void handleResetPassword()}
+            disabled={isRecovering}
+            className="w-full rounded-xl bg-emerald-600 px-3 py-2 text-sm font-semibold text-white hover:bg-emerald-500 disabled:opacity-60"
+          >
+            {isRecovering ? 'Procesando...' : 'Restablecer password'}
+          </button>
+        </div>
+      )}
 
       <button
         type="submit"
