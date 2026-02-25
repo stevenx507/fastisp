@@ -108,7 +108,7 @@ def test_back_to_home_actions_execute_scripts(client, app, monkeypatch):
 
     enable_response = client.post(
         f'/api/mikrotik/routers/{router_id}/back-to-home/enable',
-        json={'confirm': True, 'change_ticket': 'CHG-BTH-001'},
+        json={'confirm': True, 'change_ticket': 'CHG-BTH-001', 'preflight_ack': True},
         headers=headers,
     )
     assert enable_response.status_code == 200
@@ -122,6 +122,7 @@ def test_back_to_home_actions_execute_scripts(client, app, monkeypatch):
             'private_key': 'base64-private-key',
             'allow_lan': True,
             'change_ticket': 'CHG-BTH-001',
+            'preflight_ack': True,
         },
         headers=headers,
     )
@@ -130,7 +131,7 @@ def test_back_to_home_actions_execute_scripts(client, app, monkeypatch):
 
     remove_user_response = client.post(
         f'/api/mikrotik/routers/{router_id}/back-to-home/users/remove',
-        json={'confirm': True, 'user_name': 'noc-vps', 'change_ticket': 'CHG-BTH-001'},
+        json={'confirm': True, 'user_name': 'noc-vps', 'change_ticket': 'CHG-BTH-001', 'preflight_ack': True},
         headers=headers,
     )
     assert remove_user_response.status_code == 200
@@ -161,14 +162,14 @@ def test_back_to_home_actions_require_confirmation(client, app):
 
     enable_response = client.post(
         f'/api/mikrotik/routers/{router_id}/back-to-home/enable',
-        json={'change_ticket': 'CHG-BTH-002'},
+        json={'change_ticket': 'CHG-BTH-002', 'preflight_ack': True},
         headers=headers,
     )
     assert enable_response.status_code == 400
 
     add_user_response = client.post(
         f'/api/mikrotik/routers/{router_id}/back-to-home/users/add',
-        json={'confirm': True, 'user_name': 'noc-vps', 'change_ticket': 'CHG-BTH-002'},
+        json={'confirm': True, 'user_name': 'noc-vps', 'change_ticket': 'CHG-BTH-002', 'preflight_ack': True},
         headers=headers,
     )
     assert add_user_response.status_code == 400
@@ -202,6 +203,7 @@ def test_back_to_home_bootstrap_runs_single_flow(client, app, monkeypatch):
             'private_key': 'base64-private-key',
             'allow_lan': True,
             'change_ticket': 'CHG-BTH-003',
+            'preflight_ack': True,
         },
         headers=headers,
     )
@@ -257,6 +259,14 @@ def test_change_ticket_guard_required_for_high_risk_mikrotik_actions(client, app
     )
     assert reboot_response.status_code == 400
     assert 'change_ticket' in str(reboot_response.get_json().get('error', ''))
+
+    reboot_preflight_response = client.post(
+        f'/api/mikrotik/routers/{router_id}/reboot',
+        json={'change_ticket': 'CHG-RISK-001'},
+        headers=headers,
+    )
+    assert reboot_preflight_response.status_code == 400
+    assert 'preflight_ack' in str(reboot_preflight_response.get_json().get('error', ''))
 
     execute_response = client.post(
         f'/api/mikrotik/routers/{router_id}/execute-script',
@@ -343,7 +353,7 @@ def test_change_ticket_guard_can_be_disabled_by_setting(client, app, monkeypatch
 
     reboot_response = client.post(
         f'/api/mikrotik/routers/{router_id}/reboot',
-        json={},
+        json={'preflight_ack': True},
         headers=headers,
     )
     assert reboot_response.status_code == 200

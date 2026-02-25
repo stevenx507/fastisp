@@ -159,6 +159,27 @@ def _change_control_guard(required_default: bool = True):
     return jsonify({'success': False, 'error': 'change_ticket is required for this action'}), 400
 
 
+def _preflight_guard(required_default: bool = True):
+    required = _tenant_setting_bool("require_preflight_for_live", default=required_default)
+    if not required:
+        return None
+
+    data = request.get_json(silent=True) or {}
+    preflight_ack = _as_bool(data.get('preflight_ack'), default=False)
+    if preflight_ack:
+        return None
+    return jsonify({'success': False, 'error': 'preflight_ack=true is required for this action'}), 400
+
+
+def _live_guard(require_preflight: bool = False, required_default: bool = True):
+    change_error = _change_control_guard(required_default=required_default)
+    if change_error:
+        return change_error
+    if not require_preflight:
+        return None
+    return _preflight_guard(required_default=required_default)
+
+
 def _pick_value(data: Dict[str, Any], *keys: str):
     for key in keys:
         if key in data:
@@ -737,7 +758,7 @@ def enable_back_to_home(router_id):
     if not router:
         return jsonify({'success': False, 'error': 'Router not found'}), 404
 
-    guard_error = _change_control_guard(required_default=True)
+    guard_error = _live_guard(require_preflight=True, required_default=True)
     if guard_error:
         return guard_error
 
@@ -780,7 +801,7 @@ def add_back_to_home_user(router_id):
     if not router:
         return jsonify({'success': False, 'error': 'Router not found'}), 404
 
-    guard_error = _change_control_guard(required_default=True)
+    guard_error = _live_guard(require_preflight=True, required_default=True)
     if guard_error:
         return guard_error
 
@@ -831,7 +852,7 @@ def remove_back_to_home_user(router_id):
     if not router:
         return jsonify({'success': False, 'error': 'Router not found'}), 404
 
-    guard_error = _change_control_guard(required_default=True)
+    guard_error = _live_guard(require_preflight=True, required_default=True)
     if guard_error:
         return guard_error
 
@@ -869,7 +890,7 @@ def bootstrap_back_to_home(router_id):
     if not router:
         return jsonify({'success': False, 'error': 'Router not found'}), 404
 
-    guard_error = _change_control_guard(required_default=True)
+    guard_error = _live_guard(require_preflight=True, required_default=True)
     if guard_error:
         return guard_error
 
@@ -1320,7 +1341,7 @@ def test_connection(router_id):
 def reboot_router(router_id):
     """Reboot MikroTik router"""
     try:
-        guard_error = _change_control_guard(required_default=True)
+        guard_error = _live_guard(require_preflight=True, required_default=True)
         if guard_error:
             return guard_error
         with MikroTikService(router_id) as service:
@@ -1337,7 +1358,7 @@ def reboot_router(router_id):
 def execute_script(router_id):
     """Execute script on router"""
     try:
-        guard_error = _change_control_guard(required_default=True)
+        guard_error = _live_guard(require_preflight=True, required_default=True)
         if guard_error:
             return guard_error
         data = request.get_json() or {}
@@ -1809,7 +1830,7 @@ def apply_enterprise_hardening(router_id):
         auto_rollback = _as_bool(data.get('auto_rollback'), default=True)
 
         if not dry_run:
-            guard_error = _change_control_guard(required_default=True)
+            guard_error = _live_guard(require_preflight=True, required_default=True)
             if guard_error:
                 return guard_error
 
@@ -1939,7 +1960,7 @@ def rollback_enterprise_change(router_id, change_id):
     Rollback a previously registered enterprise change.
     """
     try:
-        guard_error = _change_control_guard(required_default=True)
+        guard_error = _live_guard(require_preflight=True, required_default=True)
         if guard_error:
             return guard_error
         entry = ENTERPRISE_CHANGE_INDEX.get(change_id)
@@ -1980,7 +2001,7 @@ def run_enterprise_failover_test(router_id):
     Execute failover test by pinging multiple targets from the router.
     """
     try:
-        guard_error = _change_control_guard(required_default=True)
+        guard_error = _live_guard(require_preflight=True, required_default=True)
         if guard_error:
             return guard_error
         data = request.get_json() or {}

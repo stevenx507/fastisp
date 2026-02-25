@@ -25,6 +25,7 @@ Este playbook define la capa de proceso para operar FASTISP con estandares tipo 
   - enterprise hardening live
   - enterprise rollback
   - enterprise failover-test
+- Si `require_preflight_for_live=true`, las acciones live de MikroTik tambien exigen `preflight_ack=true`.
 - Ajustable por settings:
   - `change_control_required_for_live`
   - `require_preflight_for_live`

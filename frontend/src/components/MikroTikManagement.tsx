@@ -227,6 +227,7 @@ const MikroTikManagement: React.FC = () => {
   const [bthPrivateKey, setBthPrivateKey] = useState('')
   const [bthAllowLan, setBthAllowLan] = useState(true)
   const [changeTicket, setChangeTicket] = useState('')
+  const [preflightAck, setPreflightAck] = useState(false)
   const [routerForm, setRouterForm] = useState<RouterFormState>({
     name: '',
     ip_address: '',
@@ -268,9 +269,12 @@ const MikroTikManagement: React.FC = () => {
   const withChangeTicket = useCallback(
     (payload: Record<string, unknown> = {}) => {
       const ticket = changeTicket.trim()
-      return ticket ? { ...payload, change_ticket: ticket } : payload
+      const nextPayload: Record<string, unknown> = { ...payload }
+      if (ticket) nextPayload.change_ticket = ticket
+      if (preflightAck) nextPayload.preflight_ack = true
+      return nextPayload
     },
-    [changeTicket]
+    [changeTicket, preflightAck]
   )
 
   const safeJson = useCallback(async (res: Response): Promise<unknown> => {
@@ -866,9 +870,18 @@ const MikroTikManagement: React.FC = () => {
             className="w-full rounded-lg border border-amber-300 bg-white px-3 py-2 text-sm text-gray-900 md:max-w-md"
           />
           <p className="text-xs text-amber-800">
-            Se usa para acciones live (reinicio, scripts y operacion Back To Home).
+            Se usa para acciones live (reinicio, scripts, hardening y operacion Back To Home).
           </p>
         </div>
+        <label className="mt-2 flex items-center gap-2 text-xs text-amber-900">
+          <input
+            type="checkbox"
+            checked={preflightAck}
+            onChange={(e) => setPreflightAck(e.target.checked)}
+            className="rounded border-amber-400"
+          />
+          Preflight validado para ejecutar cambios en vivo
+        </label>
       </div>
 
       <div className="rounded-xl border border-gray-200 bg-white p-4 shadow">
