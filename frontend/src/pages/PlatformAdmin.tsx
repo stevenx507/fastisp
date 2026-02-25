@@ -117,7 +117,6 @@ const PlatformAdmin: React.FC = () => {
     max_admins: '',
     max_routers: '',
     max_clients: '',
-    trial_ends_at: '',
     admin_email: '',
     admin_name: 'Admin ISP',
     admin_password: '',
@@ -170,6 +169,26 @@ const PlatformAdmin: React.FC = () => {
     const parsed = new Date(isoDate)
     if (Number.isNaN(parsed.getTime())) return ''
     return parsed.toISOString().slice(0, 16)
+  }
+
+  const formatDateTime = (isoDate: string | null | undefined): string => {
+    if (!isoDate) return 'Automatico'
+    const parsed = new Date(isoDate)
+    if (Number.isNaN(parsed.getTime())) return 'Automatico'
+    return parsed.toLocaleString('es-PE', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    })
+  }
+
+  const usagePercent = (used: number, limit: number): number => {
+    if (!Number.isFinite(limit) || limit <= 0) return 0
+    const ratio = (used / limit) * 100
+    return Math.max(0, Math.min(100, Math.round(ratio)))
   }
 
   const loadPlatformData = useCallback(async () => {
@@ -260,15 +279,6 @@ const PlatformAdmin: React.FC = () => {
       const maxRouters = parseOptionalInt(tenantForm.max_routers, 'max_routers')
       const maxClients = parseOptionalInt(tenantForm.max_clients, 'max_clients')
 
-      let trialEndsAt: string | undefined
-      if (tenantForm.trial_ends_at.trim()) {
-        const parsed = new Date(tenantForm.trial_ends_at)
-        if (Number.isNaN(parsed.getTime())) {
-          throw new Error('trial_ends_at invalido')
-        }
-        trialEndsAt = parsed.toISOString()
-      }
-
       const payload = {
         name: tenantForm.name.trim(),
         slug: tenantForm.slug.trim() || undefined,
@@ -280,7 +290,6 @@ const PlatformAdmin: React.FC = () => {
         max_admins: maxAdmins,
         max_routers: maxRouters,
         max_clients: maxClients,
-        trial_ends_at: trialEndsAt,
         admin_email: tenantForm.admin_email.trim() || undefined,
         admin_name: tenantForm.admin_name.trim() || undefined,
         admin_password: tenantForm.admin_password.trim() || undefined,
@@ -312,7 +321,6 @@ const PlatformAdmin: React.FC = () => {
         max_admins: '',
         max_routers: '',
         max_clients: '',
-        trial_ends_at: '',
         admin_email: '',
         admin_password: '',
       }))
@@ -503,11 +511,41 @@ const PlatformAdmin: React.FC = () => {
         <section className="space-y-6">
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-5">
             {[
-              { label: 'Tenants', value: overview.tenants_total, icon: BuildingOffice2Icon, tone: 'from-cyan-500/30 to-blue-500/10' },
-              { label: 'Clientes', value: overview.clients_total, icon: UsersIcon, tone: 'from-emerald-500/30 to-green-500/10' },
-              { label: 'Routers', value: overview.routers_total, icon: ServerStackIcon, tone: 'from-amber-500/30 to-orange-500/10' },
-              { label: 'Subs Activas', value: overview.subscriptions_active, icon: CheckBadgeIcon, tone: 'from-violet-500/30 to-indigo-500/10' },
-              { label: 'MRR', value: `$${overview.mrr_total.toFixed(2)}`, icon: BoltIcon, tone: 'from-cyan-500/30 to-emerald-500/10' },
+              {
+                label: 'Tenants',
+                value: overview.tenants_total,
+                meta: `Activos ${overview.tenants_active} | Inactivos ${overview.tenants_inactive}`,
+                icon: BuildingOffice2Icon,
+                tone: 'from-cyan-500/30 to-blue-500/10',
+              },
+              {
+                label: 'Clientes',
+                value: overview.clients_total,
+                meta: `Usuarios ${overview.users_total}`,
+                icon: UsersIcon,
+                tone: 'from-emerald-500/30 to-green-500/10',
+              },
+              {
+                label: 'Routers',
+                value: overview.routers_total,
+                meta: `Subs vencidas ${overview.subscriptions_overdue}`,
+                icon: ServerStackIcon,
+                tone: 'from-amber-500/30 to-orange-500/10',
+              },
+              {
+                label: 'Subs Activas',
+                value: overview.subscriptions_active,
+                meta: `Total subs ${overview.subscriptions_total}`,
+                icon: CheckBadgeIcon,
+                tone: 'from-violet-500/30 to-indigo-500/10',
+              },
+              {
+                label: 'MRR',
+                value: `$${overview.mrr_total.toFixed(2)}`,
+                meta: `Mora ${overview.tenants_past_due} | Trial ${overview.tenants_trial}`,
+                icon: BoltIcon,
+                tone: 'from-cyan-500/30 to-emerald-500/10',
+              },
             ].map((card) => (
               <div
                 key={card.label}
@@ -518,7 +556,7 @@ const PlatformAdmin: React.FC = () => {
                   <card.icon className="h-5 w-5 text-white/80" />
                 </div>
                 <p className="mt-3 text-3xl font-black text-white">{card.value}</p>
-                <p className="mt-1 text-xs text-slate-300">Activos: {overview.tenants_active} | Mora: {overview.tenants_past_due}</p>
+                <p className="mt-1 text-xs text-slate-300">{card.meta}</p>
               </div>
             ))}
           </div>
@@ -575,75 +613,126 @@ const PlatformAdmin: React.FC = () => {
               <div className="py-14 text-center text-slate-300">Cargando tenants...</div>
             ) : (
               <div className="space-y-3">
-                {filteredTenants.map((tenant) => (
-                  <article key={tenant.id} className="rounded-xl border border-white/10 bg-slate-950/35 p-4">
-                    <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <h3 className="text-base font-semibold text-white">{tenant.name}</h3>
-                          <span className={`rounded-full px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.1em] ${tenant.is_active ? 'bg-emerald-500/20 text-emerald-200' : 'bg-rose-500/20 text-rose-200'}`}>
-                            {tenant.is_active ? 'activo' : 'inactivo'}
-                          </span>
-                          <span className="rounded-full bg-cyan-500/20 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.1em] text-cyan-100">
-                            {tenant.plan_code}
-                          </span>
-                          <span className="rounded-full bg-violet-500/20 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.1em] text-violet-100">
-                            {tenant.billing_status}
-                          </span>
+                {filteredTenants.map((tenant) => {
+                  const adminsUsage = usagePercent(tenant.admins_total, tenant.max_admins)
+                  const clientsUsage = usagePercent(tenant.clients_total, tenant.max_clients)
+                  const routersUsage = usagePercent(tenant.routers_total, tenant.max_routers)
+
+                  return (
+                    <article key={tenant.id} className="rounded-xl border border-white/10 bg-slate-950/35 p-4">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <h3 className="text-base font-semibold text-white">{tenant.name}</h3>
+                            <span className={`rounded-full px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.1em] ${tenant.is_active ? 'bg-emerald-500/20 text-emerald-200' : 'bg-rose-500/20 text-rose-200'}`}>
+                              {tenant.is_active ? 'activo' : 'inactivo'}
+                            </span>
+                            <span className="rounded-full bg-cyan-500/20 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.1em] text-cyan-100">
+                              {tenant.plan_code}
+                            </span>
+                            <span className="rounded-full bg-violet-500/20 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.1em] text-violet-100">
+                              {tenant.billing_status}
+                            </span>
+                          </div>
+                          <p className="text-xs text-slate-300">{tenant.host || `${tenant.slug}.fastisp.cloud`}</p>
+                          <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-300">
+                            <p>
+                              <span className="text-slate-400">Creado:</span> {formatDateTime(tenant.created_at)}
+                            </p>
+                            <p>
+                              <span className="text-slate-400">Trial hasta:</span> {formatDateTime(tenant.trial_ends_at)}
+                            </p>
+                          </div>
                         </div>
-                        <p className="text-xs text-slate-300">{tenant.host || `${tenant.slug}.fastisp.cloud`}</p>
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            onClick={() => void toggleTenantStatus(tenant)}
+                            disabled={busy}
+                            className="inline-flex items-center gap-1 rounded-lg border border-white/20 bg-white/5 px-3 py-1.5 text-xs font-semibold text-white hover:bg-white/10 disabled:opacity-60"
+                          >
+                            <BoltIcon className="h-4 w-4" />
+                            {tenant.is_active ? 'Desactivar' : 'Activar'}
+                          </button>
+                          <button
+                            onClick={() => openEditTenant(tenant)}
+                            disabled={busy}
+                            className="inline-flex items-center gap-1 rounded-lg border border-cyan-400/40 bg-cyan-500/20 px-3 py-1.5 text-xs font-semibold text-cyan-100 hover:bg-cyan-500/30 disabled:opacity-60"
+                          >
+                            Editar
+                          </button>
+                          <button
+                            onClick={() => openBillingEditor(tenant)}
+                            disabled={busy}
+                            className="inline-flex items-center gap-1 rounded-lg border border-violet-400/40 bg-violet-500/20 px-3 py-1.5 text-xs font-semibold text-violet-100 hover:bg-violet-500/30 disabled:opacity-60"
+                          >
+                            Suscripcion
+                          </button>
+                          <button
+                            onClick={() => openCreateAdmin(tenant)}
+                            disabled={busy}
+                            className="inline-flex items-center gap-1 rounded-lg border border-emerald-400/40 bg-emerald-500/20 px-3 py-1.5 text-xs font-semibold text-emerald-100 hover:bg-emerald-500/30 disabled:opacity-60"
+                          >
+                            <UserPlusIcon className="h-4 w-4" />
+                            Crear admin
+                          </button>
+                          <button
+                            onClick={() => openTenantAdminMode(tenant)}
+                            disabled={busy}
+                            className="inline-flex items-center gap-1 rounded-lg border border-amber-300/40 bg-amber-500/20 px-3 py-1.5 text-xs font-semibold text-amber-100 hover:bg-amber-500/30 disabled:opacity-60"
+                          >
+                            Entrar panel ISP
+                          </button>
+                        </div>
                       </div>
-                      <div className="flex flex-wrap gap-2">
-                        <button
-                          onClick={() => void toggleTenantStatus(tenant)}
-                          disabled={busy}
-                          className="inline-flex items-center gap-1 rounded-lg border border-white/20 bg-white/5 px-3 py-1.5 text-xs font-semibold text-white hover:bg-white/10 disabled:opacity-60"
-                        >
-                          <BoltIcon className="h-4 w-4" />
-                          {tenant.is_active ? 'Desactivar' : 'Activar'}
-                        </button>
-                        <button
-                          onClick={() => openEditTenant(tenant)}
-                          disabled={busy}
-                          className="inline-flex items-center gap-1 rounded-lg border border-cyan-400/40 bg-cyan-500/20 px-3 py-1.5 text-xs font-semibold text-cyan-100 hover:bg-cyan-500/30 disabled:opacity-60"
-                        >
-                          Editar
-                        </button>
-                        <button
-                          onClick={() => openBillingEditor(tenant)}
-                          disabled={busy}
-                          className="inline-flex items-center gap-1 rounded-lg border border-violet-400/40 bg-violet-500/20 px-3 py-1.5 text-xs font-semibold text-violet-100 hover:bg-violet-500/30 disabled:opacity-60"
-                        >
-                          Suscripcion
-                        </button>
-                        <button
-                          onClick={() => openCreateAdmin(tenant)}
-                          disabled={busy}
-                          className="inline-flex items-center gap-1 rounded-lg border border-emerald-400/40 bg-emerald-500/20 px-3 py-1.5 text-xs font-semibold text-emerald-100 hover:bg-emerald-500/30 disabled:opacity-60"
-                        >
-                          <UserPlusIcon className="h-4 w-4" />
-                          Crear admin
-                        </button>
-                        <button
-                          onClick={() => openTenantAdminMode(tenant)}
-                          disabled={busy}
-                          className="inline-flex items-center gap-1 rounded-lg border border-amber-300/40 bg-amber-500/20 px-3 py-1.5 text-xs font-semibold text-amber-100 hover:bg-amber-500/30 disabled:opacity-60"
-                        >
-                          Entrar panel ISP
-                        </button>
+
+                      <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-3">
+                        <div className="rounded-lg border border-white/10 bg-slate-900/55 p-2">
+                          <div className="flex items-center justify-between text-[11px] text-slate-200">
+                            <span>Admins</span>
+                            <span>{tenant.admins_total}/{tenant.max_admins}</span>
+                          </div>
+                          <div className="mt-1 h-1.5 rounded-full bg-white/10">
+                            <div
+                              className={`h-1.5 rounded-full ${adminsUsage >= 90 ? 'bg-rose-400' : adminsUsage >= 75 ? 'bg-amber-300' : 'bg-emerald-300'}`}
+                              style={{ width: `${adminsUsage}%` }}
+                            />
+                          </div>
+                        </div>
+                        <div className="rounded-lg border border-white/10 bg-slate-900/55 p-2">
+                          <div className="flex items-center justify-between text-[11px] text-slate-200">
+                            <span>Clientes</span>
+                            <span>{tenant.clients_total}/{tenant.max_clients}</span>
+                          </div>
+                          <div className="mt-1 h-1.5 rounded-full bg-white/10">
+                            <div
+                              className={`h-1.5 rounded-full ${clientsUsage >= 90 ? 'bg-rose-400' : clientsUsage >= 75 ? 'bg-amber-300' : 'bg-emerald-300'}`}
+                              style={{ width: `${clientsUsage}%` }}
+                            />
+                          </div>
+                        </div>
+                        <div className="rounded-lg border border-white/10 bg-slate-900/55 p-2">
+                          <div className="flex items-center justify-between text-[11px] text-slate-200">
+                            <span>Routers</span>
+                            <span>{tenant.routers_total}/{tenant.max_routers}</span>
+                          </div>
+                          <div className="mt-1 h-1.5 rounded-full bg-white/10">
+                            <div
+                              className={`h-1.5 rounded-full ${routersUsage >= 90 ? 'bg-rose-400' : routersUsage >= 75 ? 'bg-amber-300' : 'bg-emerald-300'}`}
+                              style={{ width: `${routersUsage}%` }}
+                            />
+                          </div>
+                        </div>
                       </div>
-                    </div>
-                    <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-200 md:grid-cols-5">
-                      <p><span className="text-slate-400">Usuarios:</span> {tenant.users_total}</p>
-                      <p><span className="text-slate-400">Admins:</span> {tenant.admins_total}/{tenant.max_admins}</p>
-                      <p><span className="text-slate-400">Clientes:</span> {tenant.clients_total}/{tenant.max_clients}</p>
-                      <p><span className="text-slate-400">Routers:</span> {tenant.routers_total}/{tenant.max_routers}</p>
-                      <p><span className="text-slate-400">Subs:</span> {tenant.subscriptions_total}</p>
-                      <p><span className="text-slate-400">Ciclo:</span> {tenant.billing_cycle}</p>
-                      <p><span className="text-slate-400">Precio:</span> ${Number(tenant.monthly_price || 0).toFixed(2)}</p>
-                    </div>
-                  </article>
-                ))}
+
+                      <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-200 md:grid-cols-4">
+                        <p><span className="text-slate-400">Usuarios:</span> {tenant.users_total}</p>
+                        <p><span className="text-slate-400">Subs:</span> {tenant.subscriptions_total}</p>
+                        <p><span className="text-slate-400">Ciclo:</span> {tenant.billing_cycle}</p>
+                        <p><span className="text-slate-400">Precio:</span> ${Number(tenant.monthly_price || 0).toFixed(2)}</p>
+                      </div>
+                    </article>
+                  )
+                })}
                 {!filteredTenants.length && (
                   <div className="rounded-xl border border-dashed border-white/20 py-8 text-center text-sm text-slate-400">
                     No hay tenants para este filtro.
@@ -734,12 +823,16 @@ const PlatformAdmin: React.FC = () => {
                   className="rounded-xl border border-white/15 bg-slate-950/45 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-400 focus:border-cyan-400 focus:outline-none"
                 />
               </div>
-              <input
-                type="datetime-local"
-                value={tenantForm.trial_ends_at}
-                onChange={(event) => setTenantForm((prev) => ({ ...prev, trial_ends_at: event.target.value }))}
-                className="w-full rounded-xl border border-white/15 bg-slate-950/45 px-3 py-2 text-sm text-slate-100 focus:border-cyan-400 focus:outline-none"
-              />
+              <div className="rounded-xl border border-cyan-400/20 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-100">
+                <p>
+                  <span className="font-semibold">Creacion:</span> fecha y hora automaticas del servidor.
+                </p>
+                {tenantForm.billing_status === 'trial' && (
+                  <p className="mt-1 text-cyan-200">
+                    <span className="font-semibold">Fin de trial:</span> se calcula automaticamente al crear.
+                  </p>
+                )}
+              </div>
               <label className="flex items-center gap-2 text-xs text-slate-300">
                 <input
                   type="checkbox"

@@ -77,6 +77,19 @@ def _parse_bool(value) -> bool | None:
     return None
 
 
+def _tenant_default_trial_days() -> int:
+    default_days = 30
+    try:
+        configured = int(current_app.config.get('TENANT_DEFAULT_TRIAL_DAYS', default_days))
+    except (TypeError, ValueError):
+        configured = default_days
+    return max(1, min(configured, 365))
+
+
+def _tenant_default_trial_ends_at() -> datetime:
+    return datetime.utcnow() + timedelta(days=_tenant_default_trial_days())
+
+
 def _password_reset_token_ttl_seconds() -> int:
     default_minutes = 30
     try:
@@ -1373,6 +1386,8 @@ def platform_create_tenant():
     raw_trial_token = str(raw_trial_ends_at or '').strip()
     if raw_trial_token and trial_ends_at is None:
         return jsonify({"error": "trial_ends_at invalido. Use formato ISO 8601."}), 400
+    if trial_ends_at is None and billing_status == 'trial':
+        trial_ends_at = _tenant_default_trial_ends_at()
 
     tenant = Tenant(
         slug=slug,

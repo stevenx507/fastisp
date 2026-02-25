@@ -74,6 +74,7 @@ class Config:
         default=False,
     )
     PLATFORM_BOOTSTRAP_TOKEN = (os.environ.get('PLATFORM_BOOTSTRAP_TOKEN') or '').strip()
+    TENANT_DEFAULT_TRIAL_DAYS = os.environ.get('TENANT_DEFAULT_TRIAL_DAYS', '30')
 
     # Observability & Alerts
     PAGERDUTY_ROUTING_KEY = os.environ.get('PAGERDUTY_ROUTING_KEY')

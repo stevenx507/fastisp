@@ -152,6 +152,45 @@ def test_platform_templates_and_validation(client, app):
     assert invalid_create_res.status_code == 400
 
 
+def test_platform_create_tenant_sets_trial_end_automatically(client, app):
+    with app.app_context():
+        root_user = User(email='root-auto-trial@test.local', role='platform_admin', name='Root Trial', tenant_id=None)
+        root_user.set_password('supersecret')
+        db.session.add(root_user)
+        db.session.commit()
+        root_id = root_user.id
+
+    headers = _platform_headers(app, root_id)
+
+    trial_res = client.post(
+        '/api/platform/tenants',
+        json={
+            'name': 'ISP Trial Auto',
+            'slug': 'isp-trial-auto',
+            'billing_status': 'trial',
+        },
+        headers=headers,
+    )
+    assert trial_res.status_code == 201
+    trial_payload = trial_res.get_json()
+    assert trial_payload['tenant']['billing_status'] == 'trial'
+    assert trial_payload['tenant']['trial_ends_at'] is not None
+
+    active_res = client.post(
+        '/api/platform/tenants',
+        json={
+            'name': 'ISP Active No Trial',
+            'slug': 'isp-active-no-trial',
+            'billing_status': 'active',
+        },
+        headers=headers,
+    )
+    assert active_res.status_code == 201
+    active_payload = active_res.get_json()
+    assert active_payload['tenant']['billing_status'] == 'active'
+    assert active_payload['tenant']['trial_ends_at'] is None
+
+
 def test_platform_routes_require_platform_admin_role(client, app):
     with app.app_context():
         tenant = Tenant(slug='isp-demo', name='ISP Demo')
