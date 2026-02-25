@@ -82,6 +82,11 @@ class Config:
     TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
     WONDERPUSH_ACCESS_TOKEN = os.environ.get('WONDERPUSH_ACCESS_TOKEN')
     WONDERPUSH_APPLICATION_ID = os.environ.get('WONDERPUSH_APPLICATION_ID')
+    GRAFANA_URL = os.environ.get('GRAFANA_URL') or os.environ.get('VITE_GRAFANA_URL', '')
+    GRAFANA_HEALTHCHECK_PATH = os.environ.get('GRAFANA_HEALTHCHECK_PATH', '/api/health')
+    GRAFANA_VERIFY_TLS = _as_bool(os.environ.get('GRAFANA_VERIFY_TLS'), default=True)
+    GRAFANA_TIMEOUT_SECONDS = os.environ.get('GRAFANA_TIMEOUT_SECONDS', '4')
+    GRAFANA_DATASOURCE_UID = os.environ.get('GRAFANA_DATASOURCE_UID', '')
 
     # Backups
     PG_DUMP_PATH = os.environ.get('PG_DUMP_PATH', 'pg_dump')

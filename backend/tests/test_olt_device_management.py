@@ -62,3 +62,6 @@ def test_remote_options_returns_commands(client, app):
     assert payload['device']['id'] == 'OLT-ZTE-001'
     assert 'direct_login' in payload['options']
     assert 'recommendations' in payload['options']
+    assert 'readiness' in payload
+    assert isinstance(payload['readiness'].get('checks'), list)
+    assert 'grafana' in payload

@@ -53,6 +53,29 @@ interface OltRemoteOptions {
     reverse_tunnel_template?: string
     recommendations?: string[]
   }
+  readiness?: {
+    score?: number
+    checks?: Array<{
+      id: string
+      label: string
+      ok: boolean
+      detail?: string
+      severity?: 'ok' | 'warning' | 'critical'
+    }>
+    missing?: string[]
+    recommendations?: string[]
+  }
+  grafana?: {
+    configured?: boolean
+    dashboard_url?: string | null
+    health_url?: string | null
+    reachable?: boolean | null
+    status_code?: number | null
+    response_time_ms?: number | null
+    datasource_uid?: string | null
+    error?: string | null
+    recommendations?: string[]
+  }
 }
 
 interface OltDeviceForm {
@@ -469,6 +492,15 @@ const OltManagement: React.FC = () => {
     else toast.error(`No se pudo copiar ${label}`)
   }
 
+  const openExternal = (url?: string | null) => {
+    const safeUrl = String(url || '').trim()
+    if (!safeUrl) {
+      toast.error('No hay URL configurada')
+      return
+    }
+    window.open(safeUrl, '_blank', 'noopener,noreferrer')
+  }
+
   return (
     <div className="enterprise-dashboard space-y-6">
       <div className="rounded-xl border border-white/10 bg-slate-900/70 p-5">
@@ -720,6 +752,18 @@ const OltManagement: React.FC = () => {
 
           <div className="space-y-2 rounded-lg border border-white/10 bg-slate-800/60 p-3">
             <p className="text-xs font-semibold uppercase text-slate-300">Conectividad remota</p>
+            {typeof remoteOptions?.readiness?.score === 'number' && (
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <span className="rounded-full bg-cyan-500/20 px-2 py-1 font-semibold text-cyan-200">
+                  readiness {Math.max(0, Math.min(100, Math.round(remoteOptions.readiness.score)))} / 100
+                </span>
+                {!!remoteOptions?.readiness?.missing?.length && (
+                  <span className="rounded-full bg-amber-500/20 px-2 py-1 font-semibold text-amber-200">
+                    faltantes {remoteOptions.readiness.missing.length}
+                  </span>
+                )}
+              </div>
+            )}
             <div className="space-y-2 text-xs">
               <div className="flex items-center justify-between gap-2">
                 <code className="truncate text-slate-100">{remoteOptions?.options?.direct_login || '-'}</code>
@@ -734,10 +778,100 @@ const OltManagement: React.FC = () => {
                 <button onClick={() => copyOption('reverse tunnel', remoteOptions?.options?.reverse_tunnel_template)} className="rounded bg-slate-700 px-2 py-1 text-[10px] text-slate-100">Copiar</button>
               </div>
             </div>
+            {(remoteOptions?.readiness?.checks || []).length > 0 && (
+              <div className="space-y-1 text-xs">
+                {(remoteOptions?.readiness?.checks || []).map((check) => (
+                  <div key={check.id} className="rounded border border-white/10 bg-slate-900/50 px-2 py-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-slate-100">{check.label}</span>
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                          check.ok
+                            ? 'bg-emerald-500/20 text-emerald-300'
+                            : check.severity === 'critical'
+                              ? 'bg-rose-500/20 text-rose-300'
+                              : 'bg-amber-500/20 text-amber-300'
+                        }`}
+                      >
+                        {check.ok ? 'ok' : check.severity || 'warn'}
+                      </span>
+                    </div>
+                    {!!check.detail && <p className="mt-1 text-slate-400">{check.detail}</p>}
+                  </div>
+                ))}
+              </div>
+            )}
             {(remoteOptions?.options?.recommendations || []).length > 0 && (
               <ul className="space-y-1 text-xs text-slate-300">
                 {(remoteOptions?.options?.recommendations || []).map((recommendation, idx) => (
                   <li key={idx}>- {recommendation}</li>
+                ))}
+              </ul>
+            )}
+            {(remoteOptions?.readiness?.missing || []).length > 0 && (
+              <ul className="space-y-1 text-xs text-amber-200">
+                {(remoteOptions?.readiness?.missing || []).map((item, idx) => (
+                  <li key={idx}>- {item}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="space-y-2 rounded-lg border border-white/10 bg-slate-800/60 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-xs font-semibold uppercase text-slate-300">Grafana readiness</p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => copyOption('grafana health', remoteOptions?.grafana?.health_url || '')}
+                  className="rounded bg-slate-700 px-2 py-1 text-[10px] text-slate-100"
+                >
+                  Copiar health URL
+                </button>
+                <button
+                  onClick={() => openExternal(remoteOptions?.grafana?.dashboard_url || '')}
+                  className="rounded bg-cyan-500 px-2 py-1 text-[10px] font-semibold text-slate-900"
+                >
+                  Abrir Grafana
+                </button>
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span
+                className={`rounded-full px-2 py-1 font-semibold ${
+                  remoteOptions?.grafana?.configured ? 'bg-cyan-500/20 text-cyan-200' : 'bg-amber-500/20 text-amber-200'
+                }`}
+              >
+                {remoteOptions?.grafana?.configured ? 'configurado' : 'sin configurar'}
+              </span>
+              {remoteOptions?.grafana?.reachable === true && (
+                <span className="rounded-full bg-emerald-500/20 px-2 py-1 font-semibold text-emerald-300">
+                  reachable {remoteOptions?.grafana?.status_code || 200}
+                </span>
+              )}
+              {remoteOptions?.grafana?.reachable === false && (
+                <span className="rounded-full bg-rose-500/20 px-2 py-1 font-semibold text-rose-300">
+                  unreachable
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-slate-300">
+              Dashboard: <code>{remoteOptions?.grafana?.dashboard_url || '-'}</code>
+            </p>
+            <p className="text-xs text-slate-300">
+              Health: <code>{remoteOptions?.grafana?.health_url || '-'}</code>
+            </p>
+            {!!remoteOptions?.grafana?.datasource_uid && (
+              <p className="text-xs text-slate-300">
+                Datasource UID: <code>{remoteOptions.grafana.datasource_uid}</code>
+              </p>
+            )}
+            {!!remoteOptions?.grafana?.error && (
+              <p className="text-xs text-amber-300">Detalle: {remoteOptions.grafana.error}</p>
+            )}
+            {(remoteOptions?.grafana?.recommendations || []).length > 0 && (
+              <ul className="space-y-1 text-xs text-slate-300">
+                {(remoteOptions?.grafana?.recommendations || []).map((item, idx) => (
+                  <li key={idx}>- {item}</li>
                 ))}
               </ul>
             )}

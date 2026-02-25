@@ -166,3 +166,41 @@ def test_back_to_home_actions_require_confirmation(client, app):
         headers=headers,
     )
     assert add_user_response.status_code == 400
+
+
+def test_back_to_home_bootstrap_runs_single_flow(client, app, monkeypatch):
+    headers = _admin_headers(client, app)
+    _DummyMikrotikService.scripts = []
+    monkeypatch.setattr(mikrotik_routes, 'MikroTikService', _DummyMikrotikService)
+
+    create_response = client.post(
+        '/api/mikrotik/routers',
+        json={
+            'name': 'Nodo-BTH-Bootstrap',
+            'ip_address': '10.10.40.1',
+            'username': 'api-admin',
+            'password': 'router-pass',
+            'api_port': 8728,
+            'test_connection': False,
+        },
+        headers=headers,
+    )
+    assert create_response.status_code == 201
+    router_id = str(create_response.get_json()['router']['id'])
+
+    bootstrap_response = client.post(
+        f'/api/mikrotik/routers/{router_id}/back-to-home/bootstrap',
+        json={
+            'confirm': True,
+            'user_name': 'noc-vps',
+            'private_key': 'base64-private-key',
+            'allow_lan': True,
+        },
+        headers=headers,
+    )
+    assert bootstrap_response.status_code == 200
+    payload = bootstrap_response.get_json()
+    assert payload['success'] is True
+    assert payload['bootstrap']['user_name'] == 'noc-vps'
+    assert any('/ip/cloud/back-to-home-vpn=enabled' in script for script in _DummyMikrotikService.scripts)
+    assert any('/ip/cloud/back-to-home-users/add' in script for script in _DummyMikrotikService.scripts)

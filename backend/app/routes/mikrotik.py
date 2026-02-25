@@ -611,6 +611,90 @@ def _execute_router_script(router: MikroTikRouter, script_content: str) -> Dict[
     return {'success': bool(result), 'result': str(result)}
 
 
+def _collect_back_to_home_runtime(service: MikroTikService) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        'reachable': False,
+        'routeros_version': None,
+        'supported': None,
+        'bth_users_supported': None,
+        'ddns_enabled': None,
+        'back_to_home_vpn': None,
+        'vpn_status': None,
+        'vpn_dns_name': None,
+        'vpn_interface': None,
+        'vpn_port': None,
+        'users': [],
+    }
+
+    api_obj = getattr(service, 'api', None)
+    if not api_obj:
+        return payload
+
+    payload['reachable'] = True
+
+    version_tuple = (0, 0, 0)
+    try:
+        router_info = service.get_router_info() or {}
+        version_text = (
+            _pick_value(router_info, 'firmware', 'version', 'routeros_version')
+            or _pick_value(router_info, 'routeros-version', 'routeros_version')
+            or ''
+        )
+        version_tuple = _parse_routeros_version(version_text)
+        payload['routeros_version'] = str(version_text or '') or None
+        payload['supported'] = _version_supports_back_to_home(version_tuple)
+        payload['bth_users_supported'] = _version_supports_bth_users(version_tuple)
+    except Exception as version_exc:
+        payload['version_error'] = str(version_exc)
+
+    try:
+        cloud_rows = api_obj.get_resource('/ip/cloud').get()
+        cloud_info = cloud_rows[0] if isinstance(cloud_rows, list) and cloud_rows else {}
+        payload['ddns_enabled'] = _as_bool(_pick_value(cloud_info, 'ddns-enabled', 'ddns_enabled'), default=False)
+        payload['back_to_home_vpn'] = str(
+            _pick_value(cloud_info, 'back-to-home-vpn', 'back_to_home_vpn') or ''
+        ).strip() or None
+        payload['vpn_status'] = str(
+            _pick_value(cloud_info, 'back-to-home-vpn-status', 'back_to_home_vpn_status') or ''
+        ).strip() or None
+        payload['vpn_dns_name'] = str(
+            _pick_value(cloud_info, 'dns-name', 'dns_name', 'back-to-home-dns-name', 'back_to_home_dns_name') or ''
+        ).strip() or None
+        payload['vpn_interface'] = str(
+            _pick_value(cloud_info, 'back-to-home-interface', 'back_to_home_interface') or ''
+        ).strip() or None
+        payload['vpn_port'] = str(
+            _pick_value(cloud_info, 'back-to-home-vpn-port', 'back_to_home_vpn_port') or ''
+        ).strip() or None
+    except Exception as cloud_exc:
+        payload['cloud_error'] = str(cloud_exc)
+
+    supports_users = payload.get('bth_users_supported')
+    if supports_users is False:
+        return payload
+
+    try:
+        users_api = api_obj.get_resource('/ip/cloud/back-to-home-users')
+        raw_users = users_api.get()
+        normalized_users = []
+        for item in (raw_users or [])[:30]:
+            normalized_users.append(
+                {
+                    'name': str(_pick_value(item, 'name') or ''),
+                    'allow_lan': _as_bool(_pick_value(item, 'allow-lan', 'allow_lan'), default=False),
+                    'disabled': _as_bool(_pick_value(item, 'disabled'), default=False),
+                    'expires': str(_pick_value(item, 'expires') or ''),
+                }
+            )
+        payload['users'] = normalized_users
+        if supports_users is None and version_tuple >= (7, 14, 0):
+            payload['bth_users_supported'] = True
+    except Exception as users_exc:
+        payload['users_error'] = str(users_exc)
+
+    return payload
+
+
 @mikrotik_bp.route('/routers/<router_id>/back-to-home/enable', methods=['POST'])
 @admin_required()
 def enable_back_to_home(router_id):
@@ -729,6 +813,106 @@ def remove_back_to_home_user(router_id):
     except Exception as exc:
         logger.error("Error removing Back To Home user for router %s: %s", router_id, exc, exc_info=True)
         return jsonify({'success': False, 'error': str(exc)}), 500
+
+
+@mikrotik_bp.route('/routers/<router_id>/back-to-home/bootstrap', methods=['POST'])
+@admin_required()
+def bootstrap_back_to_home(router_id):
+    router = _router_for_request(router_id)
+    if not router:
+        return jsonify({'success': False, 'error': 'Router not found'}), 404
+
+    data = request.get_json() or {}
+    if not _as_bool(data.get('confirm'), default=False):
+        return jsonify({'success': False, 'error': 'confirm=true is required'}), 400
+
+    user_name = str(data.get('user_name') or data.get('name') or '').strip()
+    private_key = str(data.get('private_key') or '').strip()
+    if not user_name:
+        return jsonify({'success': False, 'error': 'user_name is required'}), 400
+    if not private_key:
+        return jsonify({'success': False, 'error': 'private_key is required'}), 400
+
+    allow_lan = _as_bool(data.get('allow_lan'), default=True)
+    replace_existing_user = _as_bool(data.get('replace_existing_user'), default=False)
+    update_time = _as_bool(data.get('update_time'), default=True)
+    ddns_enabled = _as_bool(data.get('ddns_enabled'), default=True)
+    enable_vpn = _as_bool(data.get('enable_vpn'), default=True)
+    comment = str(data.get('comment') or 'FastISP VPS').strip() or 'FastISP VPS'
+
+    safe_name = _script_escape(user_name)
+    safe_key = _script_escape(private_key)
+    safe_comment = _script_escape(comment)
+
+    script_lines: List[str] = []
+    if ddns_enabled:
+        script_lines.append(f"/ip/cloud/set ddns-enabled=yes update-time={'yes' if update_time else 'no'}")
+    if enable_vpn:
+        script_lines.append("/ip/cloud/set back-to-home-vpn=enabled")
+    if replace_existing_user:
+        script_lines.append(f'/ip/cloud/back-to-home-users/remove [find where name="{safe_name}"]')
+    script_lines.append(
+        f'/ip/cloud/back-to-home-users/add name="{safe_name}" private-key="{safe_key}" '
+        f'allow-lan={"yes" if allow_lan else "no"} comment="{safe_comment}" disabled=no'
+    )
+    script_lines.append('/ip/cloud/print')
+    script_content = '\n'.join(script_lines)
+
+    try:
+        with MikroTikService(router.id) as service:
+            if not service.api:
+                return jsonify({'success': False, 'error': 'Could not connect to router'}), 502
+
+            exec_result = service.execute_script(script_content)
+            result = exec_result if isinstance(exec_result, dict) else {'success': bool(exec_result), 'result': str(exec_result)}
+            observed = _collect_back_to_home_runtime(service)
+    except Exception as exc:
+        logger.error("Error executing Back To Home bootstrap for router %s: %s", router_id, exc, exc_info=True)
+        return jsonify({'success': False, 'error': str(exc)}), 500
+
+    users = observed.get('users') if isinstance(observed.get('users'), list) else []
+    user_exists = any(str(item.get('name') or '').strip() == user_name for item in users)
+
+    missing: List[str] = []
+    if observed.get('supported') is False:
+        missing.append('RouterOS version does not confirm Back To Home support (requires 7.12+).')
+    if observed.get('bth_users_supported') is False:
+        missing.append('RouterOS version does not expose BTH users API (requires 7.14+).')
+    if observed.get('ddns_enabled') is False:
+        missing.append('DDNS is not enabled on /ip cloud.')
+    if not observed.get('vpn_dns_name'):
+        missing.append('Router did not return Back To Home DNS name yet.')
+    if observed.get('bth_users_supported') is True and not user_exists:
+        missing.append(f'Back To Home user "{user_name}" was not visible after bootstrap.')
+
+    next_steps = [
+        f'/interface/wireguard/peers/show-client-config {user_name}',
+        'Import the generated WireGuard client profile on the VPS.',
+        'Run connectivity probe from VPS to router LAN before enabling live automation.',
+    ]
+    if observed.get('vpn_dns_name'):
+        next_steps.append(
+            f'Use DNS "{observed.get("vpn_dns_name")}" for operational inventory and runbook references.'
+        )
+
+    ok = bool(result.get('success'))
+    status_code = 200 if ok else 502
+    return jsonify(
+        {
+            'success': ok,
+            'router': router.to_dict(),
+            'script': script_content,
+            'result': result,
+            'back_to_home': observed,
+            'bootstrap': {
+                'user_name': user_name,
+                'allow_lan': allow_lan,
+                'user_visible_after_run': user_exists,
+                'missing': missing,
+                'next_steps': next_steps,
+            },
+        }
+    ), status_code
 
 @mikrotik_bp.route('/validate-config', methods=['POST'])
 @admin_required()

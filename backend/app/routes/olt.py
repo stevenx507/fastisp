@@ -4,7 +4,11 @@ OLT enterprise API endpoints (ZTE, Huawei, VSOL).
 from __future__ import annotations
 
 import socket
+import ssl
 import time
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from flask import Blueprint, current_app, jsonify, request
 from flask_jwt_extended import get_jwt_identity
@@ -306,6 +310,216 @@ def _service() -> OLTScriptService:
     except TypeError:
         # Backward-compatible fallback for tests monkeypatching OLTScriptService with minimal stubs.
         return OLTScriptService()
+
+
+def _probe_tcp(host: str, port: int, timeout_seconds: float = 2.5) -> dict:
+    started = time.perf_counter()
+    try:
+        with socket.create_connection((host, port), timeout=timeout_seconds):
+            latency_ms = round((time.perf_counter() - started) * 1000, 2)
+            return {"reachable": True, "latency_ms": latency_ms, "error": None}
+    except Exception as exc:
+        latency_ms = round((time.perf_counter() - started) * 1000, 2)
+        return {"reachable": False, "latency_ms": latency_ms, "error": str(exc)}
+
+
+def _resolve_olt_credentials(service: OLTScriptService, device: dict) -> dict:
+    resolver = getattr(service, "_resolve_device_credentials", None)
+    if callable(resolver):
+        try:
+            resolved = resolver(device) or {}
+            if isinstance(resolved, dict):
+                return resolved
+        except Exception:
+            pass
+    return {
+        "username": str(device.get("username") or "admin"),
+        "password": "",
+        "enable_password": "",
+    }
+
+
+def _build_remote_readiness(service: OLTScriptService, device: dict) -> dict:
+    host = str(device.get("host") or "").strip()
+    port = int(device.get("port") or 22)
+    transport = str(device.get("transport") or "ssh").strip().lower()
+
+    credentials = _resolve_olt_credentials(service, device)
+    username = str(credentials.get("username") or "").strip()
+    has_password = bool(str(credentials.get("password") or "").strip())
+
+    tcp_probe = {"reachable": False, "latency_ms": None, "error": "Host is empty"}
+    if host:
+        tcp_probe = _probe_tcp(host=host, port=port, timeout_seconds=2.5)
+
+    checks = [
+        {
+            "id": "host_configured",
+            "label": "Host OLT configurado",
+            "ok": bool(host),
+            "detail": host or "Define host/IP para habilitar pruebas remotas.",
+            "severity": "critical" if not host else "ok",
+        },
+        {
+            "id": "tcp_reachable",
+            "label": "Puerto de gestion accesible desde backend",
+            "ok": bool(host) and bool(tcp_probe.get("reachable")),
+            "detail": (
+                f"{host}:{port} reachable ({tcp_probe.get('latency_ms')} ms)"
+                if host and tcp_probe.get("reachable")
+                else str(tcp_probe.get("error") or "No se pudo abrir socket TCP.")
+            ),
+            "severity": "critical" if not tcp_probe.get("reachable") else "ok",
+        },
+        {
+            "id": "transport_security",
+            "label": "Transporte seguro",
+            "ok": transport == "ssh",
+            "detail": "SSH activo." if transport == "ssh" else "Telnet detectado. Solo recomendado dentro de VPN privada.",
+            "severity": "warning" if transport != "ssh" else "ok",
+        },
+        {
+            "id": "credentials_ready",
+            "label": "Credenciales listas para live mode",
+            "ok": bool(username) and has_password,
+            "detail": (
+                f'Usuario "{username}" con password cargado.'
+                if bool(username) and has_password
+                else "Falta username/password (OLT_CREDENTIALS_JSON o OLT_DEFAULT_PASSWORD)."
+            ),
+            "severity": "critical" if not has_password else "ok",
+        },
+        {
+            "id": "live_guardrail",
+            "label": "Guardrail de ejecucion live",
+            "ok": True,
+            "detail": "El backend exige run_mode=live + live_confirm=true para ejecutar comandos reales.",
+            "severity": "ok",
+        },
+    ]
+
+    score_weights = {
+        "host_configured": 20,
+        "tcp_reachable": 30,
+        "transport_security": 15,
+        "credentials_ready": 30,
+        "live_guardrail": 5,
+    }
+    score = 0
+    for item in checks:
+        if item["ok"]:
+            score += score_weights.get(str(item["id"]), 0)
+
+    missing = []
+    if not host:
+        missing.append("Registrar host/IP de la OLT.")
+    if host and not tcp_probe.get("reachable"):
+        missing.append("Abrir ruta TCP desde backend/VPS hacia OLT (ACL + VPN).")
+    if transport != "ssh":
+        missing.append("Migrar gestion a SSH o aislar Telnet dentro de tunel privado.")
+    if not has_password:
+        missing.append("Definir credenciales OLT en OLT_CREDENTIALS_JSON u OLT_DEFAULT_PASSWORD.")
+
+    recommendations = [
+        "Usar WireGuard/IPsec entre POP y VPS para gestion OLT.",
+        "Restringir acceso por ACL al origen del backend y jump host.",
+        "Probar primero en run_mode=simulate/dry-run antes de activar live.",
+    ]
+    if host and not tcp_probe.get("reachable"):
+        recommendations.append("Verificar NAT/forwarding y route policy entre VPS y red de acceso.")
+    if transport != "ssh":
+        recommendations.append("Priorizar SSH para auditoria y seguridad operacional.")
+
+    return {
+        "score": max(0, min(100, int(score))),
+        "checks": checks,
+        "tcp_probe": tcp_probe,
+        "missing": missing,
+        "recommendations": recommendations,
+    }
+
+
+def _build_grafana_status() -> dict:
+    raw_dashboard_url = str(
+        current_app.config.get("GRAFANA_URL")
+        or current_app.config.get("VITE_GRAFANA_URL")
+        or ""
+    ).strip()
+    datasource_uid = str(current_app.config.get("GRAFANA_DATASOURCE_UID") or "").strip() or None
+    health_path = str(current_app.config.get("GRAFANA_HEALTHCHECK_PATH") or "/api/health").strip() or "/api/health"
+
+    status = {
+        "configured": bool(raw_dashboard_url),
+        "dashboard_url": raw_dashboard_url or None,
+        "health_url": None,
+        "reachable": None,
+        "status_code": None,
+        "response_time_ms": None,
+        "datasource_uid": datasource_uid,
+        "error": None,
+        "recommendations": [],
+    }
+
+    if not raw_dashboard_url:
+        status["recommendations"] = [
+            "Define GRAFANA_URL (o VITE_GRAFANA_URL) en .env.prod con dashboard embebible.",
+            "Publica Grafana por HTTPS detras de Traefik y habilita dashboard kiosk.",
+            "Configura datasource de metricas (InfluxDB/Prometheus) con permisos de solo lectura.",
+        ]
+        return status
+
+    parsed = urlparse(raw_dashboard_url)
+    if not parsed.scheme or not parsed.netloc:
+        status["error"] = "Invalid GRAFANA_URL format."
+        status["recommendations"] = ["Usa URL completa, por ejemplo https://grafana.fastisp.cloud/d/ispfast/overview"]
+        return status
+
+    base_origin = f"{parsed.scheme}://{parsed.netloc}"
+    if not health_path.startswith("/"):
+        health_path = f"/{health_path}"
+    health_url = f"{base_origin}{health_path}"
+    status["health_url"] = health_url
+
+    timeout_raw = current_app.config.get("GRAFANA_TIMEOUT_SECONDS", 4)
+    try:
+        timeout_seconds = max(1.0, min(float(timeout_raw), 12.0))
+    except (TypeError, ValueError):
+        timeout_seconds = 4.0
+    verify_tls = bool(current_app.config.get("GRAFANA_VERIFY_TLS", True))
+
+    request_obj = Request(health_url, headers={"User-Agent": "fastisp-backend/1.0"})
+    tls_context = ssl.create_default_context() if verify_tls else ssl._create_unverified_context()
+
+    started = time.perf_counter()
+    try:
+        with urlopen(request_obj, timeout=timeout_seconds, context=tls_context) as response:
+            status["status_code"] = int(getattr(response, "status", 200))
+            status["reachable"] = True
+    except HTTPError as http_exc:
+        status["status_code"] = int(http_exc.code)
+        # HTTPError still means DNS/TCP/TLS are operational.
+        status["reachable"] = True
+        status["error"] = f"Grafana responded with HTTP {http_exc.code}."
+    except URLError as url_exc:
+        status["reachable"] = False
+        status["error"] = str(getattr(url_exc, "reason", url_exc))
+    except Exception as exc:
+        status["reachable"] = False
+        status["error"] = str(exc)
+    finally:
+        status["response_time_ms"] = round((time.perf_counter() - started) * 1000, 2)
+
+    recommendations = [
+        "Mantener panel Grafana en modo solo lectura para NOC.",
+        "Versionar dashboards y alertas para despliegues reproducibles.",
+        "Revisar retencion y cardinalidad de metricas para evitar sobrecarga.",
+    ]
+    if status["reachable"] is False:
+        recommendations.append("Verificar DNS/TLS/firewall entre backend y Grafana.")
+    if not datasource_uid:
+        recommendations.append("Configura GRAFANA_DATASOURCE_UID para validar datasource objetivo del dashboard.")
+    status["recommendations"] = recommendations
+    return status
 
 
 def _run_vendor_action(device_id: str, action: str, payload: dict, run_mode: str):
@@ -950,11 +1164,21 @@ def remote_options(device_id):
             "Usar usuario tecnico dedicado con privilegios minimos para operaciones remotas.",
         ],
     }
+    readiness = _build_remote_readiness(service=service, device=device)
+    grafana = _build_grafana_status()
 
     safe_device = dict(device)
     safe_device.pop("password", None)
     safe_device.pop("enable_password", None)
-    return jsonify({"success": True, "device": safe_device, "options": options}), 200
+    return jsonify(
+        {
+            "success": True,
+            "device": safe_device,
+            "options": options,
+            "readiness": readiness,
+            "grafana": grafana,
+        }
+    ), 200
 
 
 @olt_bp.route("/tr064/test", methods=["POST"])

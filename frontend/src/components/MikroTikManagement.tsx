@@ -78,6 +78,20 @@ interface RouterQuickConnectResponse {
   back_to_home?: RouterBackToHomeStatus
 }
 
+interface RouterBackToHomeBootstrapData {
+  user_name?: string
+  allow_lan?: boolean
+  user_visible_after_run?: boolean
+  missing?: string[]
+  next_steps?: string[]
+}
+
+interface RouterBackToHomeBootstrapResponse {
+  success?: boolean
+  error?: string
+  bootstrap?: RouterBackToHomeBootstrapData
+}
+
 interface RouterFormState {
   name: string
   ip_address: string
@@ -138,6 +152,7 @@ const MikroTikManagement: React.FC = () => {
   const confirmActionRef = useRef<(() => void) | null>(null)
   const [sidePanel, setSidePanel] = useState<'none' | 'logs' | 'dhcp' | 'wifi'>('none')
   const [quickConnect, setQuickConnect] = useState<RouterQuickConnectResponse | null>(null)
+  const [bootstrapResult, setBootstrapResult] = useState<RouterBackToHomeBootstrapData | null>(null)
   const [bthUserName, setBthUserName] = useState('noc-vps')
   const [bthPrivateKey, setBthPrivateKey] = useState('')
   const [bthAllowLan, setBthAllowLan] = useState(true)
@@ -279,6 +294,7 @@ const MikroTikManagement: React.FC = () => {
     loadQuickConnect(selectedRouter.id)
     setAiAnalysis(null)
     setAiError(null)
+    setBootstrapResult(null)
   }, [loadQuickConnect, loadRouterStats, selectedRouter])
 
   const rebootRouter = async () => {
@@ -484,6 +500,50 @@ const MikroTikManagement: React.FC = () => {
     }
   }
 
+  const bootstrapBackToHome = async () => {
+    if (!selectedRouter) return
+    const userName = bthUserName.trim()
+    const privateKey = bthPrivateKey.trim()
+    if (!userName) {
+      addToast('error', 'Ingresa un nombre de usuario BTH')
+      return
+    }
+    if (!privateKey) {
+      addToast('error', 'Ingresa la private key WireGuard del VPS')
+      return
+    }
+
+    setBthActionLoading(true)
+    try {
+      const response = await apiFetch(`/api/mikrotik/routers/${selectedRouter.id}/back-to-home/bootstrap`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          confirm: true,
+          user_name: userName,
+          private_key: privateKey,
+          allow_lan: bthAllowLan,
+          replace_existing_user: true,
+          comment: 'FastISP VPS',
+        }),
+      })
+      const payload = (await safeJson(response)) as RouterBackToHomeBootstrapResponse | null
+      if (response.ok && payload?.success) {
+        setBootstrapResult(payload.bootstrap || null)
+        const pendingCount = Array.isArray(payload.bootstrap?.missing) ? payload.bootstrap?.missing.length : 0
+        addToast('success', pendingCount > 0 ? `Bootstrap aplicado con ${pendingCount} pendiente(s)` : 'Bootstrap BTH aplicado correctamente')
+      } else {
+        addToast('error', payload?.error || 'No se pudo ejecutar bootstrap Back To Home')
+      }
+      await loadQuickConnect(selectedRouter.id)
+    } catch (error) {
+      console.error('Error bootstrapping Back To Home:', error)
+      addToast('error', 'Error de red ejecutando bootstrap BTH')
+    } finally {
+      setBthActionLoading(false)
+    }
+  }
+
   const confirmEnableBackToHome = () => {
     if (!selectedRouter) return
     openConfirm(`Habilitar Back To Home en ${selectedRouter.name}?`, () => {
@@ -505,6 +565,23 @@ const MikroTikManagement: React.FC = () => {
     }
     openConfirm(`Crear usuario Back To Home ${userName} en ${selectedRouter.name}?`, () => {
       void createBackToHomeUser()
+    })
+  }
+
+  const confirmBootstrapBackToHome = () => {
+    if (!selectedRouter) return
+    const userName = bthUserName.trim()
+    const privateKey = bthPrivateKey.trim()
+    if (!userName) {
+      addToast('error', 'Ingresa un nombre de usuario BTH')
+      return
+    }
+    if (!privateKey) {
+      addToast('error', 'Ingresa la private key WireGuard del VPS')
+      return
+    }
+    openConfirm(`Aplicar bootstrap BTH 1 clic en ${selectedRouter.name} para usuario ${userName}?`, () => {
+      void bootstrapBackToHome()
     })
   }
 
@@ -742,16 +819,25 @@ const MikroTikManagement: React.FC = () => {
                             <div className="rounded border border-gray-300 bg-white p-3">
                               <div className="flex flex-wrap items-center justify-between gap-2">
                                 <p className="text-xs font-semibold uppercase text-gray-600">Acciones operativas BTH</p>
-                                <button
-                                  onClick={confirmEnableBackToHome}
-                                  disabled={bthActionLoading || !quickConnect.back_to_home.reachable}
-                                  className="rounded bg-blue-600 px-3 py-1 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
-                                >
-                                  {bthActionLoading ? 'Procesando...' : 'Habilitar BTH'}
-                                </button>
+                                <div className="flex items-center gap-2">
+                                  <button
+                                    onClick={confirmBootstrapBackToHome}
+                                    disabled={bthActionLoading || !quickConnect.back_to_home.reachable}
+                                    className="rounded bg-emerald-600 px-3 py-1 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-60"
+                                  >
+                                    {bthActionLoading ? 'Procesando...' : 'Bootstrap 1 clic'}
+                                  </button>
+                                  <button
+                                    onClick={confirmEnableBackToHome}
+                                    disabled={bthActionLoading || !quickConnect.back_to_home.reachable}
+                                    className="rounded bg-blue-600 px-3 py-1 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
+                                  >
+                                    {bthActionLoading ? 'Procesando...' : 'Solo habilitar BTH'}
+                                  </button>
+                                </div>
                               </div>
                               <p className="mt-2 text-xs text-gray-600">
-                                Este boton aplica DDNS + Back To Home VPN en el router seleccionado.
+                                Bootstrap 1 clic aplica DDNS + BTH + usuario VPS. "Solo habilitar" mantiene el flujo manual.
                               </p>
 
                               <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-2">
@@ -794,6 +880,29 @@ const MikroTikManagement: React.FC = () => {
                                   </p>
                                 )}
                               </div>
+
+                              {bootstrapResult && (
+                                <div className="mt-3 rounded border border-slate-300 bg-slate-50 p-2">
+                                  <p className="text-xs font-semibold uppercase text-slate-700">Resultado bootstrap</p>
+                                  <p className="mt-1 text-xs text-slate-700">
+                                    Usuario visible despues de ejecutar: <strong>{String(bootstrapResult.user_visible_after_run ?? false)}</strong>
+                                  </p>
+                                  {Array.isArray(bootstrapResult.missing) && bootstrapResult.missing.length > 0 && (
+                                    <ul className="mt-2 space-y-1 text-xs text-amber-700">
+                                      {bootstrapResult.missing.map((item, idx) => (
+                                        <li key={`${item}-${idx}`}>- {item}</li>
+                                      ))}
+                                    </ul>
+                                  )}
+                                  {Array.isArray(bootstrapResult.next_steps) && bootstrapResult.next_steps.length > 0 && (
+                                    <ul className="mt-2 space-y-1 text-xs text-slate-700">
+                                      {bootstrapResult.next_steps.map((item, idx) => (
+                                        <li key={`${item}-${idx}`}>- {item}</li>
+                                      ))}
+                                    </ul>
+                                  )}
+                                </div>
+                              )}
                             </div>
 
                             {quickConnect.back_to_home.scripts?.enable_script && (

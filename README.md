@@ -32,6 +32,9 @@ JWT_SECRET_KEY=...
 ENCRYPTION_KEY=...
 BACKUP_DIR=/app/backups
 VITE_GRAFANA_URL=https://grafana.fastisp.cloud/d/ispfast/overview
+GRAFANA_URL=https://grafana.fastisp.cloud/d/ispfast/overview
+GRAFANA_HEALTHCHECK_PATH=/api/health
+GRAFANA_DATASOURCE_UID=
 WAF_IP_ALLOWLIST=0.0.0.0/0
 GEOIP_ALLOWLIST=   # ej. CO,PE,CL si quieres filtrar países
 ```
