@@ -31,7 +31,7 @@ interface JobEntry {
   result?: Record<string, unknown>
 }
 
-const jobs = ['backup', 'cleanup_leases', 'rotate_passwords', 'recalc_balances'] as const
+const jobs = ['backup', 'cleanup_leases', 'enforce_billing', 'rotate_passwords', 'recalc_balances'] as const
 const jobStatuses = ['all', 'completed', 'completed_with_errors', 'skipped', 'failed'] as const
 
 const SystemSettings: React.FC = () => {
@@ -137,6 +137,15 @@ const SystemSettings: React.FC = () => {
     if (job.job === 'cleanup_leases') {
       const changed = Number(result.count || 0)
       return `suscripciones cambiadas: ${changed}`
+    }
+    if (job.job === 'enforce_billing') {
+      if (result.auto_suspend_overdue === false) {
+        return String(result.message || 'job omitido por configuracion')
+      }
+      const scanned = Number(result.scanned || 0)
+      const updated = Number(result.updated || 0)
+      const failed = Number(result.failed || 0)
+      return `subs: ${updated}/${scanned}, errores: ${failed}`
     }
     if (job.job === 'backup') {
       const dbBackup = result.pg_dump

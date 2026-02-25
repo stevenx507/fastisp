@@ -47,6 +47,7 @@ import HotspotCards from '../components/admin/HotspotCards'
 import TechSupport from '../components/admin/TechSupport'
 import Inventory from '../components/admin/Inventory'
 import StaffView from '../components/admin/StaffView'
+import AuditTrail from '../components/admin/AuditTrail'
 import PlanChangeModal from '../components/admin/PlanChangeModal'
 import ManualPaymentModal from '../components/admin/ManualPaymentModal'
 import { apiClient } from '../lib/apiClient'
@@ -170,6 +171,7 @@ const AdminPanel: React.FC = () => {
     { id: 'extras', name: 'Servicios Adicionales', icon: WifiIcon },
     { id: 'finance', name: 'Finanzas', icon: CreditCardIcon },
     { id: 'system', name: 'Sistema', icon: CogIcon },
+    { id: 'audit', name: 'Auditoria', icon: InformationCircleIcon },
     { id: 'hotspot', name: 'Fichas Hotspot', icon: WifiIcon },
     { id: 'support', name: 'Soporte Técnico', icon: BellAlertIcon },
     { id: 'inventory', name: 'Almacén', icon: ServerIcon },
@@ -196,7 +198,7 @@ const AdminPanel: React.FC = () => {
       core,
       { id: 'clientes', label: 'Clientes', items: menuItems.filter(m => ['clients','clients-search','installations','screen-alerts','traffic','stats','push','extras'].includes(m.id)) },
       { id: 'finanzas', label: 'Finanzas', items: menuItems.filter(m => ['finance'].includes(m.id)) },
-      { id: 'sistema', label: 'Sistema', items: menuItems.filter(m => ['system'].includes(m.id)) },
+      { id: 'sistema', label: 'Sistema', items: menuItems.filter(m => ['system', 'audit'].includes(m.id)) },
       { id: 'hotspot', label: 'Fichas Hotspot', items: menuItems.filter(m => ['hotspot'].includes(m.id)) },
       { id: 'soporte', label: 'Soporte Técnico', items: menuItems.filter(m => ['support'].includes(m.id)) },
       { id: 'almacen', label: 'Almacén', items: menuItems.filter(m => ['inventory'].includes(m.id)) },
@@ -292,6 +294,7 @@ const AdminPanel: React.FC = () => {
     extras: <ExtraServices />,
     finance: <FinanceView />,
     system: <SystemSettings />,
+    audit: <AuditTrail />,
     hotspot: <HotspotCards />,
     support: <TechSupport />,
     inventory: <Inventory />,

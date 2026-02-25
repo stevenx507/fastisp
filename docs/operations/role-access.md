@@ -28,6 +28,7 @@ Esta guia describe como entrar a cada panel despues de los bloques implementados
 5. Para operar ese tenant:
    - pulsa `Entrar panel ISP` desde `/platform` (modo tenant), o
    - inicia sesion directo en el host del tenant (ej: `isp-a.fastisp.cloud`).
+6. En `/admin` ya tienes modulo `Auditoria` para revisar `quien hizo que`, con fecha/hora, IP y entidad afectada.
 
 ### Opcion B: seed de desarrollo
 - Usuario seed:

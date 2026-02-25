@@ -19,6 +19,10 @@ interface InstallationItem {
   notes?: string
   checklist?: Record<string, boolean>
   completed_at?: string
+  created_by_name?: string
+  updated_by_name?: string
+  created_at?: string
+  updated_at?: string
 }
 
 interface StaffMember {
@@ -53,6 +57,20 @@ const defaultForm: CreateForm = {
   scheduled_for: '',
   priority: 'normal',
   notes: '',
+}
+
+const formatDateTime = (value?: string | null) => {
+  if (!value) return '-'
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return value
+  return parsed.toLocaleString('es-PE', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
 }
 
 const Installations: React.FC = () => {
@@ -289,6 +307,9 @@ const Installations: React.FC = () => {
                     <td className="px-4 py-3">
                       <p className="font-medium text-gray-900">{item.client_name}</p>
                       <p className="text-xs text-gray-500">{item.address}</p>
+                      <p className="mt-1 text-[11px] text-gray-500">
+                        creado por {item.created_by_name || 'system'} - {formatDateTime(item.created_at)}
+                      </p>
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2">
@@ -323,7 +344,12 @@ const Installations: React.FC = () => {
                     <td className="px-4 py-3 text-xs text-gray-600">
                       {item.scheduled_for?.replace('T', ' ').slice(0, 16) || '-'}
                     </td>
-                    <td className="px-4 py-3 text-xs text-gray-600">{item.notes || '-'}</td>
+                    <td className="px-4 py-3 text-xs text-gray-600">
+                      <p>{item.notes || '-'}</p>
+                      <p className="mt-1 text-[11px] text-gray-500">
+                        ultimo cambio: {item.updated_by_name || 'system'} - {formatDateTime(item.updated_at)}
+                      </p>
+                    </td>
                   </tr>
                 ))}
                 {!filteredItems.length && (

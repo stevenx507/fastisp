@@ -15,8 +15,11 @@ interface VoucherItem {
   status: VoucherStatus
   assigned_to?: string | null
   created_at?: string
+  updated_at?: string
   expires_at?: string
   used_at?: string | null
+  created_by_name?: string
+  updated_by_name?: string
 }
 
 interface BatchForm {
@@ -43,6 +46,20 @@ const statusColor: Record<VoucherStatus, string> = {
   used: 'bg-emerald-100 text-emerald-700',
   expired: 'bg-amber-100 text-amber-700',
   cancelled: 'bg-red-100 text-red-700',
+}
+
+const formatDateTime = (value?: string | null) => {
+  if (!value) return '-'
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return value
+  return parsed.toLocaleString('es-PE', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
 }
 
 const HotspotCards: React.FC = () => {
@@ -263,6 +280,12 @@ const HotspotCards: React.FC = () => {
                           <DocumentDuplicateIcon className="h-3 w-3" />
                         </button>
                       </div>
+                      <p className="mt-1 text-[11px] text-gray-500">
+                        creado: {item.created_by_name || 'system'} - {formatDateTime(item.created_at)}
+                      </p>
+                      <p className="text-[11px] text-gray-500">
+                        actualizado: {item.updated_by_name || 'system'} - {formatDateTime(item.updated_at)}
+                      </p>
                     </td>
                     <td className="px-4 py-3 text-gray-700">{item.profile}</td>
                     <td className="px-4 py-3 text-right text-gray-700">{item.duration_minutes}m</td>

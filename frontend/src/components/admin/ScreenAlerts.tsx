@@ -19,6 +19,9 @@ interface ScreenAlertItem {
   impressions?: number
   acknowledged?: number
   created_at?: string
+  updated_at?: string
+  created_by_name?: string
+  updated_by_name?: string
 }
 
 interface FormState {
@@ -73,6 +76,20 @@ const defaultForm: FormState = {
   severity: 'info',
   audience: 'all',
   status: 'draft',
+}
+
+const formatDateTime = (value?: string | null) => {
+  if (!value) return '-'
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return value
+  return parsed.toLocaleString('es-PE', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
 }
 
 const ScreenAlerts: React.FC = () => {
@@ -296,6 +313,9 @@ const ScreenAlerts: React.FC = () => {
                         impresiones: {item.impressions || 0} | ack: {item.acknowledged || 0}
                       </span>
                     </div>
+                    <p className="mt-2 text-[11px] text-gray-500">
+                      creado por {item.created_by_name || 'system'} - {formatDateTime(item.created_at)} | actualizado por {item.updated_by_name || 'system'} - {formatDateTime(item.updated_at)}
+                    </p>
                   </div>
                   <div className="flex items-center gap-2">
                     <select

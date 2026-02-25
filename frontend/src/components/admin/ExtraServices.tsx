@@ -14,7 +14,10 @@ interface ExtraServiceItem {
   one_time_fee: number
   status: ServiceStatus
   subscribers: number
-  updated_at: string
+  created_at?: string
+  updated_at?: string
+  created_by_name?: string
+  updated_by_name?: string
 }
 
 interface CreateForm {
@@ -33,6 +36,20 @@ const defaultForm: CreateForm = {
   monthly_price: '',
   one_time_fee: '',
   status: 'active',
+}
+
+const formatDateTime = (value?: string | null) => {
+  if (!value) return '-'
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return value
+  return parsed.toLocaleString('es-PE', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
 }
 
 const ExtraServices: React.FC = () => {
@@ -219,6 +236,12 @@ const ExtraServices: React.FC = () => {
                     <td className="px-4 py-3">
                       <p className="font-medium text-gray-900">{item.name}</p>
                       <p className="text-xs text-gray-500">{item.description}</p>
+                      <p className="mt-1 text-[11px] text-gray-500">
+                        creado por {item.created_by_name || 'system'} - {formatDateTime(item.created_at)}
+                      </p>
+                      <p className="text-[11px] text-gray-500">
+                        actualizado por {item.updated_by_name || 'system'} - {formatDateTime(item.updated_at)}
+                      </p>
                     </td>
                     <td className="px-4 py-3 text-gray-700">{item.category}</td>
                     <td className="px-4 py-3 text-right">

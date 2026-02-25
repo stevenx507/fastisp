@@ -424,7 +424,7 @@ SCREEN_ALERT_ALLOWED_SEVERITY = {"info", "warning", "critical", "success"}
 SCREEN_ALERT_ALLOWED_AUDIENCE = {"all", "active", "overdue", "suspended"}
 EXTRA_SERVICE_ALLOWED_STATUS = {"active", "disabled"}
 HOTSPOT_VOUCHER_ALLOWED_STATUS = {"generated", "sold", "used", "expired", "cancelled"}
-SYSTEM_ALLOWED_JOBS = {"backup", "cleanup_leases", "rotate_passwords", "recalc_balances"}
+SYSTEM_ALLOWED_JOBS = {"backup", "cleanup_leases", "rotate_passwords", "recalc_balances", "enforce_billing"}
 TICKET_ALLOWED_PRIORITIES = {"low", "medium", "high", "urgent"}
 
 
@@ -499,6 +499,87 @@ def _save_cached_dict(key: str, data: dict) -> None:
 
 def _iso_utc_now() -> str:
     return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+
+def _actor_default_name(actor_id) -> str:
+    parsed = _parse_int(actor_id)
+    if parsed is None:
+        return "system"
+    return f"user#{parsed}"
+
+
+def _current_actor_snapshot() -> dict:
+    actor_id = _current_user_id()
+    if actor_id is None:
+        return {"id": None, "name": "system", "email": None}
+    user = db.session.get(User, actor_id)
+    if not user:
+        return {"id": actor_id, "name": _actor_default_name(actor_id), "email": None}
+    display_name = (user.name or user.email or _actor_default_name(user.id)).strip()
+    return {"id": user.id, "name": display_name, "email": user.email}
+
+
+def _ensure_operational_entry_metadata(entry: dict) -> bool:
+    changed = False
+    if not entry.get("created_at"):
+        entry["created_at"] = _iso_utc_now()
+        changed = True
+    if not entry.get("updated_at"):
+        entry["updated_at"] = entry["created_at"]
+        changed = True
+
+    if "created_by" not in entry:
+        entry["created_by"] = None
+        changed = True
+    if "updated_by" not in entry:
+        entry["updated_by"] = entry.get("created_by")
+        changed = True
+
+    if not entry.get("created_by_name"):
+        entry["created_by_name"] = _actor_default_name(entry.get("created_by"))
+        changed = True
+    if not entry.get("updated_by_name"):
+        entry["updated_by_name"] = _actor_default_name(entry.get("updated_by"))
+        changed = True
+    return changed
+
+
+def _apply_operational_entry_create_metadata(entry: dict, actor: dict | None = None) -> None:
+    actor = actor or _current_actor_snapshot()
+    now = _iso_utc_now()
+    actor_name = str(actor.get("name") or _actor_default_name(actor.get("id")))
+    actor_email = actor.get("email")
+
+    entry["created_at"] = now
+    entry["updated_at"] = now
+    entry["created_by"] = actor.get("id")
+    entry["updated_by"] = actor.get("id")
+    entry["created_by_name"] = actor_name
+    entry["updated_by_name"] = actor_name
+    if actor_email:
+        entry["created_by_email"] = actor_email
+        entry["updated_by_email"] = actor_email
+
+
+def _apply_operational_entry_update_metadata(entry: dict, actor: dict | None = None) -> None:
+    actor = actor or _current_actor_snapshot()
+    _ensure_operational_entry_metadata(entry)
+    actor_name = str(actor.get("name") or _actor_default_name(actor.get("id")))
+    actor_email = actor.get("email")
+
+    entry["updated_at"] = _iso_utc_now()
+    entry["updated_by"] = actor.get("id")
+    entry["updated_by_name"] = actor_name
+    if actor_email:
+        entry["updated_by_email"] = actor_email
+
+
+def _normalize_operational_items_metadata(items: list[dict]) -> bool:
+    changed = False
+    for item in items:
+        if _ensure_operational_entry_metadata(item):
+            changed = True
+    return changed
 
 
 def _ticket_assignee_counts(tenant_id) -> dict[str, int]:
@@ -3801,6 +3882,67 @@ def admin_notifications_history():
     return jsonify({"items": history[:limit], "count": min(len(history), limit)}), 200
 
 
+@main_bp.route('/admin/audit-logs', methods=['GET'])
+@admin_required()
+def admin_audit_logs():
+    tenant_id = current_tenant_id()
+    try:
+        limit = int(request.args.get('limit', 50) or 50)
+    except Exception:
+        limit = 50
+    try:
+        offset = int(request.args.get('offset', 0) or 0)
+    except Exception:
+        offset = 0
+
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+
+    action_filter = (request.args.get('action') or '').strip().lower()
+    entity_filter = (request.args.get('entity_type') or '').strip().lower()
+    entity_id_filter = (request.args.get('entity_id') or '').strip()
+    actor_id_filter = _parse_int(request.args.get('user_id'))
+    date_from = _parse_iso_datetime(request.args.get('from'))
+    date_to = _parse_iso_datetime(request.args.get('to'))
+
+    query = AuditLog.query.options(joinedload(AuditLog.user), joinedload(AuditLog.tenant))
+    if tenant_id is not None:
+        query = query.filter(AuditLog.tenant_id == tenant_id)
+    if action_filter:
+        query = query.filter(AuditLog.action.ilike(f"%{action_filter}%"))
+    if entity_filter:
+        query = query.filter(AuditLog.entity_type.ilike(f"%{entity_filter}%"))
+    if entity_id_filter:
+        query = query.filter(AuditLog.entity_id == entity_id_filter)
+    if actor_id_filter is not None:
+        query = query.filter(AuditLog.user_id == actor_id_filter)
+    if date_from is not None:
+        query = query.filter(AuditLog.created_at >= date_from)
+    if date_to is not None:
+        query = query.filter(AuditLog.created_at <= date_to)
+
+    total = query.count()
+    rows = query.order_by(AuditLog.created_at.desc()).offset(offset).limit(limit).all()
+
+    items = []
+    for row in rows:
+        payload = row.to_dict()
+        payload["user_name"] = row.user.name if row.user else _actor_default_name(row.user_id)
+        payload["user_email"] = row.user.email if row.user else None
+        payload["tenant_slug"] = row.tenant.slug if row.tenant else None
+        items.append(payload)
+
+    return jsonify(
+        {
+            "items": items,
+            "count": len(items),
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }
+    ), 200
+
+
 @main_bp.route('/admin/notifications/send', methods=['POST'])
 @admin_required()
 def admin_notifications_send():
@@ -3851,6 +3993,7 @@ def admin_notifications_send():
             continue
         selected_clients.append(client)
 
+    actor = _current_actor_snapshot()
     entry = {
         "id": secrets.token_hex(8),
         "title": title,
@@ -3861,7 +4004,8 @@ def admin_notifications_send():
         "router_id": router_id,
         "target_count": len(selected_clients),
         "status": "sent",
-        "created_by": _current_user_id(),
+        "created_by": actor.get("id"),
+        "created_by_name": actor.get("name"),
         "sent_at": _iso_utc_now(),
     }
 
@@ -4061,6 +4205,7 @@ def _default_installations(tenant_id) -> list[dict]:
 
     statuses = ["pending", "scheduled", "in_progress", "completed"]
     now = datetime.utcnow()
+    system_actor = {"id": None, "name": "system", "email": None}
     items: list[dict] = []
     for index, client in enumerate(clients, start=1):
         status = statuses[index % len(statuses)]
@@ -4071,24 +4216,22 @@ def _default_installations(tenant_id) -> list[dict]:
             "signal_validated": status == "completed",
             "speedtest_ok": status == "completed",
         }
-        items.append(
-            {
-                "id": f"inst-{client.id}",
-                "client_id": client.id,
-                "client_name": client.full_name,
-                "plan": client.plan.name if client.plan else None,
-                "router": client.router.name if client.router else None,
-                "address": client.ip_address or "Sin direccion",
-                "status": status,
-                "priority": "high" if index % 5 == 0 else "normal",
-                "technician": technicians[index % len(technicians)],
-                "scheduled_for": scheduled_at.isoformat() + "Z",
-                "notes": "Instalacion programada automaticamente",
-                "checklist": checklist,
-                "created_at": _iso_utc_now(),
-                "updated_at": _iso_utc_now(),
-            }
-        )
+        entry = {
+            "id": f"inst-{client.id}",
+            "client_id": client.id,
+            "client_name": client.full_name,
+            "plan": client.plan.name if client.plan else None,
+            "router": client.router.name if client.router else None,
+            "address": client.ip_address or "Sin direccion",
+            "status": status,
+            "priority": "high" if index % 5 == 0 else "normal",
+            "technician": technicians[index % len(technicians)],
+            "scheduled_for": scheduled_at.isoformat() + "Z",
+            "notes": "Instalacion programada automaticamente",
+            "checklist": checklist,
+        }
+        _apply_operational_entry_create_metadata(entry, actor=system_actor)
+        items.append(entry)
     return items
 
 
@@ -4100,6 +4243,8 @@ def admin_installations_list():
     items = _load_cached_list(key)
     if not items:
         items = _default_installations(tenant_id)
+        _save_cached_list(key, items, max_items=400)
+    elif _normalize_operational_items_metadata(items):
         _save_cached_list(key, items, max_items=400)
 
     status_filter = (request.args.get('status') or '').strip().lower()
@@ -4123,6 +4268,7 @@ def admin_installations_list():
 def admin_installations_create():
     tenant_id = current_tenant_id()
     data = request.get_json() or {}
+    actor = _current_actor_snapshot()
 
     client_id = data.get('client_id')
     client_name = (data.get('client_name') or '').strip()
@@ -4169,9 +4315,8 @@ def admin_installations_create():
             "signal_validated": False,
             "speedtest_ok": False,
         },
-        "created_at": _iso_utc_now(),
-        "updated_at": _iso_utc_now(),
     }
+    _apply_operational_entry_create_metadata(entry, actor=actor)
 
     key = _installations_key(tenant_id)
     items = _load_cached_list(key)
@@ -4191,6 +4336,8 @@ def admin_installations_update(installation_id):
     if not entry:
         return jsonify({"error": "Instalacion no encontrada"}), 404
 
+    actor = _current_actor_snapshot()
+    _ensure_operational_entry_metadata(entry)
     data = request.get_json() or {}
     if 'status' in data:
         status = str(data.get('status') or '').strip().lower()
@@ -4224,7 +4371,9 @@ def admin_installations_update(installation_id):
 
     if entry.get('status') == 'completed':
         entry['completed_at'] = entry.get('completed_at') or _iso_utc_now()
-    entry['updated_at'] = _iso_utc_now()
+        entry['completed_by'] = entry.get('completed_by') if entry.get('completed_by') is not None else actor.get("id")
+        entry['completed_by_name'] = entry.get('completed_by_name') or str(actor.get("name") or _actor_default_name(actor.get("id")))
+    _apply_operational_entry_update_metadata(entry, actor=actor)
 
     _save_cached_list(key, items, max_items=400)
     _audit("installation_update", entity_type="installation", entity_id=installation_id, metadata={"changes": list(data.keys())})
@@ -4233,7 +4382,8 @@ def admin_installations_update(installation_id):
 
 def _default_screen_alerts() -> list[dict]:
     now = _iso_utc_now()
-    return [
+    system_actor = {"id": None, "name": "system", "email": None}
+    items = [
         {
             "id": secrets.token_hex(8),
             "title": "Mantenimiento programado",
@@ -4245,9 +4395,6 @@ def _default_screen_alerts() -> list[dict]:
             "ends_at": None,
             "impressions": 0,
             "acknowledged": 0,
-            "created_by": None,
-            "created_at": now,
-            "updated_at": now,
         },
         {
             "id": secrets.token_hex(8),
@@ -4260,11 +4407,11 @@ def _default_screen_alerts() -> list[dict]:
             "ends_at": None,
             "impressions": 0,
             "acknowledged": 0,
-            "created_by": None,
-            "created_at": now,
-            "updated_at": now,
         },
     ]
+    for entry in items:
+        _apply_operational_entry_create_metadata(entry, actor=system_actor)
+    return items
 
 
 @main_bp.route('/admin/screen-alerts', methods=['GET'])
@@ -4275,6 +4422,8 @@ def admin_screen_alerts_list():
     items = _load_cached_list(key)
     if not items:
         items = _default_screen_alerts()
+        _save_cached_list(key, items, max_items=400)
+    elif _normalize_operational_items_metadata(items):
         _save_cached_list(key, items, max_items=400)
 
     status_filter = (request.args.get('status') or '').strip().lower()
@@ -4294,6 +4443,7 @@ def admin_screen_alerts_list():
 def admin_screen_alerts_create():
     tenant_id = current_tenant_id()
     data = request.get_json() or {}
+    actor = _current_actor_snapshot()
     title = (data.get('title') or '').strip()
     message = (data.get('message') or '').strip()
     if not title or not message:
@@ -4311,7 +4461,6 @@ def admin_screen_alerts_create():
     if status not in SCREEN_ALERT_ALLOWED_STATUS:
         return jsonify({"error": f"status invalido. permitidos: {', '.join(sorted(SCREEN_ALERT_ALLOWED_STATUS))}"}), 400
 
-    now = _iso_utc_now()
     entry = {
         "id": secrets.token_hex(8),
         "title": title,
@@ -4319,14 +4468,12 @@ def admin_screen_alerts_create():
         "severity": severity,
         "audience": audience,
         "status": status,
-        "starts_at": (data.get('starts_at') or now),
+        "starts_at": (data.get('starts_at') or _iso_utc_now()),
         "ends_at": data.get('ends_at'),
         "impressions": 0,
         "acknowledged": 0,
-        "created_by": _current_user_id(),
-        "created_at": now,
-        "updated_at": now,
     }
+    _apply_operational_entry_create_metadata(entry, actor=actor)
 
     key = _screen_alerts_key(tenant_id)
     items = _load_cached_list(key)
@@ -4346,6 +4493,8 @@ def admin_screen_alerts_update(alert_id):
     if not entry:
         return jsonify({"error": "Alerta no encontrada"}), 404
 
+    actor = _current_actor_snapshot()
+    _ensure_operational_entry_metadata(entry)
     data = request.get_json() or {}
     if 'title' in data:
         title = str(data.get('title') or '').strip()
@@ -4381,7 +4530,7 @@ def admin_screen_alerts_update(alert_id):
     if 'acknowledged_delta' in data:
         entry['acknowledged'] = max(0, int(entry.get('acknowledged') or 0) + int(data.get('acknowledged_delta') or 0))
 
-    entry['updated_at'] = _iso_utc_now()
+    _apply_operational_entry_update_metadata(entry, actor=actor)
     _save_cached_list(key, items, max_items=400)
     _audit("screen_alert_update", entity_type="screen_alert", entity_id=alert_id, metadata={"changes": list(data.keys())})
     return jsonify({"success": True, "alert": entry}), 200
@@ -4392,8 +4541,8 @@ def _default_extra_services(tenant_id) -> list[dict]:
     if tenant_id is not None:
         clients_query = clients_query.filter_by(tenant_id=tenant_id)
     clients_count = clients_query.count()
-    now = _iso_utc_now()
-    return [
+    system_actor = {"id": None, "name": "system", "email": None}
+    items = [
         {
             "id": "svc-iptv",
             "name": "IPTV Premium",
@@ -4403,7 +4552,6 @@ def _default_extra_services(tenant_id) -> list[dict]:
             "one_time_fee": 0.0,
             "status": "active",
             "subscribers": max(0, round(clients_count * 0.22)),
-            "updated_at": now,
         },
         {
             "id": "svc-voip",
@@ -4414,7 +4562,6 @@ def _default_extra_services(tenant_id) -> list[dict]:
             "one_time_fee": 8.0,
             "status": "active",
             "subscribers": max(0, round(clients_count * 0.13)),
-            "updated_at": now,
         },
         {
             "id": "svc-ipfixa",
@@ -4425,7 +4572,6 @@ def _default_extra_services(tenant_id) -> list[dict]:
             "one_time_fee": 20.0,
             "status": "active",
             "subscribers": max(0, round(clients_count * 0.09)),
-            "updated_at": now,
         },
         {
             "id": "svc-backup4g",
@@ -4436,9 +4582,11 @@ def _default_extra_services(tenant_id) -> list[dict]:
             "one_time_fee": 25.0,
             "status": "disabled",
             "subscribers": max(0, round(clients_count * 0.04)),
-            "updated_at": now,
         },
     ]
+    for entry in items:
+        _apply_operational_entry_create_metadata(entry, actor=system_actor)
+    return items
 
 
 @main_bp.route('/admin/extra-services', methods=['GET'])
@@ -4449,6 +4597,8 @@ def admin_extra_services_list():
     items = _load_cached_list(key)
     if not items:
         items = _default_extra_services(tenant_id)
+        _save_cached_list(key, items, max_items=300)
+    elif _normalize_operational_items_metadata(items):
         _save_cached_list(key, items, max_items=300)
 
     status_filter = (request.args.get('status') or '').strip().lower()
@@ -4471,6 +4621,7 @@ def admin_extra_services_list():
 def admin_extra_services_create():
     tenant_id = current_tenant_id()
     data = request.get_json() or {}
+    actor = _current_actor_snapshot()
     name = (data.get('name') or '').strip()
     if not name:
         return jsonify({"error": "name es requerido"}), 400
@@ -4488,8 +4639,8 @@ def admin_extra_services_create():
         "one_time_fee": round(float(data.get('one_time_fee') or 0), 2),
         "status": status,
         "subscribers": int(data.get('subscribers') or 0),
-        "updated_at": _iso_utc_now(),
     }
+    _apply_operational_entry_create_metadata(entry, actor=actor)
 
     key = _extra_services_key(tenant_id)
     items = _load_cached_list(key)
@@ -4509,6 +4660,8 @@ def admin_extra_services_update(service_id):
     if not entry:
         return jsonify({"error": "Servicio no encontrado"}), 404
 
+    actor = _current_actor_snapshot()
+    _ensure_operational_entry_metadata(entry)
     data = request.get_json() or {}
     if 'name' in data:
         name = str(data.get('name') or '').strip()
@@ -4531,7 +4684,7 @@ def admin_extra_services_update(service_id):
             return jsonify({"error": f"status invalido. permitidos: {', '.join(sorted(EXTRA_SERVICE_ALLOWED_STATUS))}"}), 400
         entry['status'] = status
 
-    entry['updated_at'] = _iso_utc_now()
+    _apply_operational_entry_update_metadata(entry, actor=actor)
     _save_cached_list(key, items, max_items=300)
     _audit("extra_service_update", entity_type="extra_service", entity_id=service_id, metadata={"changes": list(data.keys())})
     return jsonify({"success": True, "service": entry}), 200
@@ -4543,6 +4696,8 @@ def admin_hotspot_vouchers_list():
     tenant_id = current_tenant_id()
     key = _hotspot_vouchers_key(tenant_id)
     items = _load_cached_list(key)
+    if _normalize_operational_items_metadata(items):
+        _save_cached_list(key, items, max_items=1000)
 
     status_filter = (request.args.get('status') or '').strip().lower()
     if status_filter:
@@ -4570,6 +4725,7 @@ def admin_hotspot_vouchers_list():
 def admin_hotspot_vouchers_create():
     tenant_id = current_tenant_id()
     data = request.get_json() or {}
+    actor = _current_actor_snapshot()
 
     try:
         quantity = int(data.get('quantity') or 1)
@@ -4599,10 +4755,10 @@ def admin_hotspot_vouchers_create():
             "price": price,
             "status": "generated",
             "assigned_to": None,
-            "created_at": _iso_utc_now(),
             "expires_at": (now + timedelta(days=expires_days)).isoformat() + "Z",
             "used_at": None,
         }
+        _apply_operational_entry_create_metadata(entry, actor=actor)
         items.insert(0, entry)
         created.append(entry)
 
@@ -4625,6 +4781,8 @@ def admin_hotspot_vouchers_update(voucher_id):
     if not entry:
         return jsonify({"error": "Voucher no encontrado"}), 404
 
+    actor = _current_actor_snapshot()
+    _ensure_operational_entry_metadata(entry)
     data = request.get_json() or {}
     if 'status' in data:
         status = str(data.get('status') or '').strip().lower()
@@ -4638,6 +4796,7 @@ def admin_hotspot_vouchers_update(voucher_id):
     if 'expires_at' in data:
         entry['expires_at'] = data.get('expires_at')
 
+    _apply_operational_entry_update_metadata(entry, actor=actor)
     _save_cached_list(key, items, max_items=1000)
     _audit("hotspot_voucher_update", entity_type="hotspot_voucher", entity_id=voucher_id, metadata={"changes": list(data.keys())})
     return jsonify({"success": True, "voucher": entry}), 200
@@ -4837,6 +4996,23 @@ def _rotate_mikrotik_passwords(tenant_id) -> tuple[str, dict]:
     return 'completed', summary
 
 
+def _enforce_billing_for_tenant(tenant_id) -> tuple[str, dict]:
+    defaults = _default_system_settings()
+    overrides = _load_cached_dict(_system_settings_key(tenant_id))
+    auto_suspend_overdue = bool(overrides.get("auto_suspend_overdue", defaults.get("auto_suspend_overdue", True)))
+    if not auto_suspend_overdue:
+        return 'skipped', {
+            "tenant_id": tenant_id,
+            "auto_suspend_overdue": False,
+            "message": "auto_suspend_overdue deshabilitado en ajustes de sistema.",
+            "timestamp": _iso_utc_now(),
+        }
+
+    summary = _cleanup_leases_for_tenant(tenant_id)
+    summary["auto_suspend_overdue"] = True
+    return 'completed', summary
+
+
 def _execute_system_job(job: str, tenant_id) -> tuple[str, dict]:
     try:
         if job == 'backup':
@@ -4844,6 +5020,8 @@ def _execute_system_job(job: str, tenant_id) -> tuple[str, dict]:
             return 'completed', run_full_backups()
         if job == 'cleanup_leases':
             return 'completed', _cleanup_leases_for_tenant(tenant_id)
+        if job == 'enforce_billing':
+            return _enforce_billing_for_tenant(tenant_id)
         if job == 'recalc_balances':
             return 'completed', _recalculate_invoice_balances(tenant_id)
         if job == 'rotate_passwords':
