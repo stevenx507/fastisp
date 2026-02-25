@@ -724,6 +724,36 @@ const MikroTikManagement: React.FC = () => {
     }
   }
 
+  const deleteSelectedRouter = async () => {
+    if (!selectedRouter) return
+    setActionLoading(true)
+    try {
+      const response = await apiFetch(`/api/mikrotik/routers/${selectedRouter.id}`, { method: 'DELETE' })
+      const payload = (await safeJson(response)) as { success?: boolean; error?: string; linked_clients?: number } | null
+      if (response.ok && payload?.success) {
+        addToast('success', `Router ${selectedRouter.name} eliminado`)
+        setRouterStats(null)
+        setQuickConnect(null)
+        setRouterReadiness(null)
+        setBootstrapResult(null)
+        setEnterpriseProfiles(null)
+        setEnterpriseChangeLog([])
+        setAiAnalysis(null)
+        setAiError(null)
+        await loadRouters()
+      } else if (response.status === 409) {
+        addToast('error', payload?.error || 'No se puede eliminar: tiene clientes vinculados')
+      } else {
+        addToast('error', payload?.error || 'No se pudo eliminar el router')
+      }
+    } catch (error) {
+      console.error('Error deleting router:', error)
+      addToast('error', 'Error de red eliminando router')
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
   const importWireGuardArchive = useCallback(
     async (archiveFile: File) => {
       if (!archiveFile) return
@@ -1137,6 +1167,16 @@ const MikroTikManagement: React.FC = () => {
     })
   }
 
+  const confirmDeleteRouter = () => {
+    if (!selectedRouter) return
+    openConfirm(
+      `Eliminar el router ${selectedRouter.name}? Esta accion no se puede deshacer y requiere que no tenga clientes vinculados.`,
+      () => {
+        void deleteSelectedRouter()
+      }
+    )
+  }
+
   return (
     <div className="space-y-6">
       <ActionsHeader
@@ -1152,6 +1192,7 @@ const MikroTikManagement: React.FC = () => {
         onShowLogs={() => setSidePanel('logs')}
         onShowDhcpLeases={() => setSidePanel('dhcp')}
         onShowWifiClients={() => setSidePanel('wifi')}
+        onDeleteRouterClick={confirmDeleteRouter}
       />
 
       <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 shadow-sm">

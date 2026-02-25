@@ -5,6 +5,7 @@ import {
   CloudArrowDownIcon,
   ArrowPathIcon,
   SparklesIcon,
+  TrashIcon,
 } from '@heroicons/react/24/outline';
 import { RouterItem } from './types';
 
@@ -21,6 +22,7 @@ interface ActionsHeaderProps {
   onShowLogs: () => void;
   onShowDhcpLeases: () => void;
   onShowWifiClients: () => void;
+  onDeleteRouterClick: () => void;
 }
 
 const ActionsHeader: React.FC<ActionsHeaderProps> = ({
@@ -36,6 +38,7 @@ const ActionsHeader: React.FC<ActionsHeaderProps> = ({
   onShowLogs,
   onShowDhcpLeases,
   onShowWifiClients,
+  onDeleteRouterClick,
 }) => {
   return (
     <div className="flex justify-between items-center">
@@ -104,6 +107,14 @@ const ActionsHeader: React.FC<ActionsHeaderProps> = ({
           className="flex items-center space-x-2 px-4 py-2 bg-slate-200 text-slate-900 rounded-lg hover:bg-slate-300 disabled:opacity-50"
         >
           <span>Refrescar</span>
+        </button>
+        <button
+          onClick={onDeleteRouterClick}
+          disabled={actionLoading || !selectedRouter}
+          className="flex items-center space-x-2 px-4 py-2 bg-rose-800 text-white rounded-lg hover:bg-rose-900 disabled:opacity-50"
+        >
+          <TrashIcon className="w-5 h-5" />
+          <span>Eliminar router</span>
         </button>
       </div>
     </div>
