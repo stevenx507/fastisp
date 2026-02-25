@@ -246,6 +246,18 @@ const SettingsView: React.FC = () => {
 
   const canSaveProfile = useMemo(() => profileName.trim().length > 0 && profileEmail.trim().length > 0, [profileEmail, profileName])
 
+  const roleLabel = useMemo(() => {
+    const role = normalizeRole(user?.role)
+    if (role === 'platform_admin') return 'Admin Total'
+    if (role === 'admin') return 'Administrador ISP'
+    if (role === 'tech') return 'Tecnico'
+    if (role === 'support') return 'Soporte'
+    if (role === 'billing') return 'Facturacion'
+    if (role === 'noc') return 'NOC'
+    if (role === 'operator') return 'Operador'
+    return 'Cliente'
+  }, [user?.role])
+
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="mx-auto max-w-4xl">
       <div className="mb-6 flex gap-4 border-b border-gray-200">
@@ -444,7 +456,7 @@ const SettingsView: React.FC = () => {
                     className="mt-1 w-full rounded-lg border border-gray-300 px-4 py-2"
                   />
                 </label>
-                <p className="text-sm text-gray-600">Rol: {normalizeRole(user?.role) === 'admin' ? 'Administrador' : 'Cliente'}</p>
+                <p className="text-sm text-gray-600">Rol: {roleLabel}</p>
                 <button
                   onClick={saveProfile}
                   disabled={!canSaveProfile || savingProfile}

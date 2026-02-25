@@ -53,6 +53,11 @@ Esta guia describe como entrar a cada panel despues de los bloques implementados
   - `ana.gomez@example.com`
 - Passwords: se imprimen en consola del seed.
 
+## 4) Staff operativo (`tech`, `support`, `billing`, `noc`, `operator`)
+
+- Cuando estos roles inician sesion, ahora entran por defecto a `/tech` (no al dashboard cliente).
+- El rol `admin` sigue entrando a `/admin`.
+
 ## Notas de contexto tenant
 
 - `platform_admin` solo usa `/platform` en contexto master/global.
