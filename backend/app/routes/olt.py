@@ -165,6 +165,10 @@ def _credentials_cache_key() -> str:
     return _tenant_key("custom_credentials")
 
 
+def _templates_cache_key() -> str:
+    return _tenant_key("custom_service_templates")
+
+
 def _load_custom_devices() -> list[dict]:
     raw = cache.get(_devices_cache_key()) or []
     if isinstance(raw, list):
@@ -185,6 +189,22 @@ def _load_custom_credentials() -> dict:
 
 def _save_custom_credentials(credentials: dict) -> None:
     cache.set(_credentials_cache_key(), credentials, timeout=86400 * 30)
+
+
+def _load_custom_service_templates() -> dict:
+    raw = cache.get(_templates_cache_key()) or {}
+    if not isinstance(raw, dict):
+        return {}
+    payload: dict[str, list[dict]] = {}
+    for vendor, templates in raw.items():
+        if not isinstance(templates, list):
+            continue
+        payload[str(vendor)] = [item for item in templates if isinstance(item, dict)]
+    return payload
+
+
+def _save_custom_service_templates(templates: dict) -> None:
+    cache.set(_templates_cache_key(), templates, timeout=86400 * 30)
 
 
 def _normalize_device_transport(vendor: str, transport: str | None) -> str:
@@ -332,9 +352,82 @@ def list_vendors():
 @admin_required()
 def service_templates():
     vendor = (request.args.get("vendor") or "").strip().lower()
-    if vendor and vendor in SERVICE_TEMPLATES:
-        return jsonify({"success": True, "vendor": vendor, "templates": SERVICE_TEMPLATES[vendor]}), 200
-    return jsonify({"success": True, "templates": SERVICE_TEMPLATES}), 200
+    custom_templates = _load_custom_service_templates()
+    merged = {
+        vendor_name: [*SERVICE_TEMPLATES.get(vendor_name, []), *(custom_templates.get(vendor_name, []))]
+        for vendor_name in SUPPORTED_VENDORS.keys()
+    }
+    if vendor:
+        if vendor not in merged:
+            return jsonify({"success": False, "error": "vendor invalido"}), 400
+        return jsonify({"success": True, "vendor": vendor, "templates": merged[vendor]}), 200
+    return jsonify({"success": True, "templates": merged}), 200
+
+
+@olt_bp.route("/service-templates", methods=["POST"])
+@admin_required()
+def create_service_template():
+    data = request.get_json() or {}
+    vendor = str(data.get("vendor") or "").strip().lower()
+    if vendor not in SUPPORTED_VENDORS:
+        return jsonify({"success": False, "error": "vendor invalido"}), 400
+
+    label = str(data.get("label") or "").strip()
+    line_profile = str(data.get("line_profile") or "").strip()
+    srv_profile = str(data.get("srv_profile") or "").strip()
+    template_id = str(data.get("id") or "").strip() or f"{vendor}-custom-{int(time.time())}"
+
+    if not label or not line_profile or not srv_profile:
+        return jsonify({"success": False, "error": "label, line_profile y srv_profile son requeridos"}), 400
+
+    custom_templates = _load_custom_service_templates()
+    vendor_templates = custom_templates.get(vendor, [])
+    if any(str(item.get("id") or "") == template_id for item in vendor_templates):
+        return jsonify({"success": False, "error": "id de template ya existe"}), 409
+
+    payload = {
+        "id": template_id,
+        "label": label,
+        "line_profile": line_profile,
+        "srv_profile": srv_profile,
+        "origin": "custom",
+    }
+    vendor_templates.insert(0, payload)
+    custom_templates[vendor] = vendor_templates[:100]
+    _save_custom_service_templates(custom_templates)
+
+    _audit(
+        "olt_service_template_create",
+        entity_type="olt_service_template",
+        entity_id=template_id,
+        metadata={"vendor": vendor, "line_profile": line_profile, "srv_profile": srv_profile},
+    )
+    return jsonify({"success": True, "template": payload}), 201
+
+
+@olt_bp.route("/service-templates/<vendor>/<template_id>", methods=["DELETE"])
+@admin_required()
+def delete_service_template(vendor, template_id):
+    vendor = str(vendor or "").strip().lower()
+    if vendor not in SUPPORTED_VENDORS:
+        return jsonify({"success": False, "error": "vendor invalido"}), 400
+
+    custom_templates = _load_custom_service_templates()
+    vendor_templates = custom_templates.get(vendor, [])
+    initial = len(vendor_templates)
+    vendor_templates = [item for item in vendor_templates if str(item.get("id") or "") != str(template_id)]
+    if len(vendor_templates) == initial:
+        return jsonify({"success": False, "error": "template custom no encontrado"}), 404
+
+    custom_templates[vendor] = vendor_templates
+    _save_custom_service_templates(custom_templates)
+    _audit(
+        "olt_service_template_delete",
+        entity_type="olt_service_template",
+        entity_id=str(template_id),
+        metadata={"vendor": vendor},
+    )
+    return jsonify({"success": True}), 200
 
 
 @olt_bp.route("/devices", methods=["GET"])

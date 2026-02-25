@@ -23,6 +23,14 @@ interface OltDevice {
   username?: string
 }
 
+interface OltServiceTemplate {
+  id: string
+  label: string
+  line_profile: string
+  srv_profile: string
+  origin?: string
+}
+
 interface OltAuditEntry {
   id: string
   device_id: string
@@ -97,6 +105,8 @@ const OltManagement: React.FC = () => {
   const [customPayload, setCustomPayload] = useState('{\n  "frame": 0,\n  "slot": 1,\n  "pon": 1\n}')
   const [quickScript, setQuickScript] = useState('')
   const [remoteOptions, setRemoteOptions] = useState<OltRemoteOptions | null>(null)
+  const [serviceTemplates, setServiceTemplates] = useState<Record<string, OltServiceTemplate[]>>({})
+  const [selectedTemplateId, setSelectedTemplateId] = useState('')
 
   const [deviceForm, setDeviceForm] = useState<OltDeviceForm>({
     vendor: 'zte',
@@ -125,10 +135,18 @@ const OltManagement: React.FC = () => {
     () => vendors.find((v) => v.id === (selectedDevice?.vendor || selectedVendor)) || null,
     [vendors, selectedDevice?.vendor, selectedVendor]
   )
+  const activeVendor = selectedDevice?.vendor || selectedVendor
+  const templateOptions = useMemo(() => serviceTemplates[activeVendor] || [], [serviceTemplates, activeVendor])
+  const selectedTemplate = useMemo(
+    () => templateOptions.find((template) => template.id === selectedTemplateId) || null,
+    [templateOptions, selectedTemplateId]
+  )
 
   const liveModeBlocked = runMode === 'live' && !liveConfirm
 
   const buildBasePayload = () => {
+    const effectiveLineProfile = lineProfile.trim() || selectedTemplate?.line_profile || ''
+    const effectiveSrvProfile = srvProfile.trim() || selectedTemplate?.srv_profile || ''
     const payload: Record<string, unknown> = {
       serial: serial.trim(),
       frame: Number(frame || 0),
@@ -137,8 +155,8 @@ const OltManagement: React.FC = () => {
       onu: Number(onu || 1),
       vlan: Number(vlan || 120),
     }
-    if (lineProfile.trim()) payload.line_profile = lineProfile.trim()
-    if (srvProfile.trim()) payload.srv_profile = srvProfile.trim()
+    if (effectiveLineProfile) payload.line_profile = effectiveLineProfile
+    if (effectiveSrvProfile) payload.srv_profile = effectiveSrvProfile
     return payload
   }
 
@@ -199,10 +217,34 @@ const OltManagement: React.FC = () => {
     }
   }
 
+  const loadServiceTemplates = async (vendor?: string) => {
+    const safeVendor = (vendor || '').trim().toLowerCase()
+    if (!safeVendor) return
+    try {
+      const response = (await apiClient.get(`/olt/service-templates?vendor=${safeVendor}`)) as {
+        templates?: OltServiceTemplate[]
+      }
+      setServiceTemplates((prev) => ({ ...prev, [safeVendor]: (response.templates || []) as OltServiceTemplate[] }))
+    } catch {
+      setServiceTemplates((prev) => ({ ...prev, [safeVendor]: [] }))
+    }
+  }
+
   useEffect(() => {
     loadCatalog()
     loadAudit()
   }, [])
+
+  useEffect(() => {
+    if (!activeVendor) return
+    loadServiceTemplates(activeVendor)
+  }, [activeVendor])
+
+  useEffect(() => {
+    if (!selectedTemplate) return
+    if (!lineProfile.trim()) setLineProfile(selectedTemplate.line_profile || '')
+    if (!srvProfile.trim()) setSrvProfile(selectedTemplate.srv_profile || '')
+  }, [selectedTemplate, lineProfile, srvProfile])
 
   useEffect(() => {
     if (!filteredDevices.length) {
@@ -615,6 +657,18 @@ const OltManagement: React.FC = () => {
             <input value={pon} onChange={(e) => setPon(e.target.value)} placeholder="PON" className="rounded-lg border border-white/10 bg-slate-800 px-3 py-2 text-sm text-slate-100" />
             <input value={onu} onChange={(e) => setOnu(e.target.value)} placeholder="ONU ID" className="rounded-lg border border-white/10 bg-slate-800 px-3 py-2 text-sm text-slate-100" />
             <input value={vlan} onChange={(e) => setVlan(e.target.value)} placeholder="VLAN" className="rounded-lg border border-white/10 bg-slate-800 px-3 py-2 text-sm text-slate-100" />
+            <select
+              value={selectedTemplateId}
+              onChange={(e) => setSelectedTemplateId(e.target.value)}
+              className="col-span-2 rounded-lg border border-white/10 bg-slate-800 px-3 py-2 text-sm text-slate-100"
+            >
+              <option value="">Template de servicio (opcional)</option>
+              {templateOptions.map((template) => (
+                <option key={template.id} value={template.id}>
+                  {template.label} ({template.origin || 'default'})
+                </option>
+              ))}
+            </select>
             <input value={lineProfile} onChange={(e) => setLineProfile(e.target.value)} placeholder="Line profile" className="rounded-lg border border-white/10 bg-slate-800 px-3 py-2 text-sm text-slate-100" />
             <input value={srvProfile} onChange={(e) => setSrvProfile(e.target.value)} placeholder="Srv profile" className="rounded-lg border border-white/10 bg-slate-800 px-3 py-2 text-sm text-slate-100" />
           </div>

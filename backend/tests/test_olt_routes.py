@@ -238,3 +238,42 @@ def test_tr069_reprovision_live_calls_acs(client, app, monkeypatch):
     assert captured["json"]["host"] == "acs.provider.local"
     assert captured["json"]["serial"] == "ZTEG00000001"
     assert captured["headers"]["Authorization"] == "Bearer secret-token"
+
+
+def test_service_templates_allow_custom_create_and_delete(client, app):
+    headers = _admin_headers(client, app)
+
+    create_response = client.post(
+        "/api/olt/service-templates",
+        json={
+            "vendor": "zte",
+            "id": "zte-custom-qa",
+            "label": "ZTE QA",
+            "line_profile": "LINE-QA",
+            "srv_profile": "SRV-QA",
+        },
+        headers=headers,
+    )
+    assert create_response.status_code == 201
+
+    list_response = client.get(
+        "/api/olt/service-templates?vendor=zte",
+        headers=headers,
+    )
+    assert list_response.status_code == 200
+    templates = list_response.get_json()["templates"]
+    assert any(item["id"] == "zte-custom-qa" for item in templates)
+
+    delete_response = client.delete(
+        "/api/olt/service-templates/zte/zte-custom-qa",
+        headers=headers,
+    )
+    assert delete_response.status_code == 200
+
+    list_after_delete = client.get(
+        "/api/olt/service-templates?vendor=zte",
+        headers=headers,
+    )
+    assert list_after_delete.status_code == 200
+    templates_after = list_after_delete.get_json()["templates"]
+    assert all(item["id"] != "zte-custom-qa" for item in templates_after)
