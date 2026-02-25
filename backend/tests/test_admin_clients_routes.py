@@ -408,3 +408,141 @@ def test_admin_bulk_create_clients_creates_partial_batch(client, app):
         assert Client.query.filter_by(full_name='Cliente Crea 3').first() is not None
         created_user = User.query.filter_by(email='cliente.crea.2@test.local').first()
         assert created_user is not None
+
+
+def test_admin_bulk_update_clients_dry_run_validates_changes(client, app):
+    admin_id, plan_id = _admin_and_plan(app, email_prefix='admin-clients-update-dry')
+    token = _token_for_user(app, admin_id)
+
+    with app.app_context():
+        target_plan = Plan(name='Plan Update Dry Target', download_speed=150, upload_speed=40, price=49.0)
+        router = MikroTikRouter(
+            name='Router Update Dry',
+            ip_address='10.250.1.1',
+            username='admin',
+            tenant_id=None,
+        )
+        router.password = 'Secret#Router03'
+        client_row = Client(
+            full_name='Cliente Dry Update',
+            connection_type='dhcp',
+            plan_id=plan_id,
+            ip_address='10.0.20.10',
+        )
+        db.session.add_all([target_plan, router, client_row])
+        db.session.commit()
+        client_id = client_row.id
+        target_plan_name = target_plan.name
+        router_name = router.name
+
+    response = client.post(
+        '/api/admin/clients/bulk-update',
+        json={
+            'dry_run': True,
+            'rows': [
+                {
+                    'client_id': client_id,
+                    'plan_name': target_plan_name,
+                    'router_name': router_name,
+                    'connection_type': 'pppoe',
+                    'create_portal_access': True,
+                    'portal_email': 'cliente.dry.update@test.local',
+                },
+                {
+                    'client_id': client_id,
+                    'plan_id': plan_id,
+                },
+                {
+                    'client_id': 999999,
+                    'plan_id': plan_id,
+                },
+            ],
+        },
+        headers={'Authorization': f'Bearer {token}'},
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['dry_run'] is True
+    assert payload['success_count'] == 1
+    assert payload['failed_count'] == 2
+
+    with app.app_context():
+        unchanged = db.session.get(Client, client_id)
+        assert unchanged is not None
+        assert unchanged.connection_type == 'dhcp'
+        assert unchanged.user_id is None
+
+
+def test_admin_bulk_update_clients_apply_partial_success(client, app):
+    admin_id, plan_id = _admin_and_plan(app, email_prefix='admin-clients-update-apply')
+    token = _token_for_user(app, admin_id)
+
+    with app.app_context():
+        plan_target = Plan(name='Plan Update Apply Target', download_speed=220, upload_speed=60, price=65.0)
+        client_no_portal = Client(
+            full_name='Cliente Update Apply',
+            connection_type='dhcp',
+            plan_id=plan_id,
+            ip_address='10.0.30.5',
+        )
+
+        existing_user = User(email='cliente.update.reset@test.local', role='client', name='Cliente Reset')
+        existing_user.set_password('old-reset-pass')
+        db.session.add(existing_user)
+        db.session.flush()
+
+        client_with_portal = Client(
+            full_name='Cliente Update Reset',
+            connection_type='dhcp',
+            plan_id=plan_id,
+            user_id=existing_user.id,
+        )
+        db.session.add_all([plan_target, client_no_portal, client_with_portal])
+        db.session.commit()
+        no_portal_id = client_no_portal.id
+        with_portal_id = client_with_portal.id
+        target_plan_id = plan_target.id
+
+    response = client.post(
+        '/api/admin/clients/bulk-update',
+        json={
+            'dry_run': False,
+            'rows': [
+                {
+                    'client_id': no_portal_id,
+                    'plan_id': target_plan_id,
+                    'create_portal_access': True,
+                    'portal_email': 'cliente.update.apply@test.local',
+                    'portal_password': 'ApplyPass#123',
+                },
+                {
+                    'client_id': with_portal_id,
+                    'reset_portal_password': True,
+                    'portal_password': 'ResetPass#999',
+                },
+                {
+                    'client_id': 123456789,
+                    'plan_id': target_plan_id,
+                },
+            ],
+        },
+        headers={'Authorization': f'Bearer {token}'},
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['dry_run'] is False
+    assert payload['success_count'] == 2
+    assert payload['failed_count'] == 1
+
+    with app.app_context():
+        updated_client = db.session.get(Client, no_portal_id)
+        assert updated_client is not None
+        assert updated_client.plan_id == target_plan_id
+        assert updated_client.user is not None
+        assert updated_client.user.email == 'cliente.update.apply@test.local'
+        assert updated_client.user.check_password('ApplyPass#123') is True
+
+        reset_client = db.session.get(Client, with_portal_id)
+        assert reset_client is not None
+        assert reset_client.user is not None
+        assert reset_client.user.check_password('ResetPass#999') is True

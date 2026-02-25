@@ -3763,6 +3763,211 @@ def _create_client_from_payload(payload: dict, tenant_id) -> tuple[Client, User 
     return client, user, generated_password
 
 
+def _resolve_bulk_update_client(raw_row, tenant_id) -> tuple[Client | None, str | None]:
+    client_id = _parse_int(raw_row.get('client_id'))
+    client = db.session.get(Client, client_id) if client_id else None
+    if client is None:
+        lookup_email = str(raw_row.get('client_email') or raw_row.get('email_lookup') or '').strip().lower()
+        if lookup_email:
+            user = User.query.filter_by(email=lookup_email).first()
+            client = user.client if user and user.client else None
+    if client is None:
+        return None, "cliente no encontrado (use client_id o client_email)"
+    if tenant_id is not None and client.tenant_id not in (None, tenant_id):
+        return None, "Cliente fuera del tenant"
+    return client, None
+
+
+def _normalize_bulk_update_row(raw_row, tenant_id, seen_target_emails: set[str]) -> tuple[dict | None, str | None]:
+    if not isinstance(raw_row, dict):
+        return None, "Fila invalida (debe ser objeto)"
+
+    client, client_error = _resolve_bulk_update_client(raw_row, tenant_id)
+    if client_error:
+        return None, client_error
+    if client is None:
+        return None, "cliente no encontrado"
+
+    plan = None
+    plan_input_present = bool(raw_row.get('plan_id') or str(raw_row.get('plan_name') or raw_row.get('plan') or '').strip())
+    if plan_input_present:
+        plan, plan_error = _resolve_plan_reference(
+            raw_row.get('plan_id'),
+            raw_row.get('plan_name') or raw_row.get('plan'),
+            tenant_id,
+        )
+        if plan_error:
+            return None, plan_error
+
+    router = None
+    router_input_present = bool(raw_row.get('router_id') or str(raw_row.get('router_name') or '').strip())
+    if router_input_present:
+        router, router_error = _resolve_router_reference(
+            raw_row.get('router_id'),
+            raw_row.get('router_name'),
+            tenant_id,
+        )
+        if router_error:
+            return None, router_error
+
+    connection_type = None
+    if 'connection_type' in raw_row:
+        connection_type = str(raw_row.get('connection_type') or '').strip().lower()
+        if connection_type and connection_type not in {'pppoe', 'dhcp', 'static'}:
+            return None, "connection_type invalido"
+        if not connection_type:
+            connection_type = None
+
+    ip_address_present = 'ip_address' in raw_row
+    ip_address = str(raw_row.get('ip_address') or '').strip() if ip_address_present else None
+    ip_address = ip_address or None
+
+    portal_email = str(raw_row.get('portal_email') or raw_row.get('email') or '').strip().lower()
+    portal_password = str(raw_row.get('portal_password') or raw_row.get('password') or '').strip()
+    parsed_create_portal = _parse_bool(raw_row.get('create_portal_access'))
+    reset_portal_password = _parse_bool(raw_row.get('reset_portal_password'))
+    if reset_portal_password is None:
+        reset_portal_password = bool(portal_password)
+
+    create_portal_access = parsed_create_portal if parsed_create_portal is not None else bool(portal_email or portal_password)
+    existing_user = client.user
+    portal_mode = None
+    if existing_user is None and create_portal_access:
+        if not portal_email:
+            return None, "portal_email es requerido para crear acceso portal"
+        existing_email_user = User.query.filter_by(email=portal_email).first()
+        if existing_email_user:
+            return None, "portal_email ya existe"
+        if portal_email in seen_target_emails:
+            return None, "portal_email duplicado en el lote"
+        seen_target_emails.add(portal_email)
+        portal_mode = 'create'
+    elif existing_user is not None:
+        if portal_email and portal_email != existing_user.email:
+            duplicate = User.query.filter(User.email == portal_email, User.id != existing_user.id).first()
+            if duplicate:
+                return None, "portal_email ya existe"
+            if portal_email in seen_target_emails:
+                return None, "portal_email duplicado en el lote"
+            seen_target_emails.add(portal_email)
+            portal_mode = 'update_email'
+        if reset_portal_password:
+            portal_mode = portal_mode or 'reset_password'
+    elif existing_user is None and (portal_email or portal_password or reset_portal_password):
+        return None, "cliente sin acceso portal; use create_portal_access=true"
+
+    changes: list[str] = []
+    if plan is not None and plan.id != client.plan_id:
+        changes.append("plan")
+    if router_input_present and (router.id if router else None) != client.router_id:
+        changes.append("router")
+    if connection_type is not None and connection_type != str(client.connection_type or '').strip().lower():
+        changes.append("connection_type")
+    if ip_address_present and ip_address != client.ip_address:
+        changes.append("ip_address")
+    if portal_mode == 'create':
+        changes.append("portal_access")
+    if portal_mode == 'update_email':
+        changes.append("portal_email")
+    if reset_portal_password:
+        changes.append("portal_password")
+
+    if not changes:
+        return None, "fila sin cambios"
+
+    return (
+        {
+            "client": client,
+            "plan": plan,
+            "router": router,
+            "router_input_present": router_input_present,
+            "connection_type": connection_type,
+            "ip_address_present": ip_address_present,
+            "ip_address": ip_address,
+            "portal_mode": portal_mode,
+            "portal_email": portal_email,
+            "portal_password": portal_password,
+            "reset_portal_password": bool(reset_portal_password),
+            "changes": changes,
+        },
+        None,
+    )
+
+
+def _apply_bulk_update_payload(payload: dict, tenant_id) -> dict:
+    client: Client = payload["client"]
+    changed_fields: list[str] = []
+
+    plan = payload.get("plan")
+    if plan is not None and plan.id != client.plan_id:
+        client.plan_id = plan.id
+        changed_fields.append("plan")
+
+    if payload.get("router_input_present"):
+        target_router = payload.get("router")
+        target_router_id = target_router.id if target_router else None
+        if target_router_id != client.router_id:
+            client.router_id = target_router_id
+            changed_fields.append("router")
+
+    connection_type = payload.get("connection_type")
+    if connection_type is not None and connection_type != str(client.connection_type or '').strip().lower():
+        client.connection_type = connection_type
+        changed_fields.append("connection_type")
+
+    if payload.get("ip_address_present"):
+        target_ip = payload.get("ip_address")
+        if target_ip != client.ip_address:
+            client.ip_address = target_ip
+            changed_fields.append("ip_address")
+
+    generated_password = None
+    user = client.user
+    portal_mode = payload.get("portal_mode")
+    if portal_mode == 'create':
+        generated_password = payload.get("portal_password") or secrets.token_urlsafe(12)
+        user = User(
+            name=client.full_name or 'Cliente',
+            email=payload.get("portal_email"),
+            role='client',
+            tenant_id=tenant_id if tenant_id is not None else client.tenant_id,
+        )
+        user.set_password(generated_password)
+        client.user = user
+        db.session.add(user)
+        changed_fields.append("portal_access")
+    elif user is not None:
+        portal_email = str(payload.get("portal_email") or '').strip().lower()
+        if portal_email and portal_email != user.email:
+            user.email = portal_email
+            changed_fields.append("portal_email")
+        user.name = user.name or client.full_name or 'Cliente'
+        user.role = 'client'
+        if tenant_id is not None:
+            user.tenant_id = tenant_id
+        elif client.tenant_id is not None:
+            user.tenant_id = client.tenant_id
+
+    if user is not None and payload.get("reset_portal_password"):
+        generated_password = payload.get("portal_password") or secrets.token_urlsafe(12)
+        user.set_password(generated_password)
+        changed_fields.append("portal_password")
+
+    db.session.add(client)
+    db.session.commit()
+    response = {
+        "client_id": client.id,
+        "name": client.full_name,
+        "changes": changed_fields,
+    }
+    if user is not None:
+        response["user_id"] = user.id
+        response["email"] = user.email
+    if generated_password:
+        response["password"] = generated_password
+    return response
+
+
 @main_bp.route('/admin/clients/bulk-create', methods=['POST'])
 @admin_required()
 def admin_bulk_create_clients():
@@ -3829,6 +4034,84 @@ def admin_bulk_create_clients():
     failed_count = len(results) - success_count
     _audit(
         "clients_bulk_create",
+        entity_type="client",
+        metadata={
+            "dry_run": dry_run,
+            "requested": len(rows),
+            "success": success_count,
+            "failed": failed_count,
+        },
+    )
+
+    return jsonify(
+        {
+            "success": True,
+            "dry_run": dry_run,
+            "requested": len(rows),
+            "success_count": success_count,
+            "failed_count": failed_count,
+            "results": results,
+        }
+    ), 200
+
+
+@main_bp.route('/admin/clients/bulk-update', methods=['POST'])
+@admin_required()
+def admin_bulk_update_clients():
+    data = request.get_json() or {}
+    rows = data.get('rows')
+    if not isinstance(rows, list) or not rows:
+        return jsonify({"error": "rows es requerido y debe ser una lista"}), 400
+    if len(rows) > 500:
+        return jsonify({"error": "maximo 500 filas por lote"}), 400
+
+    parsed_dry_run = _parse_bool(data.get('dry_run'))
+    dry_run = True if parsed_dry_run is None else parsed_dry_run
+    tenant_id = current_tenant_id()
+
+    results: list[dict] = []
+    normalized_rows: list[tuple[int, dict]] = []
+    seen_target_emails: set[str] = set()
+
+    for index, row in enumerate(rows, start=1):
+        payload, error = _normalize_bulk_update_row(row, tenant_id, seen_target_emails)
+        if error:
+            results.append({"row": index, "success": False, "error": error})
+            continue
+        assert payload is not None
+        normalized_rows.append((index, payload))
+        if dry_run:
+            client_row: Client = payload["client"]
+            preview = {
+                "client_id": client_row.id,
+                "name": client_row.full_name,
+                "changes": payload.get("changes") or [],
+            }
+            if payload.get("plan") is not None:
+                preview["plan_id"] = payload["plan"].id
+                preview["plan_name"] = payload["plan"].name
+            if payload.get("router_input_present"):
+                preview["router_id"] = payload["router"].id if payload.get("router") else None
+            if payload.get("portal_mode") == 'create':
+                preview["portal_email"] = payload.get("portal_email")
+            if payload.get("reset_portal_password"):
+                preview["password"] = payload.get("portal_password") or "[auto]"
+            results.append({"row": index, "success": True, "preview": preview})
+
+    if not dry_run:
+        for index, payload in normalized_rows:
+            try:
+                updated = _apply_bulk_update_payload(payload, tenant_id)
+                results.append({"row": index, "success": True, **updated})
+            except Exception as exc:
+                db.session.rollback()
+                current_app.logger.error("Error en actualizacion masiva de cliente fila %s: %s", index, exc, exc_info=True)
+                results.append({"row": index, "success": False, "error": "No se pudo actualizar el cliente"})
+
+    success_count = len([item for item in results if item.get("success") is True])
+    failed_count = len(results) - success_count
+    _audit(
+        "clients_bulk_update",
         entity_type="client",
         metadata={
             "dry_run": dry_run,

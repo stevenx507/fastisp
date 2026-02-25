@@ -13,11 +13,16 @@ interface ClientRow {
 }
 
 interface ImportPreview {
+  client_id?: number
   name?: string
   email?: string | null
+  plan_id?: number
   plan_name?: string
+  router_id?: number | null
   connection_type?: string
   portal_access?: boolean
+  changes?: string[]
+  password?: string
 }
 
 interface ImportResultRow {
@@ -138,6 +143,13 @@ const SearchClients: React.FC = () => {
   const [importFeedback, setImportFeedback] = useState("")
   const [importResults, setImportResults] = useState<ImportResultRow[]>([])
   const [importSummary, setImportSummary] = useState<ImportSummary | null>(null)
+
+  const [updateRows, setUpdateRows] = useState<Record<string, unknown>[]>([])
+  const [updateFileName, setUpdateFileName] = useState("")
+  const [updateLoading, setUpdateLoading] = useState(false)
+  const [updateFeedback, setUpdateFeedback] = useState("")
+  const [updateResults, setUpdateResults] = useState<ImportResultRow[]>([])
+  const [updateSummary, setUpdateSummary] = useState<ImportSummary | null>(null)
 
   const loadRows = async () => {
     setLoading(true)
@@ -323,6 +335,87 @@ const SearchClients: React.FC = () => {
     }
   }
 
+  const downloadUpdateCsvTemplate = () => {
+    const template = [
+      "client_id,client_email,plan_id,plan_name,router_id,router_name,connection_type,ip_address,create_portal_access,portal_email,portal_password,reset_portal_password",
+      "1,,2,,,,pppoe,10.0.0.20,true,cliente.actualizado@isp.local,,false",
+    ].join("\n")
+    const blob = new Blob([template], { type: "text/csv;charset=utf-8" })
+    const url = window.URL.createObjectURL(blob)
+    const link = document.createElement("a")
+    link.href = url
+    link.download = "clientes-update-template.csv"
+    link.click()
+    window.URL.revokeObjectURL(url)
+  }
+
+  const onUpdateFileSelected = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    setUpdateFileName(file.name)
+    setUpdateResults([])
+    setUpdateSummary(null)
+    setUpdateFeedback("")
+
+    try {
+      const raw = await file.text()
+      const parsed = parseCsvObjects(raw)
+      setUpdateRows(parsed)
+      if (parsed.length === 0) {
+        setUpdateFeedback("El archivo no tiene filas validas para actualizar.")
+      } else {
+        setUpdateFeedback(`Archivo cargado: ${parsed.length} filas listas para actualizar.`)
+      }
+    } catch {
+      setUpdateRows([])
+      setUpdateFeedback("No se pudo leer el archivo CSV de actualizacion.")
+    }
+  }
+
+  const runClientBulkUpdate = async (dryRun: boolean) => {
+    if (updateRows.length === 0) {
+      setUpdateFeedback("Carga un archivo CSV con filas validas.")
+      return
+    }
+
+    setUpdateLoading(true)
+    setUpdateFeedback("")
+    try {
+      const response = (await apiClient.post("/admin/clients/bulk-update", {
+        dry_run: dryRun,
+        rows: updateRows,
+      })) as {
+        dry_run?: boolean
+        requested?: number
+        success_count?: number
+        failed_count?: number
+        results?: ImportResultRow[]
+      }
+
+      const summary: ImportSummary = {
+        dryRun: Boolean(response.dry_run),
+        requested: Number(response.requested || 0),
+        successCount: Number(response.success_count || 0),
+        failedCount: Number(response.failed_count || 0),
+      }
+      setUpdateSummary(summary)
+      setUpdateResults((response.results || []) as ImportResultRow[])
+      setUpdateFeedback(
+        `${summary.dryRun ? "Validacion" : "Actualizacion"} completada: ${summary.successCount} OK, ${summary.failedCount} con error.`
+      )
+
+      if (!summary.dryRun && summary.successCount > 0) {
+        await loadRows()
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "No se pudo ejecutar la actualizacion."
+      setUpdateFeedback(message)
+    } finally {
+      setUpdateLoading(false)
+    }
+  }
+
   return (
     <div className="space-y-4 bg-white rounded-xl border border-gray-200 shadow-sm p-6">
       <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
@@ -399,6 +492,91 @@ const SearchClients: React.FC = () => {
                       {item.error ||
                         item.name ||
                         item.preview?.name ||
+                        (item.client_id ? `Cliente ID ${item.client_id}` : "Sin detalle")}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-sm font-semibold text-gray-900">Actualizacion masiva por CSV</h3>
+          <button
+            type="button"
+            onClick={downloadUpdateCsvTemplate}
+            className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-xs font-semibold text-gray-700"
+          >
+            Descargar template update
+          </button>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <input type="file" accept=".csv,text/csv" onChange={onUpdateFileSelected} className="text-sm" />
+          {updateFileName && <span className="text-xs text-gray-600">Archivo: {updateFileName}</span>}
+          {updateRows.length > 0 && <span className="text-xs text-gray-600">Filas: {updateRows.length}</span>}
+        </div>
+        <p className="mt-2 text-xs text-gray-500">
+          Columnas soportadas: client_id o client_email, plan_id o plan_name, router_id o router_name, connection_type,
+          ip_address, create_portal_access, portal_email, portal_password, reset_portal_password.
+        </p>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => runClientBulkUpdate(true)}
+            disabled={updateLoading || updateRows.length === 0}
+            className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-semibold text-amber-700 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            Validar update (dry run)
+          </button>
+          <button
+            type="button"
+            onClick={() => runClientBulkUpdate(false)}
+            disabled={updateLoading || updateRows.length === 0}
+            className="rounded-lg bg-amber-600 px-3 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            Ejecutar update
+          </button>
+          {updateFeedback && <span className="text-sm text-slate-600">{updateFeedback}</span>}
+        </div>
+
+        {updateSummary && (
+          <div className="mt-3 rounded-lg border border-gray-200 bg-white p-3 text-sm text-gray-700">
+            <p>
+              Modo: <span className="font-semibold">{updateSummary.dryRun ? "Validacion" : "Actualizacion"}</span> | Solicitadas:
+              <span className="font-semibold"> {updateSummary.requested}</span> | OK:
+              <span className="font-semibold text-emerald-700"> {updateSummary.successCount}</span> | Error:
+              <span className="font-semibold text-rose-700"> {updateSummary.failedCount}</span>
+            </p>
+          </div>
+        )}
+
+        {updateResults.length > 0 && (
+          <div className="mt-3 max-h-56 overflow-auto rounded-lg border border-gray-200 bg-white">
+            <table className="w-full text-xs">
+              <thead className="bg-gray-50 text-gray-600">
+                <tr>
+                  <th className="px-2 py-2 text-left">Fila</th>
+                  <th className="px-2 py-2 text-left">Estado</th>
+                  <th className="px-2 py-2 text-left">Detalle</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {updateResults.map((item) => (
+                  <tr key={`update-${item.row}-${item.name || item.client_id || "row"}`}>
+                    <td className="px-2 py-2">{item.row}</td>
+                    <td className="px-2 py-2">
+                      <span className={item.success ? "text-emerald-700" : "text-rose-700"}>
+                        {item.success ? "OK" : "Error"}
+                      </span>
+                    </td>
+                    <td className="px-2 py-2 text-gray-700">
+                      {item.error ||
+                        item.name ||
+                        item.preview?.name ||
+                        (item.preview?.changes?.length ? item.preview.changes.join(", ") : "") ||
                         (item.client_id ? `Cliente ID ${item.client_id}` : "Sin detalle")}
                     </td>
                   </tr>
