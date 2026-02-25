@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { motion } from 'framer-motion'
+import { createPortal } from 'react-dom'
 import {
   CreditCardIcon,
   GlobeAltIcon,
@@ -80,6 +81,11 @@ const ClientsManagement: React.FC = () => {
     email: string
     password: string
   } | null>(null)
+
+  const renderModal = (content: React.ReactNode) => {
+    if (typeof document === 'undefined') return null
+    return createPortal(content, document.body)
+  }
 
   const load = async () => {
     setLoading(true)
@@ -479,9 +485,16 @@ const ClientsManagement: React.FC = () => {
         </div>
       </div>
 
-      {showModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
-          <div className="w-full max-w-4xl rounded-2xl bg-white shadow-2xl">
+      {showModal &&
+        renderModal(
+          <div
+            className="fixed inset-0 z-[120] flex items-start justify-center overflow-y-auto bg-black/60 p-3 backdrop-blur-sm sm:p-6"
+            onClick={() => setShowModal(false)}
+          >
+            <div
+              className="my-2 flex max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl"
+              onClick={(event) => event.stopPropagation()}
+            >
             <div className="flex items-center justify-between border-b px-6 py-4">
               <div>
                 <p className="text-xs font-semibold uppercase text-blue-600">Nuevo cliente</p>
@@ -492,7 +505,7 @@ const ClientsManagement: React.FC = () => {
               </button>
             </div>
 
-            <div className="grid grid-cols-1 gap-6 px-6 py-6 md:grid-cols-2">
+            <div className="grid flex-1 grid-cols-1 gap-6 overflow-y-auto px-6 py-6 md:grid-cols-2">
               <div className="space-y-3">
                 <label className="block text-sm font-semibold text-gray-800">Nombre completo</label>
                 <input
@@ -638,12 +651,19 @@ const ClientsManagement: React.FC = () => {
               </button>
             </div>
           </div>
-        </div>
-      )}
+        </div>,
+        )}
 
-      {portalModalClient && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
-          <div className="w-full max-w-lg rounded-2xl bg-white shadow-2xl">
+      {portalModalClient &&
+        renderModal(
+          <div
+            className="fixed inset-0 z-[120] flex items-start justify-center overflow-y-auto bg-black/60 p-3 backdrop-blur-sm sm:p-6"
+            onClick={() => setPortalModalClient(null)}
+          >
+            <div
+              className="my-6 w-full max-w-lg overflow-hidden rounded-2xl bg-white shadow-2xl"
+              onClick={(event) => event.stopPropagation()}
+            >
             <div className="flex items-center justify-between border-b px-6 py-4">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">Portal cliente</p>
@@ -661,7 +681,7 @@ const ClientsManagement: React.FC = () => {
               </button>
             </div>
 
-            <div className="space-y-4 px-6 py-5">
+            <div className="max-h-[70vh] space-y-4 overflow-y-auto px-6 py-5">
               <div>
                 <label className="mb-1 block text-sm font-semibold text-gray-800">Email portal</label>
                 <input
@@ -704,11 +724,10 @@ const ClientsManagement: React.FC = () => {
               </button>
             </div>
           </div>
-        </div>
-      )}
+        </div>,
+        )}
     </motion.div>
   )
 }
 
 export default ClientsManagement
-
