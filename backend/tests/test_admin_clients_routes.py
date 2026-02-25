@@ -98,3 +98,80 @@ def test_admin_create_client_requires_email_when_portal_access_enabled(client, a
 
     assert response.status_code == 400
     assert 'email' in response.get_json()['error']
+
+
+def test_admin_create_portal_access_for_existing_client(client, app):
+    admin_id, plan_id = _admin_and_plan(app, email_prefix='admin-portal-existing-client')
+    token = _token_for_user(app, admin_id)
+
+    with app.app_context():
+        existing = Client(
+            full_name='Cliente Sin Portal',
+            connection_type='dhcp',
+            plan_id=plan_id,
+        )
+        db.session.add(existing)
+        db.session.commit()
+        client_id = existing.id
+
+    response = client.post(
+        f'/api/admin/clients/{client_id}/portal-access',
+        json={'email': 'sin.portal@test.local'},
+        headers={'Authorization': f'Bearer {token}'},
+    )
+
+    assert response.status_code == 201
+    payload = response.get_json()
+    assert payload['success'] is True
+    assert payload['created'] is True
+    assert payload['user']['email'] == 'sin.portal@test.local'
+    assert payload.get('password')
+
+    with app.app_context():
+        created_client = db.session.get(Client, client_id)
+        assert created_client is not None
+        assert created_client.user_id is not None
+        created_user = db.session.get(User, created_client.user_id)
+        assert created_user is not None
+        assert created_user.email == 'sin.portal@test.local'
+        assert created_user.role == 'client'
+
+
+def test_admin_reset_portal_access_for_existing_user(client, app):
+    admin_id, plan_id = _admin_and_plan(app, email_prefix='admin-portal-reset')
+    token = _token_for_user(app, admin_id)
+
+    with app.app_context():
+        linked_user = User(email='cliente.existente@test.local', role='client', name='Cliente Existente')
+        linked_user.set_password('old-password')
+        db.session.add(linked_user)
+        db.session.flush()
+
+        existing = Client(
+            full_name='Cliente Existente',
+            connection_type='dhcp',
+            plan_id=plan_id,
+            user_id=linked_user.id,
+        )
+        db.session.add(existing)
+        db.session.commit()
+        client_id = existing.id
+        user_id = linked_user.id
+
+    response = client.post(
+        f'/api/admin/clients/{client_id}/portal-access',
+        json={'password': 'new-password-123'},
+        headers={'Authorization': f'Bearer {token}'},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['success'] is True
+    assert payload['created'] is False
+    assert payload['user']['email'] == 'cliente.existente@test.local'
+    assert payload['password'] == 'new-password-123'
+
+    with app.app_context():
+        updated_user = db.session.get(User, user_id)
+        assert updated_user is not None
+        assert updated_user.check_password('new-password-123') is True

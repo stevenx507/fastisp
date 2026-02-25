@@ -181,16 +181,16 @@ const LoginForm: React.FC = () => {
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
       <div>
-        <label className="mb-2 block text-sm font-medium text-gray-200">Correo electronico</label>
+        <label className="mb-2 block text-sm font-medium text-slate-700">Correo electronico</label>
         <div className="relative">
           <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3">
-            <EnvelopeIcon className="h-5 w-5 text-gray-500" />
+            <EnvelopeIcon className="h-5 w-5 text-slate-400" />
           </div>
           <input
             type="email"
             value={email}
             onChange={(event) => setEmail(event.target.value)}
-            className="block w-full rounded-xl border border-white/10 bg-white/5 py-3 pl-10 pr-3 text-white placeholder:text-white/50 transition-colors focus:border-emerald-400 focus:ring-2 focus:ring-emerald-400"
+            className="block w-full rounded-xl border border-slate-300 bg-white py-3 pl-10 pr-3 text-slate-900 placeholder:text-slate-400 transition-colors focus:border-emerald-500 focus:ring-2 focus:ring-emerald-200"
             placeholder="usuario@ejemplo.com"
             required
           />
@@ -198,21 +198,21 @@ const LoginForm: React.FC = () => {
       </div>
 
       <div>
-        <label className="mb-2 block text-sm font-medium text-gray-200">Password</label>
+        <label className="mb-2 block text-sm font-medium text-slate-700">Password</label>
         <div className="relative">
           <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3">
-            <LockClosedIcon className="h-5 w-5 text-gray-500" />
+            <LockClosedIcon className="h-5 w-5 text-slate-400" />
           </div>
           <input
             type={showPassword ? 'text' : 'password'}
             value={password}
             onChange={(event) => setPassword(event.target.value)}
-            className="block w-full rounded-xl border border-white/10 bg-white/5 py-3 pl-10 pr-12 text-white placeholder:text-white/50 transition-colors focus:border-emerald-400 focus:ring-2 focus:ring-emerald-400"
+            className="block w-full rounded-xl border border-slate-300 bg-white py-3 pl-10 pr-12 text-slate-900 placeholder:text-slate-400 transition-colors focus:border-emerald-500 focus:ring-2 focus:ring-emerald-200"
             placeholder="********"
             required
           />
           <button type="button" onClick={() => setShowPassword((current) => !current)} className="absolute inset-y-0 right-0 flex items-center pr-3">
-            {showPassword ? <EyeSlashIcon className="h-5 w-5 text-gray-400 hover:text-white" /> : <EyeIcon className="h-5 w-5 text-gray-400 hover:text-white" />}
+            {showPassword ? <EyeSlashIcon className="h-5 w-5 text-slate-500 hover:text-slate-800" /> : <EyeIcon className="h-5 w-5 text-slate-500 hover:text-slate-800" />}
           </button>
         </div>
       </div>
@@ -225,9 +225,9 @@ const LoginForm: React.FC = () => {
             type="checkbox"
             checked={rememberMe}
             onChange={handleRememberMeChange}
-            className="h-4 w-4 rounded border-white/20 bg-white/10 text-emerald-400 focus:ring-emerald-400"
+            className="h-4 w-4 rounded border-slate-300 bg-white text-emerald-500 focus:ring-emerald-300"
           />
-          <label htmlFor="remember-me" className="ml-2 block text-sm text-white">
+          <label htmlFor="remember-me" className="ml-2 block text-sm text-slate-700">
             Recordarme
           </label>
         </div>
@@ -237,27 +237,27 @@ const LoginForm: React.FC = () => {
             setRecoveryEmail((prev) => prev || email)
             setShowRecovery((prev) => !prev)
           }}
-          className="text-sm font-medium text-emerald-300 hover:text-white"
+          className="text-sm font-medium text-emerald-700 hover:text-emerald-900"
         >
           Olvide mi password
         </button>
       </div>
 
       {showRecovery && (
-        <div className="space-y-3 rounded-xl border border-white/15 bg-white/5 p-4">
-          <p className="text-sm font-semibold text-white">Recuperar password</p>
+        <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
+          <p className="text-sm font-semibold text-slate-800">Recuperar password</p>
           <input
             type="email"
             value={recoveryEmail}
             onChange={(event) => setRecoveryEmail(event.target.value)}
-            className="block w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white placeholder:text-white/50 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-400"
+            className="block w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-200"
             placeholder="correo@ejemplo.com"
           />
           <button
             type="button"
             onClick={() => void handleRequestPasswordReset()}
             disabled={isRecovering}
-            className="w-full rounded-xl border border-white/20 bg-white/10 px-3 py-2 text-sm font-semibold text-white hover:bg-white/20 disabled:opacity-60"
+            className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-100 disabled:opacity-60"
           >
             {isRecovering ? 'Enviando...' : 'Solicitar token de recuperacion'}
           </button>
@@ -265,14 +265,14 @@ const LoginForm: React.FC = () => {
           <input
             value={recoveryToken}
             onChange={(event) => setRecoveryToken(event.target.value)}
-            className="block w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white placeholder:text-white/50 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-400"
+            className="block w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-200"
             placeholder="Token de recuperacion"
           />
           <input
             type="password"
             value={recoveryPassword}
             onChange={(event) => setRecoveryPassword(event.target.value)}
-            className="block w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white placeholder:text-white/50 focus:border-emerald-400 focus:ring-2 focus:ring-emerald-400"
+            className="block w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-200"
             placeholder="Nueva password"
           />
           <button
@@ -289,7 +289,7 @@ const LoginForm: React.FC = () => {
       <button
         type="submit"
         disabled={isLoading}
-        className="flex w-full justify-center rounded-xl border border-transparent bg-gradient-to-r from-emerald-500 via-teal-500 to-blue-600 px-4 py-3 text-sm font-semibold text-white shadow-lg transition-all hover:brightness-110 focus:outline-none focus:ring-2 focus:ring-emerald-300 focus:ring-offset-2 focus:ring-offset-gray-900 disabled:cursor-not-allowed disabled:opacity-50"
+        className="flex w-full justify-center rounded-xl border border-transparent bg-gradient-to-r from-emerald-500 via-teal-500 to-blue-600 px-4 py-3 text-sm font-semibold text-white shadow-lg transition-all hover:brightness-110 focus:outline-none focus:ring-2 focus:ring-emerald-300 focus:ring-offset-2 focus:ring-offset-white disabled:cursor-not-allowed disabled:opacity-50"
       >
         {isLoading ? (
           <div className="flex items-center">
@@ -306,7 +306,7 @@ const LoginForm: React.FC = () => {
           type="button"
           onClick={() => window.google?.accounts?.id?.prompt()}
           disabled={!isGoogleReady}
-          className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl border border-white/20 bg-white/10 px-4 py-3 text-sm font-medium text-white shadow-md transition-all hover:bg-white/20 focus:outline-none focus:ring-2 focus:ring-emerald-300 focus:ring-offset-2 focus:ring-offset-gray-900 disabled:cursor-not-allowed disabled:opacity-50"
+          className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm font-medium text-slate-700 shadow-sm transition-all hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-emerald-300 focus:ring-offset-2 focus:ring-offset-white disabled:cursor-not-allowed disabled:opacity-50"
         >
           <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" className="h-5 w-5" />
           {isGoogleReady ? 'Continuar con Google' : 'Cargando Google...'}
@@ -346,11 +346,11 @@ const Login: React.FC = () => {
           transition={{ duration: 0.5 }}
           className="flex items-center justify-center px-6 py-12 lg:col-span-2 lg:px-10"
         >
-          <div className="w-full max-w-md rounded-2xl border border-white/10 bg-white/5 p-8 shadow-2xl backdrop-blur-xl">
+          <div className="w-full max-w-md rounded-2xl border border-white/40 bg-white/95 p-8 text-slate-900 shadow-2xl backdrop-blur-xl">
             <div className="mb-6 flex items-center justify-between">
               <div>
-                <p className="text-sm text-white/60">Acceso seguro</p>
-                <h2 className="text-2xl font-bold">Iniciar sesion</h2>
+                <p className="text-sm text-slate-500">Acceso seguro</p>
+                <h2 className="text-2xl font-bold text-slate-900">Iniciar sesion</h2>
               </div>
               <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-emerald-400 to-cyan-500 font-bold text-white">
                 ISP
@@ -359,12 +359,12 @@ const Login: React.FC = () => {
 
             <LoginForm />
 
-            <div className="mt-8 text-center text-sm text-white/70">
+            <div className="mt-8 text-center text-sm text-slate-600">
               No tienes una cuenta?
               <button
                 type="button"
                 onClick={() => toast.success('Contacta a soporte para crear una cuenta')}
-                className="ml-1 font-semibold text-emerald-300 hover:text-white"
+                className="ml-1 font-semibold text-emerald-700 hover:text-emerald-900"
               >
                 Contacta a tu proveedor
               </button>
@@ -373,7 +373,7 @@ const Login: React.FC = () => {
               <button
                 type="button"
                 onClick={() => navigate('/platform/bootstrap')}
-                className="text-xs font-semibold uppercase tracking-[0.14em] text-cyan-200 hover:text-white"
+                className="text-xs font-semibold uppercase tracking-[0.14em] text-cyan-700 hover:text-cyan-900"
               >
                 Bootstrap admin total
               </button>

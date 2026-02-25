@@ -3214,6 +3214,66 @@ def admin_create_client():
     return jsonify(payload), 201
 
 
+@main_bp.route('/admin/clients/<int:client_id>/portal-access', methods=['POST'])
+@admin_required()
+def admin_manage_client_portal_access(client_id):
+    client = db.session.get(Client, client_id)
+    if not client:
+        return jsonify({"error": "Cliente no encontrado"}), 404
+
+    tenant_id = current_tenant_id()
+    if tenant_id is not None and client.tenant_id not in (None, tenant_id):
+        return jsonify({"error": "Cliente fuera del tenant"}), 403
+
+    data = request.get_json() or {}
+    email = str(data.get('email') or '').strip().lower()
+    requested_password = str(data.get('password') or '').strip()
+
+    user = client.user
+    created = False
+    if user is None:
+        if not email:
+            return jsonify({"error": "email es requerido para crear acceso al portal"}), 400
+        if User.query.filter_by(email=email).first():
+            return jsonify({"error": "email ya existe"}), 409
+        user = User(
+            name=client.full_name or 'Cliente',
+            email=email,
+            role='client',
+            tenant_id=tenant_id if tenant_id is not None else client.tenant_id,
+        )
+        client.user = user
+        db.session.add(user)
+        created = True
+    else:
+        if email and email != user.email:
+            duplicate = User.query.filter(User.email == email, User.id != user.id).first()
+            if duplicate:
+                return jsonify({"error": "email ya existe"}), 409
+            user.email = email
+        user.name = user.name or client.full_name or 'Cliente'
+        user.role = 'client'
+        if tenant_id is not None:
+            user.tenant_id = tenant_id
+        elif client.tenant_id is not None:
+            user.tenant_id = client.tenant_id
+
+    generated_password = requested_password or secrets.token_urlsafe(12)
+    user.set_password(generated_password)
+
+    db.session.add(client)
+    db.session.commit()
+
+    payload = {
+        "success": True,
+        "created": created,
+        "client_id": client.id,
+        "user": user.to_dict(),
+        "password": generated_password,
+    }
+    return jsonify(payload), 201 if created else 200
+
+
 # ==================== RED: SUSPENDER / ACTIVAR / CAMBIAR VELOCIDAD ====================
 
 @main_bp.route('/admin/clients/<int:client_id>/suspend', methods=['POST'])
