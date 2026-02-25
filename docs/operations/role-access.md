@@ -63,3 +63,20 @@ Esta guia describe como entrar a cada panel despues de los bloques implementados
 - `platform_admin` solo usa `/platform` en contexto master/global.
 - Para entrar a `/admin` como `platform_admin`, debes seleccionar tenant con `Entrar panel ISP`.
 - `admin` y `client` operan dentro de su tenant.
+
+## Modulos enterprise nuevos (admin ISP)
+
+- `Auditoria`: `/admin` -> `Auditoria`
+  - Lista eventos con filtros por accion, entidad, actor y fecha.
+- `Permisos`: `/admin` -> `Permisos`
+  - RBAC granular por rol (`allow/deny`) para permisos especificos.
+- `Promesas de Pago`: `/admin` -> `Promesas de Pago`
+  - Registro y seguimiento de compromisos para evitar cortes.
+- `Mantenimientos NOC`: `/admin` -> `Mantenimientos NOC`
+  - Ventanas activas que silencian alertas por alcance (`all/router/billing/network`).
+
+## Persistencia
+
+- Instalaciones, avisos, servicios adicionales, vouchers hotspot, ajustes de sistema y jobs ahora se guardan en BD (no solo cache).
+- Ejecuta migraciones antes de usar en VPS:
+  - `docker compose --env-file .env.prod -f docker-compose.prod.yml exec -T backend python -m flask --app wsgi.py db upgrade`

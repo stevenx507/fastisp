@@ -413,3 +413,344 @@ class PaymentRecord(db.Model):
             "metadata": self.meta,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
+
+
+def _iso_datetime(value):
+    return value.isoformat() if value else None
+
+
+class AdminInstallation(db.Model):
+    __tablename__ = 'admin_installations'
+
+    id = db.Column(db.String(64), primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id'), index=True, nullable=True)
+    client_id = db.Column(db.Integer, db.ForeignKey('clients.id'), index=True, nullable=True)
+    client_name = db.Column(db.String(160), nullable=False)
+    plan = db.Column(db.String(120), nullable=True)
+    router = db.Column(db.String(120), nullable=True)
+    address = db.Column(db.String(255), nullable=False, default='Sin direccion')
+    status = db.Column(db.String(30), nullable=False, default='pending')
+    priority = db.Column(db.String(20), nullable=False, default='normal')
+    technician = db.Column(db.String(160), nullable=False, default='pendiente@ispfast.local')
+    scheduled_for = db.Column(db.DateTime, nullable=True)
+    notes = db.Column(db.Text, nullable=True)
+    checklist = db.Column(db.JSON, nullable=True)
+    completed_at = db.Column(db.DateTime, nullable=True)
+    completed_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    completed_by_name = db.Column(db.String(160), nullable=True)
+    created_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    created_by_name = db.Column(db.String(160), nullable=True)
+    created_by_email = db.Column(db.String(160), nullable=True)
+    updated_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    updated_by_name = db.Column(db.String(160), nullable=True)
+    updated_by_email = db.Column(db.String(160), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "tenant_id": self.tenant_id,
+            "client_id": self.client_id,
+            "client_name": self.client_name,
+            "plan": self.plan,
+            "router": self.router,
+            "address": self.address,
+            "status": self.status,
+            "priority": self.priority,
+            "technician": self.technician,
+            "scheduled_for": _iso_datetime(self.scheduled_for),
+            "notes": self.notes or "",
+            "checklist": self.checklist or {},
+            "completed_at": _iso_datetime(self.completed_at),
+            "completed_by": self.completed_by,
+            "completed_by_name": self.completed_by_name,
+            "created_by": self.created_by,
+            "created_by_name": self.created_by_name,
+            "created_by_email": self.created_by_email,
+            "updated_by": self.updated_by,
+            "updated_by_name": self.updated_by_name,
+            "updated_by_email": self.updated_by_email,
+            "created_at": _iso_datetime(self.created_at),
+            "updated_at": _iso_datetime(self.updated_at),
+        }
+
+
+class AdminScreenAlert(db.Model):
+    __tablename__ = 'admin_screen_alerts'
+
+    id = db.Column(db.String(64), primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id'), index=True, nullable=True)
+    title = db.Column(db.String(160), nullable=False)
+    message = db.Column(db.Text, nullable=False)
+    severity = db.Column(db.String(20), nullable=False, default='info')
+    audience = db.Column(db.String(20), nullable=False, default='all')
+    status = db.Column(db.String(20), nullable=False, default='draft')
+    starts_at = db.Column(db.DateTime, nullable=True)
+    ends_at = db.Column(db.DateTime, nullable=True)
+    impressions = db.Column(db.Integer, nullable=False, default=0)
+    acknowledged = db.Column(db.Integer, nullable=False, default=0)
+    created_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    created_by_name = db.Column(db.String(160), nullable=True)
+    created_by_email = db.Column(db.String(160), nullable=True)
+    updated_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    updated_by_name = db.Column(db.String(160), nullable=True)
+    updated_by_email = db.Column(db.String(160), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "tenant_id": self.tenant_id,
+            "title": self.title,
+            "message": self.message,
+            "severity": self.severity,
+            "audience": self.audience,
+            "status": self.status,
+            "starts_at": _iso_datetime(self.starts_at),
+            "ends_at": _iso_datetime(self.ends_at),
+            "impressions": int(self.impressions or 0),
+            "acknowledged": int(self.acknowledged or 0),
+            "created_by": self.created_by,
+            "created_by_name": self.created_by_name,
+            "created_by_email": self.created_by_email,
+            "updated_by": self.updated_by,
+            "updated_by_name": self.updated_by_name,
+            "updated_by_email": self.updated_by_email,
+            "created_at": _iso_datetime(self.created_at),
+            "updated_at": _iso_datetime(self.updated_at),
+        }
+
+
+class AdminExtraService(db.Model):
+    __tablename__ = 'admin_extra_services'
+
+    id = db.Column(db.String(64), primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id'), index=True, nullable=True)
+    name = db.Column(db.String(160), nullable=False)
+    category = db.Column(db.String(80), nullable=False, default='other')
+    description = db.Column(db.Text, nullable=True)
+    monthly_price = db.Column(db.Numeric(10, 2), nullable=False, default=0)
+    one_time_fee = db.Column(db.Numeric(10, 2), nullable=False, default=0)
+    status = db.Column(db.String(20), nullable=False, default='active')
+    subscribers = db.Column(db.Integer, nullable=False, default=0)
+    created_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    created_by_name = db.Column(db.String(160), nullable=True)
+    created_by_email = db.Column(db.String(160), nullable=True)
+    updated_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    updated_by_name = db.Column(db.String(160), nullable=True)
+    updated_by_email = db.Column(db.String(160), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "tenant_id": self.tenant_id,
+            "name": self.name,
+            "category": self.category,
+            "description": self.description or "",
+            "monthly_price": float(self.monthly_price or 0),
+            "one_time_fee": float(self.one_time_fee or 0),
+            "status": self.status,
+            "subscribers": int(self.subscribers or 0),
+            "created_by": self.created_by,
+            "created_by_name": self.created_by_name,
+            "created_by_email": self.created_by_email,
+            "updated_by": self.updated_by,
+            "updated_by_name": self.updated_by_name,
+            "updated_by_email": self.updated_by_email,
+            "created_at": _iso_datetime(self.created_at),
+            "updated_at": _iso_datetime(self.updated_at),
+        }
+
+
+class AdminHotspotVoucher(db.Model):
+    __tablename__ = 'admin_hotspot_vouchers'
+
+    id = db.Column(db.String(64), primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id'), index=True, nullable=True)
+    code = db.Column(db.String(64), nullable=False, index=True)
+    profile = db.Column(db.String(80), nullable=False, default='basic')
+    duration_minutes = db.Column(db.Integer, nullable=False, default=60)
+    data_limit_mb = db.Column(db.Integer, nullable=False, default=0)
+    price = db.Column(db.Numeric(10, 2), nullable=False, default=0)
+    status = db.Column(db.String(20), nullable=False, default='generated')
+    assigned_to = db.Column(db.String(160), nullable=True)
+    expires_at = db.Column(db.DateTime, nullable=True)
+    used_at = db.Column(db.DateTime, nullable=True)
+    created_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    created_by_name = db.Column(db.String(160), nullable=True)
+    created_by_email = db.Column(db.String(160), nullable=True)
+    updated_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    updated_by_name = db.Column(db.String(160), nullable=True)
+    updated_by_email = db.Column(db.String(160), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        db.UniqueConstraint('tenant_id', 'code', name='uq_hotspot_voucher_tenant_code'),
+    )
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "tenant_id": self.tenant_id,
+            "code": self.code,
+            "profile": self.profile,
+            "duration_minutes": int(self.duration_minutes or 0),
+            "data_limit_mb": int(self.data_limit_mb or 0),
+            "price": float(self.price or 0),
+            "status": self.status,
+            "assigned_to": self.assigned_to,
+            "expires_at": _iso_datetime(self.expires_at),
+            "used_at": _iso_datetime(self.used_at),
+            "created_by": self.created_by,
+            "created_by_name": self.created_by_name,
+            "created_by_email": self.created_by_email,
+            "updated_by": self.updated_by,
+            "updated_by_name": self.updated_by_name,
+            "updated_by_email": self.updated_by_email,
+            "created_at": _iso_datetime(self.created_at),
+            "updated_at": _iso_datetime(self.updated_at),
+        }
+
+
+class AdminSystemSetting(db.Model):
+    __tablename__ = 'admin_system_settings'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id'), index=True, nullable=True)
+    key = db.Column(db.String(120), nullable=False)
+    value = db.Column(db.JSON, nullable=True)
+    updated_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        db.UniqueConstraint('tenant_id', 'key', name='uq_admin_system_settings_tenant_key'),
+    )
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "tenant_id": self.tenant_id,
+            "key": self.key,
+            "value": self.value,
+            "updated_by": self.updated_by,
+            "updated_at": _iso_datetime(self.updated_at),
+        }
+
+
+class AdminSystemJob(db.Model):
+    __tablename__ = 'admin_system_jobs'
+
+    id = db.Column(db.String(64), primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id'), index=True, nullable=True)
+    job = db.Column(db.String(120), nullable=False, index=True)
+    status = db.Column(db.String(40), nullable=False, index=True)
+    requested_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    started_at = db.Column(db.DateTime, nullable=False)
+    finished_at = db.Column(db.DateTime, nullable=True)
+    result = db.Column(db.JSON, nullable=True)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "tenant_id": self.tenant_id,
+            "job": self.job,
+            "status": self.status,
+            "requested_by": self.requested_by,
+            "started_at": _iso_datetime(self.started_at),
+            "finished_at": _iso_datetime(self.finished_at),
+            "result": self.result or {},
+        }
+
+
+class RolePermission(db.Model):
+    __tablename__ = 'role_permissions'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id'), index=True, nullable=True)
+    role = db.Column(db.String(30), nullable=False, index=True)
+    permission = db.Column(db.String(120), nullable=False, index=True)
+    allowed = db.Column(db.Boolean, nullable=False, default=True)
+    updated_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        db.UniqueConstraint('tenant_id', 'role', 'permission', name='uq_role_permissions_tenant_role_perm'),
+    )
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "tenant_id": self.tenant_id,
+            "role": self.role,
+            "permission": self.permission,
+            "allowed": bool(self.allowed),
+            "updated_by": self.updated_by,
+            "updated_at": _iso_datetime(self.updated_at),
+        }
+
+
+class BillingPromise(db.Model):
+    __tablename__ = 'billing_promises'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id'), index=True, nullable=True)
+    subscription_id = db.Column(db.Integer, db.ForeignKey('subscriptions.id'), index=True, nullable=False)
+    promised_amount = db.Column(db.Numeric(10, 2), nullable=False, default=0)
+    promised_date = db.Column(db.Date, nullable=False)
+    status = db.Column(db.String(20), nullable=False, default='pending')  # pending, kept, broken, cancelled
+    notes = db.Column(db.Text, nullable=True)
+    created_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    resolved_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    resolved_at = db.Column(db.DateTime, nullable=True)
+
+    subscription = db.relationship('Subscription')
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "tenant_id": self.tenant_id,
+            "subscription_id": self.subscription_id,
+            "promised_amount": float(self.promised_amount or 0),
+            "promised_date": self.promised_date.isoformat() if self.promised_date else None,
+            "status": self.status,
+            "notes": self.notes or "",
+            "created_by": self.created_by,
+            "resolved_by": self.resolved_by,
+            "created_at": _iso_datetime(self.created_at),
+            "resolved_at": _iso_datetime(self.resolved_at),
+        }
+
+
+class NocMaintenanceWindow(db.Model):
+    __tablename__ = 'noc_maintenance_windows'
+
+    id = db.Column(db.Integer, primary_key=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey('tenants.id'), index=True, nullable=True)
+    title = db.Column(db.String(160), nullable=False)
+    scope = db.Column(db.String(40), nullable=False, default='all')  # all, router, billing, network
+    starts_at = db.Column(db.DateTime, nullable=False)
+    ends_at = db.Column(db.DateTime, nullable=False)
+    mute_alerts = db.Column(db.Boolean, nullable=False, default=True)
+    note = db.Column(db.Text, nullable=True)
+    created_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "tenant_id": self.tenant_id,
+            "title": self.title,
+            "scope": self.scope,
+            "starts_at": _iso_datetime(self.starts_at),
+            "ends_at": _iso_datetime(self.ends_at),
+            "mute_alerts": bool(self.mute_alerts),
+            "note": self.note or "",
+            "created_by": self.created_by,
+            "created_at": _iso_datetime(self.created_at),
+        }

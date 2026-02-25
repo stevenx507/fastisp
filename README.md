@@ -72,6 +72,11 @@ GEOIP_ALLOWLIST=   # ej. CO,PE,CL si quieres filtrar países
 - Backups automáticos de DB y equipos (MikroTik/OLT).
 - WAF/GeoIP en el proxy sin depender de servicios externos.
 - Tickets con SLA y alertas push integradas.
+- RBAC granular por permiso (allow/deny por rol en cada tenant).
+- Auditoría operativa consultable desde panel admin.
+- Ventanas de mantenimiento NOC con silenciamiento de alertas por alcance.
+- Promesas de pago y job de cobranza (`enforce_billing`) para cortes/reconexión más controlados.
+- Plantillas de servicio OLT custom por vendor (`/api/olt/service-templates`) para estandarizar aprovisionamiento.
 
 ## Próximos pasos sugeridos
 - Conectar gateway de pago local definitivo (Yape/Nequi/transferencia con comprobante).

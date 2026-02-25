@@ -10,7 +10,28 @@ import time
 from flask import Blueprint, jsonify, request, Response, current_app
 from flask_jwt_extended import create_access_token, get_jwt_identity, jwt_required
 
-from app.models import Client, User, Subscription, MikroTikRouter, Plan, AuditLog, Ticket, Invoice, PaymentRecord, TicketComment, Tenant
+from app.models import (
+    AdminExtraService,
+    AdminHotspotVoucher,
+    AdminInstallation,
+    AdminScreenAlert,
+    AdminSystemJob,
+    AdminSystemSetting,
+    AuditLog,
+    BillingPromise,
+    Client,
+    Invoice,
+    MikroTikRouter,
+    NocMaintenanceWindow,
+    PaymentRecord,
+    Plan,
+    RolePermission,
+    Subscription,
+    Tenant,
+    Ticket,
+    TicketComment,
+    User,
+)
 from app import limiter, cache, db, mail
 import pyotp
 import requests
@@ -210,7 +231,9 @@ def _retention_days_for_tenant(tenant_id) -> int:
         defaults = _default_system_settings()
     except Exception:
         pass
-    overrides = _load_cached_dict(_system_settings_key(tenant_id))
+    overrides = _load_system_settings_overrides_db(tenant_id)
+    if not overrides:
+        overrides = _load_cached_dict(_system_settings_key(tenant_id))
     raw_value = overrides.get('backup_retention_days', defaults.get('backup_retention_days', 14))
     return _normalized_retention_days(raw_value, default_days=int(defaults.get('backup_retention_days', 14)))
 
@@ -427,6 +450,86 @@ HOTSPOT_VOUCHER_ALLOWED_STATUS = {"generated", "sold", "used", "expired", "cance
 SYSTEM_ALLOWED_JOBS = {"backup", "cleanup_leases", "rotate_passwords", "recalc_balances", "enforce_billing"}
 TICKET_ALLOWED_PRIORITIES = {"low", "medium", "high", "urgent"}
 
+ROLE_BASE_PERMISSIONS: dict[str, set[str]] = {
+    PLATFORM_ADMIN_ROLE: {
+        "*",
+    },
+    "admin": {
+        "*",
+    },
+    "noc": {
+        "dashboard.read",
+        "network.read",
+        "network.alerts.read",
+        "network.maintenance.read",
+        "network.maintenance.write",
+        "tickets.read",
+    },
+    "tech": {
+        "dashboard.read",
+        "clients.read",
+        "installations.read",
+        "installations.write",
+        "tickets.read",
+        "tickets.write",
+        "network.read",
+    },
+    "support": {
+        "clients.read",
+        "tickets.read",
+        "tickets.write",
+        "notifications.read",
+    },
+    "billing": {
+        "billing.read",
+        "billing.write",
+        "billing.promises.read",
+        "billing.promises.write",
+        "payments.review",
+        "clients.read",
+    },
+    "operator": {
+        "dashboard.read",
+        "clients.read",
+        "tickets.read",
+        "notifications.read",
+    },
+    "client": {
+        "client.portal.read",
+    },
+}
+
+PERMISSION_CATALOG = sorted(
+    {
+        permission
+        for permissions in ROLE_BASE_PERMISSIONS.values()
+        for permission in permissions
+        if permission != "*"
+    }
+    | {
+        "audit.read",
+        "billing.promises.read",
+        "billing.promises.write",
+        "catalog.read",
+        "catalog.write",
+        "communications.alerts.read",
+        "communications.alerts.write",
+        "hotspot.read",
+        "hotspot.write",
+        "installations.read",
+        "installations.write",
+        "network.maintenance.read",
+        "network.maintenance.write",
+        "payments.review",
+        "security.permissions.read",
+        "security.permissions.write",
+        "system.jobs.read",
+        "system.jobs.run",
+        "system.settings.read",
+        "system.settings.write",
+    }
+)
+
 
 def _tenant_cache_key(prefix: str, tenant_id) -> str:
     scoped = tenant_id if tenant_id is not None else "global"
@@ -495,6 +598,76 @@ def _load_cached_dict(key: str) -> dict:
 
 def _save_cached_dict(key: str, data: dict) -> None:
     cache.set(key, data, timeout=86400 * 30)
+
+
+def _tenant_scoped_query(model, tenant_id):
+    query = model.query
+    if tenant_id is None:
+        return query.filter(model.tenant_id.is_(None))
+    return query.filter(model.tenant_id == tenant_id)
+
+
+def _load_system_settings_overrides_db(tenant_id) -> dict:
+    rows = _tenant_scoped_query(AdminSystemSetting, tenant_id).all()
+    return {row.key: row.value for row in rows}
+
+
+def _save_system_settings_overrides_db(tenant_id, overrides: dict, updated_by=None) -> None:
+    existing_rows = _tenant_scoped_query(AdminSystemSetting, tenant_id).all()
+    existing_map = {row.key: row for row in existing_rows}
+    for key_name, value in overrides.items():
+        row = existing_map.get(key_name)
+        if row is None:
+            row = AdminSystemSetting(
+                tenant_id=tenant_id,
+                key=key_name,
+                value=value,
+                updated_by=updated_by,
+                updated_at=datetime.utcnow(),
+            )
+        else:
+            row.value = value
+            row.updated_by = updated_by
+            row.updated_at = datetime.utcnow()
+        db.session.add(row)
+    db.session.commit()
+
+
+def _load_system_jobs_db(tenant_id, status_filter: str = '', job_filter: str = '') -> list[dict]:
+    query = _tenant_scoped_query(AdminSystemJob, tenant_id)
+    if status_filter:
+        query = query.filter(AdminSystemJob.status == status_filter)
+    if job_filter:
+        query = query.filter(AdminSystemJob.job == job_filter)
+    rows = query.order_by(AdminSystemJob.started_at.desc()).all()
+    return [row.to_dict() for row in rows]
+
+
+def _role_permissions_with_overrides(role: str, tenant_id) -> set[str]:
+    normalized_role = str(role or '').strip().lower()
+    base_permissions = set(ROLE_BASE_PERMISSIONS.get(normalized_role, set()))
+    if "*" in base_permissions:
+        return {"*"}
+
+    overrides = (
+        _tenant_scoped_query(RolePermission, tenant_id)
+        .filter_by(role=normalized_role)
+        .all()
+    )
+    resolved = set(base_permissions)
+    for entry in overrides:
+        if entry.allowed:
+            resolved.add(entry.permission)
+        else:
+            resolved.discard(entry.permission)
+    return resolved
+
+
+def _is_permission_allowed(user: User | None, permission: str, tenant_id) -> bool:
+    if not user:
+        return False
+    permissions = _role_permissions_with_overrides(user.role, tenant_id)
+    return "*" in permissions or permission in permissions
 
 
 def _iso_utc_now() -> str:
@@ -762,6 +935,34 @@ def staff_required():
     return wrapper
 
 
+def permission_required(permission: str):
+    def wrapper(fn):
+        @jwt_required()
+        @wraps(fn)
+        def decorator(*args, **kwargs):
+            current_user_id = _current_user_id()
+            if current_user_id is None:
+                return jsonify({"error": "Token de usuario invalido."}), 401
+            user = db.session.get(User, current_user_id)
+            tenant_id = current_tenant_id()
+            is_platform_admin = bool(user and user.role == PLATFORM_ADMIN_ROLE)
+            if not user or (user.role not in STAFF_ALLOWED_ROLES and not is_platform_admin):
+                return jsonify({"error": "Acceso denegado. Se requiere rol operativo."}), 403
+            if is_platform_admin and tenant_id is None:
+                return jsonify({"error": "Platform admin debe seleccionar un tenant para operar modulos ISP."}), 403
+            if not is_platform_admin and tenant_id is not None and user.tenant_id not in (None, tenant_id):
+                return jsonify({"error": "Acceso denegado para este tenant."}), 403
+            if not is_platform_admin and tenant_id is None and user.tenant_id is not None:
+                return jsonify({"error": "Rol operativo requiere contexto tenant valido."}), 403
+            if not _is_permission_allowed(user, permission, tenant_id):
+                return jsonify({"error": f"Permiso insuficiente: {permission}"}), 403
+            return fn(*args, **kwargs)
+
+        return decorator
+
+    return wrapper
+
+
 def _serialize_tenant_platform_item(tenant: Tenant) -> dict:
     users_total = User.query.filter_by(tenant_id=tenant.id).count()
     admin_total = User.query.filter_by(tenant_id=tenant.id, role='admin').count()
@@ -881,6 +1082,23 @@ def _build_network_alert_items(tenant_id) -> list[dict]:
             }
         )
 
+    now_dt = datetime.utcnow()
+    active_windows = (
+        _tenant_scoped_query(NocMaintenanceWindow, tenant_id)
+        .filter(
+            NocMaintenanceWindow.mute_alerts.is_(True),
+            NocMaintenanceWindow.starts_at <= now_dt,
+            NocMaintenanceWindow.ends_at >= now_dt,
+        )
+        .all()
+    )
+    muted_scopes = {str(window.scope or 'all').strip().lower() for window in active_windows}
+    if muted_scopes:
+        if 'all' in muted_scopes:
+            alerts = []
+        else:
+            alerts = [alert for alert in alerts if str(alert.get("scope") or "").strip().lower() not in muted_scopes]
+
     if not alerts:
         alerts.append(
             {
@@ -888,7 +1106,7 @@ def _build_network_alert_items(tenant_id) -> list[dict]:
                 "severity": "info",
                 "scope": "network",
                 "target": "Red",
-                "message": "Sin alertas criticas",
+                "message": "Sin alertas criticas" if not muted_scopes else "Alertas silenciadas por ventana de mantenimiento activa",
                 "since": now_iso,
             }
         )
@@ -3883,7 +4101,7 @@ def admin_notifications_history():
 
 
 @main_bp.route('/admin/audit-logs', methods=['GET'])
-@admin_required()
+@permission_required('audit.read')
 def admin_audit_logs():
     tenant_id = current_tenant_id()
     try:
@@ -3941,6 +4159,90 @@ def admin_audit_logs():
             "offset": offset,
         }
     ), 200
+
+
+@main_bp.route('/admin/permissions', methods=['GET'])
+@admin_required()
+def admin_permissions_list():
+    tenant_id = current_tenant_id()
+    current_user_id = _current_user_id()
+    current_user = db.session.get(User, current_user_id) if current_user_id else None
+    if not _is_permission_allowed(current_user, 'security.permissions.read', tenant_id):
+        return jsonify({"error": "Permiso insuficiente: security.permissions.read"}), 403
+
+    rows = (
+        _tenant_scoped_query(RolePermission, tenant_id)
+        .order_by(RolePermission.role.asc(), RolePermission.permission.asc())
+        .all()
+    )
+    overrides = [row.to_dict() for row in rows]
+    roles = sorted(set(STAFF_ALLOWED_ROLES | {"admin", "client", PLATFORM_ADMIN_ROLE}))
+    role_matrix = []
+    for role in roles:
+        resolved = _role_permissions_with_overrides(role, tenant_id)
+        role_matrix.append(
+            {
+                "role": role,
+                "wildcard": "*" in resolved,
+                "permissions": sorted(permission for permission in resolved if permission != "*"),
+            }
+        )
+
+    return jsonify(
+        {
+            "catalog": PERMISSION_CATALOG,
+            "roles": role_matrix,
+            "overrides": overrides,
+            "count": len(overrides),
+        }
+    ), 200
+
+
+@main_bp.route('/admin/permissions', methods=['POST'])
+@admin_required()
+def admin_permissions_upsert():
+    tenant_id = current_tenant_id()
+    actor_id = _current_user_id()
+    actor = db.session.get(User, actor_id) if actor_id else None
+    if not _is_permission_allowed(actor, 'security.permissions.write', tenant_id):
+        return jsonify({"error": "Permiso insuficiente: security.permissions.write"}), 403
+
+    data = request.get_json() or {}
+    role = str(data.get('role') or '').strip().lower()
+    permission = str(data.get('permission') or '').strip()
+    allowed = _parse_bool(data.get('allowed'))
+
+    allowed_roles = set(STAFF_ALLOWED_ROLES | {"admin", "client", PLATFORM_ADMIN_ROLE})
+    if role not in allowed_roles:
+        return jsonify({"error": f"role invalido. permitidos: {', '.join(sorted(allowed_roles))}"}), 400
+    if not permission:
+        return jsonify({"error": "permission es requerido"}), 400
+    if allowed is None:
+        return jsonify({"error": "allowed debe ser booleano"}), 400
+
+    row = (
+        _tenant_scoped_query(RolePermission, tenant_id)
+        .filter_by(role=role, permission=permission)
+        .first()
+    )
+    if row is None:
+        row = RolePermission(
+            tenant_id=tenant_id,
+            role=role,
+            permission=permission,
+        )
+    row.allowed = bool(allowed)
+    row.updated_by = actor_id
+    row.updated_at = datetime.utcnow()
+    db.session.add(row)
+    db.session.commit()
+
+    resolved = _role_permissions_with_overrides(role, tenant_id)
+    payload = row.to_dict()
+    payload["resolved_permissions"] = sorted(permission_name for permission_name in resolved if permission_name != "*")
+    payload["wildcard"] = "*" in resolved
+    _audit("permission_upsert", entity_type="role_permission", entity_id=row.id, metadata=payload)
+    return jsonify({"success": True, "item": payload}), 200
 
 
 @main_bp.route('/admin/notifications/send', methods=['POST'])
@@ -4021,7 +4323,7 @@ def admin_notifications_send():
 # ==================== ADMIN: FINANCE / INSTALLATIONS / CONTENT / SYSTEM ====================
 
 @main_bp.route('/admin/finance/summary', methods=['GET'])
-@admin_required()
+@permission_required('billing.read')
 def admin_finance_summary():
     tenant_id = current_tenant_id()
     now = datetime.utcnow()
@@ -4190,6 +4492,383 @@ def admin_finance_summary():
     ), 200
 
 
+@main_bp.route('/admin/billing/promises', methods=['GET'])
+@permission_required('billing.promises.read')
+def admin_billing_promises_list():
+    tenant_id = current_tenant_id()
+    status_filter = str(request.args.get('status') or '').strip().lower()
+    subscription_id = _parse_int(request.args.get('subscription_id'))
+
+    query = _tenant_scoped_query(BillingPromise, tenant_id)
+    if status_filter:
+        query = query.filter(BillingPromise.status == status_filter)
+    if subscription_id is not None:
+        query = query.filter(BillingPromise.subscription_id == subscription_id)
+
+    items = [row.to_dict() for row in query.order_by(BillingPromise.created_at.desc()).limit(300).all()]
+    summary = {
+        "pending": sum(1 for row in items if row.get("status") == "pending"),
+        "kept": sum(1 for row in items if row.get("status") == "kept"),
+        "broken": sum(1 for row in items if row.get("status") == "broken"),
+        "cancelled": sum(1 for row in items if row.get("status") == "cancelled"),
+    }
+    return jsonify({"items": items, "count": len(items), "summary": summary}), 200
+
+
+@main_bp.route('/admin/billing/promises', methods=['POST'])
+@permission_required('billing.promises.write')
+def admin_billing_promises_create():
+    tenant_id = current_tenant_id()
+    actor_id = _current_user_id()
+    data = request.get_json() or {}
+
+    subscription_id = _parse_int(data.get('subscription_id'))
+    promised_amount = _parse_money_value(data.get('promised_amount'))
+    promised_date_raw = str(data.get('promised_date') or '').strip()
+    notes = str(data.get('notes') or '').strip()
+
+    if subscription_id is None:
+        return jsonify({"error": "subscription_id es requerido"}), 400
+    if promised_amount is None or promised_amount <= 0:
+        return jsonify({"error": "promised_amount debe ser mayor a 0"}), 400
+    if not promised_date_raw:
+        return jsonify({"error": "promised_date es requerido (YYYY-MM-DD)"}), 400
+    try:
+        promised_date = date.fromisoformat(promised_date_raw)
+    except Exception:
+        return jsonify({"error": "promised_date invalido (YYYY-MM-DD)"}), 400
+
+    subscription = db.session.get(Subscription, subscription_id)
+    if not subscription:
+        return jsonify({"error": "Suscripcion no encontrada"}), 404
+    if tenant_id is not None and subscription.tenant_id not in (None, tenant_id):
+        return jsonify({"error": "Suscripcion fuera del tenant"}), 403
+
+    promise = BillingPromise(
+        tenant_id=tenant_id,
+        subscription_id=subscription_id,
+        promised_amount=promised_amount,
+        promised_date=promised_date,
+        status='pending',
+        notes=notes,
+        created_by=actor_id,
+    )
+    db.session.add(promise)
+    db.session.commit()
+    payload = promise.to_dict()
+    _audit("billing_promise_create", entity_type="billing_promise", entity_id=promise.id, metadata=payload)
+    return jsonify({"success": True, "promise": payload}), 201
+
+
+@main_bp.route('/admin/billing/promises/<int:promise_id>', methods=['PATCH'])
+@permission_required('billing.promises.write')
+def admin_billing_promises_update(promise_id):
+    tenant_id = current_tenant_id()
+    actor_id = _current_user_id()
+    promise = _tenant_scoped_query(BillingPromise, tenant_id).filter_by(id=promise_id).first()
+    if not promise:
+        return jsonify({"error": "Promesa no encontrada"}), 404
+
+    data = request.get_json() or {}
+    if 'status' in data:
+        status = str(data.get('status') or '').strip().lower()
+        if status not in {'pending', 'kept', 'broken', 'cancelled'}:
+            return jsonify({"error": "status invalido. permitidos: pending | kept | broken | cancelled"}), 400
+        promise.status = status
+        if status in {'kept', 'broken', 'cancelled'}:
+            promise.resolved_by = actor_id
+            promise.resolved_at = datetime.utcnow()
+    if 'promised_amount' in data:
+        promised_amount = _parse_money_value(data.get('promised_amount'))
+        if promised_amount is None or promised_amount <= 0:
+            return jsonify({"error": "promised_amount debe ser mayor a 0"}), 400
+        promise.promised_amount = promised_amount
+    if 'promised_date' in data:
+        promised_date_raw = str(data.get('promised_date') or '').strip()
+        if not promised_date_raw:
+            return jsonify({"error": "promised_date no puede estar vacio"}), 400
+        try:
+            promise.promised_date = date.fromisoformat(promised_date_raw)
+        except Exception:
+            return jsonify({"error": "promised_date invalido (YYYY-MM-DD)"}), 400
+    if 'notes' in data:
+        promise.notes = str(data.get('notes') or '').strip()
+
+    db.session.add(promise)
+    db.session.commit()
+    payload = promise.to_dict()
+    _audit("billing_promise_update", entity_type="billing_promise", entity_id=promise.id, metadata={"changes": list(data.keys())})
+    return jsonify({"success": True, "promise": payload}), 200
+
+
+@main_bp.route('/admin/payments/<int:payment_id>/review', methods=['PATCH'])
+@permission_required('payments.review')
+def admin_payments_review(payment_id):
+    tenant_id = current_tenant_id()
+    actor_id = _current_user_id()
+    payment = db.session.get(PaymentRecord, payment_id)
+    if not payment:
+        return jsonify({"error": "Pago no encontrado"}), 404
+    invoice = payment.invoice
+    if not invoice:
+        return jsonify({"error": "Pago sin factura asociada"}), 409
+    subscription = invoice.subscription
+    if tenant_id is not None and subscription and subscription.tenant_id not in (None, tenant_id):
+        return jsonify({"error": "Pago fuera del tenant"}), 403
+
+    data = request.get_json() or {}
+    status = str(data.get('status') or '').strip().lower()
+    if status not in {'paid', 'failed', 'pending'}:
+        return jsonify({"error": "status invalido. permitidos: paid | failed | pending"}), 400
+    note = str(data.get('note') or '').strip()
+
+    payment.status = status
+    meta = payment.meta if isinstance(payment.meta, dict) else {}
+    meta['reviewed_by'] = actor_id
+    meta['reviewed_at'] = _iso_utc_now()
+    if note:
+        meta['review_note'] = note
+    payment.meta = meta
+
+    if status == 'paid':
+        invoice.status = 'paid'
+        if subscription and subscription.status in {'past_due', 'suspended'}:
+            subscription.status = 'active'
+            db.session.add(subscription)
+    elif status == 'failed' and invoice.status == 'paid':
+        invoice.status = 'pending'
+
+    db.session.add(payment)
+    db.session.add(invoice)
+    db.session.commit()
+    payload = {"payment": payment.to_dict(), "invoice": invoice.to_dict()}
+    _audit("payment_review", entity_type="payment", entity_id=payment.id, metadata={"status": status, "invoice_id": invoice.id})
+    return jsonify({"success": True, **payload}), 200
+
+
+@main_bp.route('/admin/network/maintenance', methods=['GET'])
+@permission_required('network.maintenance.read')
+def admin_network_maintenance_list():
+    tenant_id = current_tenant_id()
+    status_filter = str(request.args.get('status') or '').strip().lower()
+    now_dt = datetime.utcnow()
+    query = _tenant_scoped_query(NocMaintenanceWindow, tenant_id)
+    rows = query.order_by(NocMaintenanceWindow.starts_at.desc()).limit(200).all()
+    items = []
+    for row in rows:
+        payload = row.to_dict()
+        if row.ends_at < now_dt:
+            payload['status'] = 'finished'
+        elif row.starts_at > now_dt:
+            payload['status'] = 'scheduled'
+        else:
+            payload['status'] = 'active'
+        items.append(payload)
+
+    if status_filter:
+        items = [item for item in items if item.get('status') == status_filter]
+
+    return jsonify({"items": items, "count": len(items)}), 200
+
+
+@main_bp.route('/admin/network/maintenance', methods=['POST'])
+@permission_required('network.maintenance.write')
+def admin_network_maintenance_create():
+    tenant_id = current_tenant_id()
+    actor_id = _current_user_id()
+    data = request.get_json() or {}
+    title = str(data.get('title') or '').strip()
+    scope = str(data.get('scope') or 'all').strip().lower() or 'all'
+    starts_at = _parse_iso_datetime(data.get('starts_at'))
+    ends_at = _parse_iso_datetime(data.get('ends_at'))
+    mute_alerts = _parse_bool(data.get('mute_alerts'))
+    note = str(data.get('note') or '').strip()
+
+    if not title:
+        return jsonify({"error": "title es requerido"}), 400
+    if scope not in {'all', 'router', 'billing', 'network'}:
+        return jsonify({"error": "scope invalido. permitidos: all | router | billing | network"}), 400
+    if starts_at is None or ends_at is None:
+        return jsonify({"error": "starts_at y ends_at son requeridos (ISO datetime)"}), 400
+    if ends_at <= starts_at:
+        return jsonify({"error": "ends_at debe ser mayor a starts_at"}), 400
+
+    row = NocMaintenanceWindow(
+        tenant_id=tenant_id,
+        title=title,
+        scope=scope,
+        starts_at=starts_at,
+        ends_at=ends_at,
+        mute_alerts=bool(True if mute_alerts is None else mute_alerts),
+        note=note,
+        created_by=actor_id,
+    )
+    db.session.add(row)
+    db.session.commit()
+    payload = row.to_dict()
+    _audit("maintenance_window_create", entity_type="maintenance_window", entity_id=row.id, metadata=payload)
+    return jsonify({"success": True, "item": payload}), 201
+
+
+@main_bp.route('/admin/network/maintenance/<int:window_id>', methods=['PATCH'])
+@permission_required('network.maintenance.write')
+def admin_network_maintenance_update(window_id):
+    tenant_id = current_tenant_id()
+    row = _tenant_scoped_query(NocMaintenanceWindow, tenant_id).filter_by(id=window_id).first()
+    if not row:
+        return jsonify({"error": "Ventana de mantenimiento no encontrada"}), 404
+
+    data = request.get_json() or {}
+    if 'title' in data:
+        title = str(data.get('title') or '').strip()
+        if not title:
+            return jsonify({"error": "title no puede estar vacio"}), 400
+        row.title = title
+    if 'scope' in data:
+        scope = str(data.get('scope') or '').strip().lower()
+        if scope not in {'all', 'router', 'billing', 'network'}:
+            return jsonify({"error": "scope invalido. permitidos: all | router | billing | network"}), 400
+        row.scope = scope
+    if 'starts_at' in data:
+        starts_at = _parse_iso_datetime(data.get('starts_at'))
+        if starts_at is None:
+            return jsonify({"error": "starts_at invalido"}), 400
+        row.starts_at = starts_at
+    if 'ends_at' in data:
+        ends_at = _parse_iso_datetime(data.get('ends_at'))
+        if ends_at is None:
+            return jsonify({"error": "ends_at invalido"}), 400
+        row.ends_at = ends_at
+    if row.ends_at <= row.starts_at:
+        return jsonify({"error": "ends_at debe ser mayor a starts_at"}), 400
+    if 'mute_alerts' in data:
+        mute_alerts = _parse_bool(data.get('mute_alerts'))
+        if mute_alerts is None:
+            return jsonify({"error": "mute_alerts debe ser booleano"}), 400
+        row.mute_alerts = mute_alerts
+    if 'note' in data:
+        row.note = str(data.get('note') or '').strip()
+
+    db.session.add(row)
+    db.session.commit()
+    payload = row.to_dict()
+    _audit("maintenance_window_update", entity_type="maintenance_window", entity_id=row.id, metadata={"changes": list(data.keys())})
+    return jsonify({"success": True, "item": payload}), 200
+
+
+def _installation_model_from_entry(entry: dict, tenant_id) -> AdminInstallation:
+    scheduled_for = _parse_iso_datetime(entry.get("scheduled_for"))
+    completed_at = _parse_iso_datetime(entry.get("completed_at"))
+    created_at = _parse_iso_datetime(entry.get("created_at")) or datetime.utcnow()
+    updated_at = _parse_iso_datetime(entry.get("updated_at")) or created_at
+    return AdminInstallation(
+        id=str(entry.get("id") or secrets.token_hex(8)),
+        tenant_id=tenant_id,
+        client_id=_parse_int(entry.get("client_id")),
+        client_name=str(entry.get("client_name") or "").strip() or "Cliente",
+        plan=(str(entry.get("plan") or "").strip() or None),
+        router=(str(entry.get("router") or "").strip() or None),
+        address=str(entry.get("address") or "Sin direccion").strip() or "Sin direccion",
+        status=str(entry.get("status") or "pending").strip().lower(),
+        priority=str(entry.get("priority") or "normal").strip().lower() or "normal",
+        technician=str(entry.get("technician") or "pendiente@ispfast.local").strip() or "pendiente@ispfast.local",
+        scheduled_for=scheduled_for,
+        notes=str(entry.get("notes") or "").strip(),
+        checklist=entry.get("checklist") if isinstance(entry.get("checklist"), dict) else {},
+        completed_at=completed_at,
+        completed_by=_parse_int(entry.get("completed_by")),
+        completed_by_name=(str(entry.get("completed_by_name") or "").strip() or None),
+        created_by=_parse_int(entry.get("created_by")),
+        created_by_name=(str(entry.get("created_by_name") or "").strip() or None),
+        created_by_email=(str(entry.get("created_by_email") or "").strip() or None),
+        updated_by=_parse_int(entry.get("updated_by")),
+        updated_by_name=(str(entry.get("updated_by_name") or "").strip() or None),
+        updated_by_email=(str(entry.get("updated_by_email") or "").strip() or None),
+        created_at=created_at,
+        updated_at=updated_at,
+    )
+
+
+def _screen_alert_model_from_entry(entry: dict, tenant_id) -> AdminScreenAlert:
+    starts_at = _parse_iso_datetime(entry.get("starts_at"))
+    ends_at = _parse_iso_datetime(entry.get("ends_at"))
+    created_at = _parse_iso_datetime(entry.get("created_at")) or datetime.utcnow()
+    updated_at = _parse_iso_datetime(entry.get("updated_at")) or created_at
+    return AdminScreenAlert(
+        id=str(entry.get("id") or secrets.token_hex(8)),
+        tenant_id=tenant_id,
+        title=str(entry.get("title") or "").strip() or "Alerta",
+        message=str(entry.get("message") or "").strip() or "-",
+        severity=str(entry.get("severity") or "info").strip().lower(),
+        audience=str(entry.get("audience") or "all").strip().lower(),
+        status=str(entry.get("status") or "draft").strip().lower(),
+        starts_at=starts_at,
+        ends_at=ends_at,
+        impressions=int(entry.get("impressions") or 0),
+        acknowledged=int(entry.get("acknowledged") or 0),
+        created_by=_parse_int(entry.get("created_by")),
+        created_by_name=(str(entry.get("created_by_name") or "").strip() or None),
+        created_by_email=(str(entry.get("created_by_email") or "").strip() or None),
+        updated_by=_parse_int(entry.get("updated_by")),
+        updated_by_name=(str(entry.get("updated_by_name") or "").strip() or None),
+        updated_by_email=(str(entry.get("updated_by_email") or "").strip() or None),
+        created_at=created_at,
+        updated_at=updated_at,
+    )
+
+
+def _extra_service_model_from_entry(entry: dict, tenant_id) -> AdminExtraService:
+    created_at = _parse_iso_datetime(entry.get("created_at")) or datetime.utcnow()
+    updated_at = _parse_iso_datetime(entry.get("updated_at")) or created_at
+    return AdminExtraService(
+        id=str(entry.get("id") or secrets.token_hex(8)),
+        tenant_id=tenant_id,
+        name=str(entry.get("name") or "").strip() or "Servicio",
+        category=str(entry.get("category") or "other").strip().lower() or "other",
+        description=str(entry.get("description") or "").strip(),
+        monthly_price=round(float(entry.get("monthly_price") or 0), 2),
+        one_time_fee=round(float(entry.get("one_time_fee") or 0), 2),
+        status=str(entry.get("status") or "active").strip().lower(),
+        subscribers=max(0, int(entry.get("subscribers") or 0)),
+        created_by=_parse_int(entry.get("created_by")),
+        created_by_name=(str(entry.get("created_by_name") or "").strip() or None),
+        created_by_email=(str(entry.get("created_by_email") or "").strip() or None),
+        updated_by=_parse_int(entry.get("updated_by")),
+        updated_by_name=(str(entry.get("updated_by_name") or "").strip() or None),
+        updated_by_email=(str(entry.get("updated_by_email") or "").strip() or None),
+        created_at=created_at,
+        updated_at=updated_at,
+    )
+
+
+def _hotspot_voucher_model_from_entry(entry: dict, tenant_id) -> AdminHotspotVoucher:
+    expires_at = _parse_iso_datetime(entry.get("expires_at"))
+    used_at = _parse_iso_datetime(entry.get("used_at"))
+    created_at = _parse_iso_datetime(entry.get("created_at")) or datetime.utcnow()
+    updated_at = _parse_iso_datetime(entry.get("updated_at")) or created_at
+    return AdminHotspotVoucher(
+        id=str(entry.get("id") or secrets.token_hex(8)),
+        tenant_id=tenant_id,
+        code=str(entry.get("code") or "").strip().upper() or f"VCH-{secrets.token_hex(3).upper()}",
+        profile=str(entry.get("profile") or "basic").strip().lower() or "basic",
+        duration_minutes=max(1, int(entry.get("duration_minutes") or 60)),
+        data_limit_mb=max(0, int(entry.get("data_limit_mb") or 0)),
+        price=round(float(entry.get("price") or 0), 2),
+        status=str(entry.get("status") or "generated").strip().lower(),
+        assigned_to=(str(entry.get("assigned_to") or "").strip() or None),
+        expires_at=expires_at,
+        used_at=used_at,
+        created_by=_parse_int(entry.get("created_by")),
+        created_by_name=(str(entry.get("created_by_name") or "").strip() or None),
+        created_by_email=(str(entry.get("created_by_email") or "").strip() or None),
+        updated_by=_parse_int(entry.get("updated_by")),
+        updated_by_name=(str(entry.get("updated_by_name") or "").strip() or None),
+        updated_by_email=(str(entry.get("updated_by_email") or "").strip() or None),
+        created_at=created_at,
+        updated_at=updated_at,
+    )
+
+
 def _default_installations(tenant_id) -> list[dict]:
     clients_query = Client.query.options(joinedload(Client.plan), joinedload(Client.router))
     if tenant_id is not None:
@@ -4236,16 +4915,19 @@ def _default_installations(tenant_id) -> list[dict]:
 
 
 @main_bp.route('/admin/installations', methods=['GET'])
-@admin_required()
+@permission_required('installations.read')
 def admin_installations_list():
     tenant_id = current_tenant_id()
     key = _installations_key(tenant_id)
-    items = _load_cached_list(key)
-    if not items:
-        items = _default_installations(tenant_id)
-        _save_cached_list(key, items, max_items=400)
-    elif _normalize_operational_items_metadata(items):
-        _save_cached_list(key, items, max_items=400)
+    rows = _tenant_scoped_query(AdminInstallation, tenant_id).order_by(AdminInstallation.created_at.desc()).all()
+    if not rows:
+        cached_items = _load_cached_list(key)
+        seed_items = cached_items or _default_installations(tenant_id)
+        for entry in seed_items:
+            db.session.add(_installation_model_from_entry(entry, tenant_id))
+        db.session.commit()
+        rows = _tenant_scoped_query(AdminInstallation, tenant_id).order_by(AdminInstallation.created_at.desc()).all()
+    items = [row.to_dict() for row in rows]
 
     status_filter = (request.args.get('status') or '').strip().lower()
     technician_filter = (request.args.get('technician') or '').strip().lower()
@@ -4264,7 +4946,7 @@ def admin_installations_list():
 
 
 @main_bp.route('/admin/installations', methods=['POST'])
-@admin_required()
+@permission_required('installations.write')
 def admin_installations_create():
     tenant_id = current_tenant_id()
     data = request.get_json() or {}
@@ -4317,26 +4999,25 @@ def admin_installations_create():
         },
     }
     _apply_operational_entry_create_metadata(entry, actor=actor)
-
-    key = _installations_key(tenant_id)
-    items = _load_cached_list(key)
-    items.insert(0, entry)
-    _save_cached_list(key, items, max_items=400)
-    _audit("installation_create", entity_type="installation", entity_id=entry["id"], metadata=entry)
-    return jsonify({"success": True, "installation": entry}), 201
+    record = _installation_model_from_entry(entry, tenant_id)
+    db.session.add(record)
+    db.session.commit()
+    payload = record.to_dict()
+    _save_cached_list(_installations_key(tenant_id), [payload], max_items=400)
+    _audit("installation_create", entity_type="installation", entity_id=record.id, metadata=payload)
+    return jsonify({"success": True, "installation": payload}), 201
 
 
 @main_bp.route('/admin/installations/<string:installation_id>', methods=['PATCH'])
-@admin_required()
+@permission_required('installations.write')
 def admin_installations_update(installation_id):
     tenant_id = current_tenant_id()
-    key = _installations_key(tenant_id)
-    items = _load_cached_list(key)
-    entry = next((item for item in items if str(item.get("id")) == installation_id), None)
-    if not entry:
+    record = _tenant_scoped_query(AdminInstallation, tenant_id).filter_by(id=installation_id).first()
+    if not record:
         return jsonify({"error": "Instalacion no encontrada"}), 404
 
     actor = _current_actor_snapshot()
+    entry = record.to_dict()
     _ensure_operational_entry_metadata(entry)
     data = request.get_json() or {}
     if 'status' in data:
@@ -4374,10 +5055,33 @@ def admin_installations_update(installation_id):
         entry['completed_by'] = entry.get('completed_by') if entry.get('completed_by') is not None else actor.get("id")
         entry['completed_by_name'] = entry.get('completed_by_name') or str(actor.get("name") or _actor_default_name(actor.get("id")))
     _apply_operational_entry_update_metadata(entry, actor=actor)
-
-    _save_cached_list(key, items, max_items=400)
+    record.client_id = _parse_int(entry.get('client_id'))
+    record.client_name = entry.get('client_name')
+    record.plan = entry.get('plan')
+    record.router = entry.get('router')
+    record.address = entry.get('address')
+    record.status = entry.get('status')
+    record.priority = entry.get('priority')
+    record.technician = entry.get('technician')
+    record.scheduled_for = _parse_iso_datetime(entry.get('scheduled_for'))
+    record.notes = entry.get('notes')
+    record.checklist = entry.get('checklist') if isinstance(entry.get('checklist'), dict) else {}
+    record.completed_at = _parse_iso_datetime(entry.get('completed_at'))
+    record.completed_by = _parse_int(entry.get('completed_by'))
+    record.completed_by_name = entry.get('completed_by_name')
+    record.created_by = _parse_int(entry.get('created_by'))
+    record.created_by_name = entry.get('created_by_name')
+    record.created_by_email = entry.get('created_by_email')
+    record.updated_by = _parse_int(entry.get('updated_by'))
+    record.updated_by_name = entry.get('updated_by_name')
+    record.updated_by_email = entry.get('updated_by_email')
+    record.created_at = _parse_iso_datetime(entry.get('created_at')) or record.created_at
+    record.updated_at = _parse_iso_datetime(entry.get('updated_at')) or datetime.utcnow()
+    db.session.add(record)
+    db.session.commit()
+    _save_cached_list(_installations_key(tenant_id), [record.to_dict()], max_items=400)
     _audit("installation_update", entity_type="installation", entity_id=installation_id, metadata={"changes": list(data.keys())})
-    return jsonify({"success": True, "installation": entry}), 200
+    return jsonify({"success": True, "installation": record.to_dict()}), 200
 
 
 def _default_screen_alerts() -> list[dict]:
@@ -4415,16 +5119,19 @@ def _default_screen_alerts() -> list[dict]:
 
 
 @main_bp.route('/admin/screen-alerts', methods=['GET'])
-@admin_required()
+@permission_required('communications.alerts.read')
 def admin_screen_alerts_list():
     tenant_id = current_tenant_id()
     key = _screen_alerts_key(tenant_id)
-    items = _load_cached_list(key)
-    if not items:
-        items = _default_screen_alerts()
-        _save_cached_list(key, items, max_items=400)
-    elif _normalize_operational_items_metadata(items):
-        _save_cached_list(key, items, max_items=400)
+    rows = _tenant_scoped_query(AdminScreenAlert, tenant_id).order_by(AdminScreenAlert.created_at.desc()).all()
+    if not rows:
+        cached_items = _load_cached_list(key)
+        seed_items = cached_items or _default_screen_alerts()
+        for entry in seed_items:
+            db.session.add(_screen_alert_model_from_entry(entry, tenant_id))
+        db.session.commit()
+        rows = _tenant_scoped_query(AdminScreenAlert, tenant_id).order_by(AdminScreenAlert.created_at.desc()).all()
+    items = [row.to_dict() for row in rows]
 
     status_filter = (request.args.get('status') or '').strip().lower()
     if status_filter:
@@ -4439,7 +5146,7 @@ def admin_screen_alerts_list():
 
 
 @main_bp.route('/admin/screen-alerts', methods=['POST'])
-@admin_required()
+@permission_required('communications.alerts.write')
 def admin_screen_alerts_create():
     tenant_id = current_tenant_id()
     data = request.get_json() or {}
@@ -4474,26 +5181,25 @@ def admin_screen_alerts_create():
         "acknowledged": 0,
     }
     _apply_operational_entry_create_metadata(entry, actor=actor)
-
-    key = _screen_alerts_key(tenant_id)
-    items = _load_cached_list(key)
-    items.insert(0, entry)
-    _save_cached_list(key, items, max_items=400)
-    _audit("screen_alert_create", entity_type="screen_alert", entity_id=entry["id"], metadata=entry)
-    return jsonify({"success": True, "alert": entry}), 201
+    record = _screen_alert_model_from_entry(entry, tenant_id)
+    db.session.add(record)
+    db.session.commit()
+    payload = record.to_dict()
+    _save_cached_list(_screen_alerts_key(tenant_id), [payload], max_items=400)
+    _audit("screen_alert_create", entity_type="screen_alert", entity_id=record.id, metadata=payload)
+    return jsonify({"success": True, "alert": payload}), 201
 
 
 @main_bp.route('/admin/screen-alerts/<string:alert_id>', methods=['PATCH'])
-@admin_required()
+@permission_required('communications.alerts.write')
 def admin_screen_alerts_update(alert_id):
     tenant_id = current_tenant_id()
-    key = _screen_alerts_key(tenant_id)
-    items = _load_cached_list(key)
-    entry = next((item for item in items if str(item.get("id")) == alert_id), None)
-    if not entry:
+    record = _tenant_scoped_query(AdminScreenAlert, tenant_id).filter_by(id=alert_id).first()
+    if not record:
         return jsonify({"error": "Alerta no encontrada"}), 404
 
     actor = _current_actor_snapshot()
+    entry = record.to_dict()
     _ensure_operational_entry_metadata(entry)
     data = request.get_json() or {}
     if 'title' in data:
@@ -4531,9 +5237,28 @@ def admin_screen_alerts_update(alert_id):
         entry['acknowledged'] = max(0, int(entry.get('acknowledged') or 0) + int(data.get('acknowledged_delta') or 0))
 
     _apply_operational_entry_update_metadata(entry, actor=actor)
-    _save_cached_list(key, items, max_items=400)
+    record.title = entry.get('title')
+    record.message = entry.get('message')
+    record.severity = entry.get('severity')
+    record.audience = entry.get('audience')
+    record.status = entry.get('status')
+    record.starts_at = _parse_iso_datetime(entry.get('starts_at'))
+    record.ends_at = _parse_iso_datetime(entry.get('ends_at'))
+    record.impressions = int(entry.get('impressions') or 0)
+    record.acknowledged = int(entry.get('acknowledged') or 0)
+    record.created_by = _parse_int(entry.get('created_by'))
+    record.created_by_name = entry.get('created_by_name')
+    record.created_by_email = entry.get('created_by_email')
+    record.updated_by = _parse_int(entry.get('updated_by'))
+    record.updated_by_name = entry.get('updated_by_name')
+    record.updated_by_email = entry.get('updated_by_email')
+    record.created_at = _parse_iso_datetime(entry.get('created_at')) or record.created_at
+    record.updated_at = _parse_iso_datetime(entry.get('updated_at')) or datetime.utcnow()
+    db.session.add(record)
+    db.session.commit()
+    _save_cached_list(_screen_alerts_key(tenant_id), [record.to_dict()], max_items=400)
     _audit("screen_alert_update", entity_type="screen_alert", entity_id=alert_id, metadata={"changes": list(data.keys())})
-    return jsonify({"success": True, "alert": entry}), 200
+    return jsonify({"success": True, "alert": record.to_dict()}), 200
 
 
 def _default_extra_services(tenant_id) -> list[dict]:
@@ -4590,16 +5315,19 @@ def _default_extra_services(tenant_id) -> list[dict]:
 
 
 @main_bp.route('/admin/extra-services', methods=['GET'])
-@admin_required()
+@permission_required('catalog.read')
 def admin_extra_services_list():
     tenant_id = current_tenant_id()
     key = _extra_services_key(tenant_id)
-    items = _load_cached_list(key)
-    if not items:
-        items = _default_extra_services(tenant_id)
-        _save_cached_list(key, items, max_items=300)
-    elif _normalize_operational_items_metadata(items):
-        _save_cached_list(key, items, max_items=300)
+    rows = _tenant_scoped_query(AdminExtraService, tenant_id).order_by(AdminExtraService.created_at.desc()).all()
+    if not rows:
+        cached_items = _load_cached_list(key)
+        seed_items = cached_items or _default_extra_services(tenant_id)
+        for entry in seed_items:
+            db.session.add(_extra_service_model_from_entry(entry, tenant_id))
+        db.session.commit()
+        rows = _tenant_scoped_query(AdminExtraService, tenant_id).order_by(AdminExtraService.created_at.desc()).all()
+    items = [row.to_dict() for row in rows]
 
     status_filter = (request.args.get('status') or '').strip().lower()
     if status_filter:
@@ -4617,7 +5345,7 @@ def admin_extra_services_list():
 
 
 @main_bp.route('/admin/extra-services', methods=['POST'])
-@admin_required()
+@permission_required('catalog.write')
 def admin_extra_services_create():
     tenant_id = current_tenant_id()
     data = request.get_json() or {}
@@ -4641,26 +5369,25 @@ def admin_extra_services_create():
         "subscribers": int(data.get('subscribers') or 0),
     }
     _apply_operational_entry_create_metadata(entry, actor=actor)
-
-    key = _extra_services_key(tenant_id)
-    items = _load_cached_list(key)
-    items.insert(0, entry)
-    _save_cached_list(key, items, max_items=300)
-    _audit("extra_service_create", entity_type="extra_service", entity_id=entry["id"], metadata=entry)
-    return jsonify({"success": True, "service": entry}), 201
+    record = _extra_service_model_from_entry(entry, tenant_id)
+    db.session.add(record)
+    db.session.commit()
+    payload = record.to_dict()
+    _save_cached_list(_extra_services_key(tenant_id), [payload], max_items=300)
+    _audit("extra_service_create", entity_type="extra_service", entity_id=record.id, metadata=payload)
+    return jsonify({"success": True, "service": payload}), 201
 
 
 @main_bp.route('/admin/extra-services/<string:service_id>', methods=['PATCH'])
-@admin_required()
+@permission_required('catalog.write')
 def admin_extra_services_update(service_id):
     tenant_id = current_tenant_id()
-    key = _extra_services_key(tenant_id)
-    items = _load_cached_list(key)
-    entry = next((item for item in items if str(item.get("id")) == service_id), None)
-    if not entry:
+    record = _tenant_scoped_query(AdminExtraService, tenant_id).filter_by(id=service_id).first()
+    if not record:
         return jsonify({"error": "Servicio no encontrado"}), 404
 
     actor = _current_actor_snapshot()
+    entry = record.to_dict()
     _ensure_operational_entry_metadata(entry)
     data = request.get_json() or {}
     if 'name' in data:
@@ -4685,19 +5412,42 @@ def admin_extra_services_update(service_id):
         entry['status'] = status
 
     _apply_operational_entry_update_metadata(entry, actor=actor)
-    _save_cached_list(key, items, max_items=300)
+    record.name = entry.get('name')
+    record.category = entry.get('category')
+    record.description = entry.get('description')
+    record.monthly_price = round(float(entry.get('monthly_price') or 0), 2)
+    record.one_time_fee = round(float(entry.get('one_time_fee') or 0), 2)
+    record.status = entry.get('status')
+    record.subscribers = max(0, int(entry.get('subscribers') or 0))
+    record.created_by = _parse_int(entry.get('created_by'))
+    record.created_by_name = entry.get('created_by_name')
+    record.created_by_email = entry.get('created_by_email')
+    record.updated_by = _parse_int(entry.get('updated_by'))
+    record.updated_by_name = entry.get('updated_by_name')
+    record.updated_by_email = entry.get('updated_by_email')
+    record.created_at = _parse_iso_datetime(entry.get('created_at')) or record.created_at
+    record.updated_at = _parse_iso_datetime(entry.get('updated_at')) or datetime.utcnow()
+    db.session.add(record)
+    db.session.commit()
+    _save_cached_list(_extra_services_key(tenant_id), [record.to_dict()], max_items=300)
     _audit("extra_service_update", entity_type="extra_service", entity_id=service_id, metadata={"changes": list(data.keys())})
-    return jsonify({"success": True, "service": entry}), 200
+    return jsonify({"success": True, "service": record.to_dict()}), 200
 
 
 @main_bp.route('/admin/hotspot/vouchers', methods=['GET'])
-@admin_required()
+@permission_required('hotspot.read')
 def admin_hotspot_vouchers_list():
     tenant_id = current_tenant_id()
     key = _hotspot_vouchers_key(tenant_id)
-    items = _load_cached_list(key)
-    if _normalize_operational_items_metadata(items):
-        _save_cached_list(key, items, max_items=1000)
+    rows = _tenant_scoped_query(AdminHotspotVoucher, tenant_id).order_by(AdminHotspotVoucher.created_at.desc()).all()
+    if not rows:
+        cached_items = _load_cached_list(key)
+        if cached_items:
+            for entry in cached_items:
+                db.session.add(_hotspot_voucher_model_from_entry(entry, tenant_id))
+            db.session.commit()
+            rows = _tenant_scoped_query(AdminHotspotVoucher, tenant_id).order_by(AdminHotspotVoucher.created_at.desc()).all()
+    items = [row.to_dict() for row in rows]
 
     status_filter = (request.args.get('status') or '').strip().lower()
     if status_filter:
@@ -4721,7 +5471,7 @@ def admin_hotspot_vouchers_list():
 
 
 @main_bp.route('/admin/hotspot/vouchers', methods=['POST'])
-@admin_required()
+@permission_required('hotspot.write')
 def admin_hotspot_vouchers_create():
     tenant_id = current_tenant_id()
     data = request.get_json() or {}
@@ -4741,7 +5491,7 @@ def admin_hotspot_vouchers_create():
     now = datetime.utcnow().replace(microsecond=0)
 
     key = _hotspot_vouchers_key(tenant_id)
-    items = _load_cached_list(key)
+    items = []
     created = []
     for _ in range(quantity):
         code_prefix = ''.join(ch for ch in profile.upper() if ch.isalnum())[:3] or 'VCH'
@@ -4759,10 +5509,14 @@ def admin_hotspot_vouchers_create():
             "used_at": None,
         }
         _apply_operational_entry_create_metadata(entry, actor=actor)
-        items.insert(0, entry)
-        created.append(entry)
+        record = _hotspot_voucher_model_from_entry(entry, tenant_id)
+        db.session.add(record)
+        payload = record.to_dict()
+        items.append(payload)
+        created.append(payload)
 
-    _save_cached_list(key, items, max_items=1000)
+    db.session.commit()
+    _save_cached_list(key, created, max_items=1000)
     _audit(
         "hotspot_vouchers_create",
         entity_type="hotspot_voucher",
@@ -4772,16 +5526,15 @@ def admin_hotspot_vouchers_create():
 
 
 @main_bp.route('/admin/hotspot/vouchers/<string:voucher_id>', methods=['PATCH'])
-@admin_required()
+@permission_required('hotspot.write')
 def admin_hotspot_vouchers_update(voucher_id):
     tenant_id = current_tenant_id()
-    key = _hotspot_vouchers_key(tenant_id)
-    items = _load_cached_list(key)
-    entry = next((item for item in items if str(item.get("id")) == voucher_id), None)
-    if not entry:
+    record = _tenant_scoped_query(AdminHotspotVoucher, tenant_id).filter_by(id=voucher_id).first()
+    if not record:
         return jsonify({"error": "Voucher no encontrado"}), 404
 
     actor = _current_actor_snapshot()
+    entry = record.to_dict()
     _ensure_operational_entry_metadata(entry)
     data = request.get_json() or {}
     if 'status' in data:
@@ -4797,9 +5550,28 @@ def admin_hotspot_vouchers_update(voucher_id):
         entry['expires_at'] = data.get('expires_at')
 
     _apply_operational_entry_update_metadata(entry, actor=actor)
-    _save_cached_list(key, items, max_items=1000)
+    record.code = str(entry.get('code') or record.code).upper()
+    record.profile = str(entry.get('profile') or 'basic').lower()
+    record.duration_minutes = max(1, int(entry.get('duration_minutes') or 60))
+    record.data_limit_mb = max(0, int(entry.get('data_limit_mb') or 0))
+    record.price = round(float(entry.get('price') or 0), 2)
+    record.status = str(entry.get('status') or 'generated').lower()
+    record.assigned_to = str(entry.get('assigned_to') or '').strip() or None
+    record.expires_at = _parse_iso_datetime(entry.get('expires_at'))
+    record.used_at = _parse_iso_datetime(entry.get('used_at'))
+    record.created_by = _parse_int(entry.get('created_by'))
+    record.created_by_name = entry.get('created_by_name')
+    record.created_by_email = entry.get('created_by_email')
+    record.updated_by = _parse_int(entry.get('updated_by'))
+    record.updated_by_name = entry.get('updated_by_name')
+    record.updated_by_email = entry.get('updated_by_email')
+    record.created_at = _parse_iso_datetime(entry.get('created_at')) or record.created_at
+    record.updated_at = _parse_iso_datetime(entry.get('updated_at')) or datetime.utcnow()
+    db.session.add(record)
+    db.session.commit()
+    _save_cached_list(_hotspot_vouchers_key(tenant_id), [record.to_dict()], max_items=1000)
     _audit("hotspot_voucher_update", entity_type="hotspot_voucher", entity_id=voucher_id, metadata={"changes": list(data.keys())})
-    return jsonify({"success": True, "voucher": entry}), 200
+    return jsonify({"success": True, "voucher": record.to_dict()}), 200
 
 
 def _default_system_settings() -> dict:
@@ -4855,17 +5627,60 @@ def _cleanup_leases_for_tenant(tenant_id) -> dict:
     scanned = 0
     updated = 0
     failed = 0
+    reactivated = 0
+    skipped_by_promise = 0
+    promises_marked_kept = 0
+    promises_marked_broken = 0
+    overdue_invoices_total = 0
     changes = []
 
     for sub in subscriptions_q.all():
         scanned += 1
         original_status = sub.status
 
-        if sub.next_charge and sub.next_charge < today and sub.status == 'active':
+        overdue_invoice_exists = (
+            Invoice.query.filter(
+                Invoice.subscription_id == sub.id,
+                Invoice.status == 'pending',
+                Invoice.due_date < today,
+            ).first()
+            is not None
+        )
+        overdue_next_charge = bool(sub.next_charge and sub.next_charge < today)
+        is_overdue = overdue_invoice_exists or overdue_next_charge
+        if overdue_invoice_exists:
+            overdue_invoices_total += 1
+
+        if is_overdue and sub.status == 'active':
             sub.status = 'past_due'
 
+        pending_promises_q = BillingPromise.query.filter(
+            BillingPromise.subscription_id == sub.id,
+            BillingPromise.status == 'pending',
+        )
+        valid_promise = (
+            pending_promises_q
+            .filter(BillingPromise.promised_date >= today)
+            .order_by(BillingPromise.promised_date.asc())
+            .first()
+        )
+        expired_promises = (
+            pending_promises_q
+            .filter(BillingPromise.promised_date < today)
+            .all()
+        )
+        for promise in expired_promises:
+            promise.status = 'broken'
+            promise.resolved_at = datetime.utcnow()
+            db.session.add(promise)
+            promises_marked_broken += 1
+
         client = sub.client or (db.session.get(Client, sub.client_id) if sub.client_id else None)
-        if sub.status in ('past_due', 'suspended') and client and client.router_id:
+        if sub.status in ('past_due', 'suspended') and not is_overdue:
+            sub.status = 'active'
+        if sub.status in ('past_due', 'suspended') and is_overdue and valid_promise is not None:
+            skipped_by_promise += 1
+        elif sub.status in ('past_due', 'suspended') and is_overdue and client and client.router_id:
             try:
                 with MikroTikService(client.router_id) as service:
                     service.suspend_client(client)
@@ -4879,6 +5694,18 @@ def _cleanup_leases_for_tenant(tenant_id) -> dict:
             except Exception:
                 failed += 1
 
+        if sub.status == 'active' and original_status in ('past_due', 'suspended'):
+            reactivated += 1
+            kept_promises = BillingPromise.query.filter(
+                BillingPromise.subscription_id == sub.id,
+                BillingPromise.status == 'pending',
+            ).all()
+            for promise in kept_promises:
+                promise.status = 'kept'
+                promise.resolved_at = datetime.utcnow()
+                db.session.add(promise)
+                promises_marked_kept += 1
+
         if sub.status != original_status:
             updated += 1
             changes.append({"subscription_id": sub.id, "from": original_status, "to": sub.status})
@@ -4889,7 +5716,12 @@ def _cleanup_leases_for_tenant(tenant_id) -> dict:
         "tenant_id": tenant_id,
         "scanned": scanned,
         "updated": updated,
+        "reactivated": reactivated,
         "failed": failed,
+        "overdue_invoices": overdue_invoices_total,
+        "skipped_by_promise": skipped_by_promise,
+        "promises_marked_kept": promises_marked_kept,
+        "promises_marked_broken": promises_marked_broken,
         "changes": changes[:200],
         "timestamp": _iso_utc_now(),
     }
@@ -4998,7 +5830,9 @@ def _rotate_mikrotik_passwords(tenant_id) -> tuple[str, dict]:
 
 def _enforce_billing_for_tenant(tenant_id) -> tuple[str, dict]:
     defaults = _default_system_settings()
-    overrides = _load_cached_dict(_system_settings_key(tenant_id))
+    overrides = _load_system_settings_overrides_db(tenant_id)
+    if not overrides:
+        overrides = _load_cached_dict(_system_settings_key(tenant_id))
     auto_suspend_overdue = bool(overrides.get("auto_suspend_overdue", defaults.get("auto_suspend_overdue", True)))
     if not auto_suspend_overdue:
         return 'skipped', {
@@ -5033,18 +5867,33 @@ def _execute_system_job(job: str, tenant_id) -> tuple[str, dict]:
 
 
 def _run_system_job_request(job: str, tenant_id, requested_by) -> tuple[dict, int]:
+    started_at = datetime.utcnow().replace(microsecond=0)
     entry = {
         "id": secrets.token_hex(8),
         "job": job,
         "status": "started",
         "requested_by": requested_by,
-        "started_at": _iso_utc_now(),
+        "started_at": started_at.isoformat(),
     }
 
     status, result = _execute_system_job(job, tenant_id)
+    finished_at = datetime.utcnow().replace(microsecond=0)
     entry["status"] = status
-    entry["finished_at"] = _iso_utc_now()
+    entry["finished_at"] = finished_at.isoformat()
     entry["result"] = result
+
+    job_row = AdminSystemJob(
+        id=entry["id"],
+        tenant_id=tenant_id,
+        job=job,
+        status=status,
+        requested_by=requested_by,
+        started_at=started_at,
+        finished_at=finished_at,
+        result=result,
+    )
+    db.session.add(job_row)
+    db.session.commit()
 
     key = _system_jobs_key(tenant_id)
     jobs = _load_cached_list(key)
@@ -5067,11 +5916,16 @@ def _run_system_job_request(job: str, tenant_id, requested_by) -> tuple[dict, in
 
 
 @main_bp.route('/admin/system/settings', methods=['GET'])
-@admin_required()
+@permission_required('system.settings.read')
 def admin_system_settings_get():
     tenant_id = current_tenant_id()
     defaults = _default_system_settings()
-    overrides = _load_cached_dict(_system_settings_key(tenant_id))
+    overrides = _load_system_settings_overrides_db(tenant_id)
+    if not overrides:
+        cached_overrides = _load_cached_dict(_system_settings_key(tenant_id))
+        if cached_overrides:
+            _save_system_settings_overrides_db(tenant_id, cached_overrides, updated_by=None)
+            overrides = cached_overrides
     settings = {**defaults, **overrides}
 
     routers_query = MikroTikRouter.query
@@ -5082,7 +5936,9 @@ def admin_system_settings_get():
     routers_down = routers_query.filter_by(is_active=False).count()
     routers_up = routers_query.filter_by(is_active=True).count()
 
-    jobs = _load_cached_list(_system_jobs_key(tenant_id))[:20]
+    jobs = _load_system_jobs_db(tenant_id)[:20]
+    if not jobs:
+        jobs = _load_cached_list(_system_jobs_key(tenant_id))[:20]
     return jsonify(
         {
             "settings": settings,
@@ -5098,7 +5954,7 @@ def admin_system_settings_get():
 
 
 @main_bp.route('/admin/system/settings', methods=['POST'])
-@admin_required()
+@permission_required('system.settings.write')
 def admin_system_settings_update():
     tenant_id = current_tenant_id()
     data = request.get_json() or {}
@@ -5119,7 +5975,9 @@ def admin_system_settings_update():
         "metrics_poll_interval_sec": (15, 3600),
     }
 
-    overrides = _load_cached_dict(_system_settings_key(tenant_id))
+    overrides = _load_system_settings_overrides_db(tenant_id)
+    if not overrides:
+        overrides = _load_cached_dict(_system_settings_key(tenant_id))
     for key_name, key_type in allowed.items():
         if key_name not in incoming:
             continue
@@ -5146,6 +6004,7 @@ def admin_system_settings_update():
                 ), 400
             overrides[key_name] = text_value
 
+    _save_system_settings_overrides_db(tenant_id, overrides, updated_by=_current_user_id())
     _save_cached_dict(_system_settings_key(tenant_id), overrides)
     settings = {**_default_system_settings(), **overrides}
     _audit("system_settings_update", entity_type="system_settings", metadata={"changes": list(incoming.keys())})
@@ -5153,10 +6012,9 @@ def admin_system_settings_update():
 
 
 @main_bp.route('/admin/system/jobs/history', methods=['GET'])
-@admin_required()
+@permission_required('system.jobs.read')
 def admin_system_jobs_history():
     tenant_id = current_tenant_id()
-    jobs = _load_cached_list(_system_jobs_key(tenant_id))
     try:
         limit = int(request.args.get('limit', 50) or 50)
     except Exception:
@@ -5171,11 +6029,14 @@ def admin_system_jobs_history():
     status_filter = str(request.args.get('status') or '').strip().lower()
     job_filter = str(request.args.get('job') or '').strip().lower()
 
-    filtered = jobs
-    if status_filter:
-        filtered = [item for item in filtered if str(item.get('status') or '').lower() == status_filter]
-    if job_filter:
-        filtered = [item for item in filtered if str(item.get('job') or '').lower() == job_filter]
+    filtered = _load_system_jobs_db(tenant_id, status_filter=status_filter, job_filter=job_filter)
+    if not filtered:
+        jobs = _load_cached_list(_system_jobs_key(tenant_id))
+        filtered = jobs
+        if status_filter:
+            filtered = [item for item in filtered if str(item.get('status') or '').lower() == status_filter]
+        if job_filter:
+            filtered = [item for item in filtered if str(item.get('job') or '').lower() == job_filter]
 
     page = filtered[offset:offset + limit]
     return jsonify(
@@ -5191,7 +6052,7 @@ def admin_system_jobs_history():
 
 
 @main_bp.route('/admin/system/jobs/run', methods=['POST'])
-@admin_required()
+@permission_required('system.jobs.run')
 def admin_system_jobs_run():
     tenant_id = current_tenant_id()
     data = request.get_json() or {}
