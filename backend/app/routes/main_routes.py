@@ -2980,7 +2980,7 @@ def admin_router_usage():
 @admin_required()
 def admin_list_clients():
     tenant_id = current_tenant_id()
-    query = Client.query.options(joinedload(Client.plan))
+    query = Client.query.options(joinedload(Client.plan), joinedload(Client.user))
     if tenant_id is not None:
         query = query.filter_by(tenant_id=tenant_id)
     clients = []
@@ -2995,6 +2995,8 @@ def admin_list_clients():
             "plan_id": c.plan_id,
             "router_id": c.router_id,
             "status": status,
+            "email": c.user.email if c.user else None,
+            "portal_access": bool(c.user_id),
         })
     return jsonify({"items": clients, "count": len(clients)}), 200
 
@@ -3008,6 +3010,11 @@ def admin_create_client():
     connection_type = (data.get('connection_type') or 'pppoe').strip().lower()
     plan_id = data.get('plan_id')
     router_id = data.get('router_id')
+    email = (data.get('email') or '').strip().lower()
+    requested_password = str(data.get('password') or '').strip()
+    create_portal_access = _parse_bool(data.get('create_portal_access'))
+    if create_portal_access is None:
+        create_portal_access = bool(email)
     if not name:
         return jsonify({"error": "name es requerido"}), 400
     if not plan_id:
@@ -3022,6 +3029,32 @@ def admin_create_client():
             return jsonify({"error": "Router fuera del tenant"}), 403
         if plan.tenant_id not in (None, tenant_id):
             return jsonify({"error": "Plan fuera del tenant"}), 403
+
+    user = None
+    generated_password = None
+    if create_portal_access:
+        if not email:
+            return jsonify({"error": "email es requerido cuando create_portal_access=true"}), 400
+        if User.query.filter_by(email=email).first():
+            return jsonify({"error": "email ya existe"}), 409
+        generated_password = requested_password or secrets.token_urlsafe(12)
+        user = User(
+            name=name,
+            email=email,
+            role='client',
+            tenant_id=tenant_id,
+        )
+        user.set_password(generated_password)
+        db.session.add(user)
+
+    pppoe_username = (data.get('pppoe_username') or '').strip() or None
+    pppoe_password = (data.get('pppoe_password') or '').strip() or None
+    if connection_type == 'pppoe':
+        base = _slugify(name) or 'cliente'
+        if not pppoe_username:
+            pppoe_username = f"{base[:12]}{secrets.randbelow(9999):04d}"
+        if not pppoe_password:
+            pppoe_password = secrets.token_hex(4)
     client = Client(
         full_name=name,
         ip_address=ip,
@@ -3029,13 +3062,17 @@ def admin_create_client():
         plan_id=plan.id,
         router_id=router.id if router else None,
         tenant_id=tenant_id,
-        pppoe_username=data.get('pppoe_username'),
-        pppoe_password=data.get('pppoe_password'),
+        pppoe_username=pppoe_username,
+        pppoe_password=pppoe_password,
+        user=user,
     )
-    from app import db
     db.session.add(client)
     db.session.commit()
-    return jsonify({"client": client.to_dict()}), 201
+    payload = {"client": client.to_dict()}
+    if user:
+        payload["user"] = user.to_dict()
+        payload["password"] = generated_password
+    return jsonify(payload), 201
 
 
 # ==================== RED: SUSPENDER / ACTIVAR / CAMBIAR VELOCIDAD ====================

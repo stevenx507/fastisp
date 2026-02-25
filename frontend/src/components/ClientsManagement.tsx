@@ -22,6 +22,8 @@ interface Client {
   plan_id?: number | null
   router_id?: number | null
   status: ClientStatus
+  email?: string | null
+  portal_access?: boolean
 }
 
 interface Plan {
@@ -65,6 +67,9 @@ const ClientsManagement: React.FC = () => {
     connection_type: 'pppoe',
     pppoe_username: '',
     pppoe_password: '',
+    email: '',
+    password: '',
+    create_portal_access: true,
   })
 
   const load = async () => {
@@ -143,6 +148,10 @@ const ClientsManagement: React.FC = () => {
       toast.error('Nombre y plan son obligatorios')
       return
     }
+    if (form.create_portal_access && !form.email.trim()) {
+      toast.error('Email es obligatorio para acceso al portal cliente')
+      return
+    }
     setSaving(true)
     try {
       const payload = {
@@ -153,10 +162,25 @@ const ClientsManagement: React.FC = () => {
         connection_type: form.connection_type,
         pppoe_username: form.pppoe_username || undefined,
         pppoe_password: form.pppoe_password || undefined,
+        email: form.email.trim().toLowerCase() || undefined,
+        password: form.password || undefined,
+        create_portal_access: form.create_portal_access,
       }
-      const resp = await apiClient.post('/admin/clients', payload)
-      setClients((prev) => [...prev, resp.client as Client])
+      const resp = await apiClient.post('/admin/clients', payload) as {
+        client: Client
+        user?: { email?: string }
+        password?: string
+      }
+      const createdClient: Client = {
+        ...resp.client,
+        email: resp.user?.email || form.email.trim().toLowerCase() || null,
+        portal_access: Boolean(resp.user),
+      }
+      setClients((prev) => [...prev, createdClient])
       toast.success('Cliente creado')
+      if (resp.user?.email && resp.password) {
+        toast.success(`Portal: ${resp.user.email} | Password: ${resp.password}`)
+      }
       setShowModal(false)
       setForm({
         name: '',
@@ -166,6 +190,9 @@ const ClientsManagement: React.FC = () => {
         connection_type: 'pppoe',
         pppoe_username: '',
         pppoe_password: '',
+        email: '',
+        password: '',
+        create_portal_access: true,
       })
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'No se pudo crear el cliente')
@@ -257,6 +284,7 @@ const ClientsManagement: React.FC = () => {
                   <td className="px-6 py-4 text-sm font-medium text-gray-900">
                     {client.name}
                     <div className="text-xs text-gray-500">ID: {client.id}</div>
+                    {client.email && <div className="text-xs text-gray-500">{client.email}</div>}
                   </td>
                   <td className="px-6 py-4 text-sm text-gray-600">
                     <div>{client.ip_address || '—'}</div>
@@ -440,6 +468,39 @@ const ClientsManagement: React.FC = () => {
                     </div>
                   </div>
                 )}
+
+                <div className="mt-4 rounded-lg border border-gray-200 bg-gray-50 p-3">
+                  <label className="flex items-center gap-2 text-sm font-semibold text-gray-800">
+                    <input
+                      type="checkbox"
+                      checked={form.create_portal_access}
+                      onChange={(e) => setForm({ ...form, create_portal_access: e.target.checked })}
+                    />
+                    Crear acceso al portal cliente
+                  </label>
+                  <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-800">Email cliente</label>
+                      <input
+                        className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:ring-2 focus:ring-blue-500"
+                        value={form.email}
+                        onChange={(e) => setForm({ ...form, email: e.target.value })}
+                        placeholder="cliente@correo.com"
+                        disabled={!form.create_portal_access}
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-800">Password portal (opcional)</label>
+                      <input
+                        className="w-full rounded-lg border border-gray-300 px-3 py-2 focus:ring-2 focus:ring-blue-500"
+                        value={form.password}
+                        onChange={(e) => setForm({ ...form, password: e.target.value })}
+                        placeholder="Se genera automatico si lo dejas vacio"
+                        disabled={!form.create_portal_access}
+                      />
+                    </div>
+                  </div>
+                </div>
 
                 <div className="mt-4 flex items-center gap-2 text-sm text-gray-500">
                   <CreditCardIcon className="h-4 w-4" />
