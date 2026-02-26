@@ -10,7 +10,7 @@ from app.models import AdminSystemSetting, User
 
 def _build_wireguard_archive(
     endpoint: str = 'edge-router.fastisp.cloud:51820',
-    private_key: str = 'ABC123PRIVATE',
+    private_key: str = 'AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=',
 ) -> io.BytesIO:
     archive_buffer = io.BytesIO()
     with zipfile.ZipFile(archive_buffer, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
@@ -126,7 +126,7 @@ def test_quick_connect_marks_private_ip_for_tunnel_first(client, app, monkeypatc
     profile = payload.get('access_profile') or {}
     plan = payload.get('connection_plan') or {}
     assert profile.get('effective_scope') == 'private'
-    assert profile.get('recommended_transport') == 'wireguard_or_back_to_home'
+    assert profile.get('recommended_transport') == 'back_to_home_first'
     assert plan.get('status') == 'private_unreachable_needs_local_step'
     assert 'prioriza WireGuard/BTH' in str(payload['scripts']['direct_api_script'])
 
@@ -157,8 +157,8 @@ def test_quick_connect_allows_scope_override_to_public(client, app, monkeypatch)
     plan = payload.get('connection_plan') or {}
     assert profile.get('requested_scope') == 'public'
     assert profile.get('effective_scope') == 'public'
-    assert profile.get('recommended_transport') == 'direct_ssh_api'
-    assert plan.get('status') == 'direct_public'
+    assert profile.get('recommended_transport') == 'back_to_home_first_with_direct_fallback'
+    assert plan.get('status') == 'public_bth_first'
     assert payload['scripts']['windows_login'].startswith('ssh ')
 
 
@@ -241,8 +241,8 @@ def test_wireguard_profile_routes_and_quick_connect_use_tenant_profile(client, a
     wg_profile = quick_payload.get('wireguard_profile') or {}
     assert wg_profile.get('ready') is True
     assert wg_profile.get('endpoint') == '187.77.47.232:51820'
-    assert 'endpoint-address=187.77.47.232' in str(quick_payload['scripts']['wireguard_site_to_vps_script'])
-    assert 'public-key="UkoIc1YP0iCZ0b/NGp39zhaLU02HfKI8aU+C2jp591M="' in str(quick_payload['scripts']['wireguard_site_to_vps_script'])
+    assert ':local wgEndpoint "187.77.47.232"' in str(quick_payload['scripts']['wireguard_site_to_vps_script'])
+    assert ':local wgServerKey "UkoIc1YP0iCZ0b/NGp39zhaLU02HfKI8aU+C2jp591M="' in str(quick_payload['scripts']['wireguard_site_to_vps_script'])
 
 
 class _DummyRouterOsResource:
@@ -564,7 +564,7 @@ def test_back_to_home_actions_require_confirmation(client, app):
 
     add_user_response = client.post(
         f'/api/mikrotik/routers/{router_id}/back-to-home/users/add',
-        json={'confirm': True, 'user_name': 'noc-vps', 'change_ticket': 'CHG-BTH-002', 'preflight_ack': True},
+        json={'user_name': 'noc-vps', 'change_ticket': 'CHG-BTH-002', 'preflight_ack': True},
         headers=headers,
     )
     assert add_user_response.status_code == 400
@@ -933,8 +933,40 @@ def test_wireguard_zip_import_returns_onboarding_suggestions(client, app):
     assert payload['success'] is True
     assert payload['wireguard']['endpoint_host'] == 'edge-router.fastisp.cloud'
     assert payload['wireguard']['endpoint_port'] == 51820
-    assert payload['suggestions']['router_ip_or_host'] == 'edge-router.fastisp.cloud'
-    assert payload['suggestions']['bth_private_key'] == 'ABC123PRIVATE'
+    assert payload['suggestions']['router_ip_or_host'] == '10.66.66.2'
+    assert payload['suggestions']['router_tunnel_ip'] == '10.66.66.2'
+    assert payload['suggestions']['bth_private_key'] == 'AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE='
+
+
+def test_wireguard_import_supports_qr_config_text_payload(client, app):
+    headers = _admin_headers(client, app)
+    response = client.post(
+        '/api/mikrotik/wireguard/import',
+        data={
+            'source_name': 'bth-qr.txt',
+            'config_text': '\n'.join(
+                [
+                    '[Interface]',
+                    'PrivateKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=',
+                    'Address = 10.250.8.2/32',
+                    '',
+                    '[Peer]',
+                    'PublicKey = UkoIc1YP0iCZ0b/NGp39zhaLU02HfKI8aU+C2jp591M=',
+                    'Endpoint = 187.77.47.232:51820',
+                    'AllowedIPs = 10.250.0.0/16',
+                    'PersistentKeepalive = 25',
+                ]
+            ),
+        },
+        headers=headers,
+        content_type='multipart/form-data',
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['success'] is True
+    assert payload['source_file'] == 'bth-qr.txt'
+    assert payload['wireguard']['endpoint_host'] == '187.77.47.232'
+    assert payload['suggestions']['router_ip_or_host'] == '10.250.8.2'
 
 
 def test_wireguard_zip_import_requires_archive_file(client, app):
@@ -946,7 +978,7 @@ def test_wireguard_zip_import_requires_archive_file(client, app):
         content_type='multipart/form-data',
     )
     assert response.status_code == 400
-    assert 'archive file is required' in str(response.get_json().get('error', ''))
+    assert 'archive file or config_text is required' in str(response.get_json().get('error', ''))
 
 
 def test_router_readiness_endpoint_returns_payload(client, app, monkeypatch):
@@ -1039,7 +1071,7 @@ def test_wireguard_onboard_creates_router_and_bootstraps_bth(client, app, monkey
     payload = response.get_json()
     assert payload['success'] is True
     assert payload['created'] is True
-    assert payload['router']['ip_address'] == 'edge-router.fastisp.cloud'
+    assert payload['router']['ip_address'] == '10.66.66.2'
     assert payload['readiness']['score'] == 92
     assert payload['bootstrap']['user_name'] == 'noc-vps'
     assert payload['bootstrap']['success'] is True
@@ -1067,7 +1099,7 @@ def test_wireguard_onboard_updates_existing_router(client, app, monkeypatch):
         '/api/mikrotik/routers',
         json={
             'name': 'Nodo-Existente',
-            'ip_address': 'edge-router.fastisp.cloud',
+            'ip_address': '10.66.66.2',
             'username': 'old-user',
             'password': 'old-pass',
             'api_port': 8728,
@@ -1099,13 +1131,80 @@ def test_wireguard_onboard_updates_existing_router(client, app, monkeypatch):
     assert payload['router']['name'] == 'Nodo-Actualizado'
 
 
+def test_wireguard_onboard_auto_links_vps_from_config_without_api(client, app, monkeypatch):
+    headers = _admin_headers(client, app)
+    monkeypatch.setattr(mikrotik_routes, 'MikroTikService', _DummyMikrotikOnboardNoApiService)
+    monkeypatch.setattr(
+        mikrotik_routes,
+        '_build_router_readiness_payload',
+        lambda _service, run_write_probe=False: {
+            'score': 10,
+            'checks': [{'id': 'api_connectivity', 'ok': False, 'severity': 'critical'}],
+            'blockers': [{'id': 'api_connectivity', 'detail': 'unreachable'}],
+            'recommendations': [],
+            'runtime': {'reachable': False},
+            'write_probe_enabled': bool(run_write_probe),
+        },
+    )
+
+    trace = {}
+
+    def _fake_sync(peer_public_key, allowed_ip, payload):
+        trace['peer_public_key'] = peer_public_key
+        trace['allowed_ip'] = allowed_ip
+        trace['payload'] = payload
+        return {
+            'success': True,
+            'mode': 'local',
+            'message': 'Peer registrado en VPS localmente.',
+            'manual_required': False,
+            'manual_command': '',
+            'attempts': [{'transport': 'local', 'success': True}],
+            'runtime': {'mode': 'local', 'vps_interface': 'wg0'},
+        }
+
+    monkeypatch.setattr(mikrotik_routes, '_sync_router_peer_to_vps', _fake_sync)
+
+    response = client.post(
+        '/api/mikrotik/wireguard/onboard',
+        data={
+            'source_name': 'bth-qr.txt',
+            'config_text': '\n'.join(
+                [
+                    '[Interface]',
+                    'PrivateKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=',
+                    'Address = 10.250.8.2/32',
+                    '',
+                    '[Peer]',
+                    'PublicKey = UkoIc1YP0iCZ0b/NGp39zhaLU02HfKI8aU+C2jp591M=',
+                    'Endpoint = 187.77.47.232:51820',
+                    'AllowedIPs = 10.250.0.0/16',
+                ]
+            ),
+            'username': 'api-admin',
+            'password': 'router-pass',
+            'api_port': '8728',
+            'auto_vps_link': 'true',
+            'write_probe': 'false',
+        },
+        headers=headers,
+        content_type='multipart/form-data',
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['success'] is True
+    assert payload['vps_sync']['success'] is True
+    assert payload['wireguard_router_identity']['success'] is True
+    assert trace['allowed_ip'] == '10.250.8.2/32'
+
+
 def test_wireguard_onboard_returns_conflict_if_router_exists_and_update_disabled(client, app):
     headers = _admin_headers(client, app)
     create_response = client.post(
         '/api/mikrotik/routers',
         json={
             'name': 'Nodo-Existente-Conflict',
-            'ip_address': 'edge-router.fastisp.cloud',
+            'ip_address': '10.66.66.2',
             'username': 'old-user',
             'password': 'old-pass',
             'api_port': 8728,
@@ -1162,7 +1261,7 @@ def test_wireguard_onboard_normalizes_ip_with_port(client, app, monkeypatch):
     payload = response.get_json()
     assert payload['success'] is True
     assert payload['router']['ip_address'] == '172.16.0.1'
-    assert payload['router']['api_port'] == 8728
+    assert 'api_port' not in payload['router']
 
 
 def test_wireguard_onboard_keeps_router_when_bootstrap_unreachable(client, app, monkeypatch):

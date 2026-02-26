@@ -271,6 +271,7 @@ interface WireGuardImportSuggestions {
   api_port?: number
   bth_private_key?: string
   bth_user_name?: string
+  router_tunnel_ip?: string | null
 }
 
 interface WireGuardImportResponse {
@@ -318,6 +319,7 @@ interface WireGuardOnboardResponse {
   router?: unknown
   readiness?: RouterReadinessPayload
   bootstrap?: RouterBackToHomeBootstrapData
+  vps_sync?: RouterWireGuardRegisterVpsSync
 }
 
 interface RouterFormState {
@@ -355,6 +357,33 @@ const copyToClipboard = async (value: string): Promise<boolean> => {
     const copied = document.execCommand('copy')
     document.body.removeChild(textarea)
     return copied
+  }
+}
+
+const isQrImageFile = (file: File): boolean => {
+  const loweredName = String(file.name || '').toLowerCase()
+  const imageByExt = /\.(png|jpe?g|webp|bmp|gif)$/i.test(loweredName)
+  return String(file.type || '').startsWith('image/') || imageByExt
+}
+
+const decodeWireGuardQrFromImage = async (file: File): Promise<string> => {
+  const detectorCtor = (window as Window & { BarcodeDetector?: any }).BarcodeDetector
+  if (!detectorCtor) {
+    throw new Error('Tu navegador no soporta lectura QR local. Usa Chrome/Edge actual o importa .zip/.conf.')
+  }
+  const detector = new detectorCtor({ formats: ['qr_code'] })
+  const bitmap = await createImageBitmap(file)
+  try {
+    const results = await detector.detect(bitmap)
+    const payload = String(results?.[0]?.rawValue || '').trim()
+    if (!payload) {
+      throw new Error('No se detecto un QR valido en la imagen.')
+    }
+    return payload
+  } finally {
+    if (typeof (bitmap as ImageBitmap).close === 'function') {
+      ;(bitmap as ImageBitmap).close()
+    }
   }
 }
 
@@ -856,13 +885,27 @@ const MikroTikManagement: React.FC = () => {
     }
   }
 
+  const appendWireGuardSourceToFormData = useCallback(
+    async (formData: FormData, sourceFile: File): Promise<'archive' | 'qr'> => {
+      if (!isQrImageFile(sourceFile)) {
+        formData.append('archive', sourceFile)
+        return 'archive'
+      }
+      const qrPayload = await decodeWireGuardQrFromImage(sourceFile)
+      formData.append('config_text', qrPayload)
+      formData.append('source_name', sourceFile.name || 'wireguard-qr.png')
+      return 'qr'
+    },
+    []
+  )
+
   const importWireGuardArchive = useCallback(
     async (archiveFile: File) => {
       if (!archiveFile) return
       setWireGuardImporting(true)
       try {
         const formData = new FormData()
-        formData.append('archive', archiveFile)
+        const sourceKind = await appendWireGuardSourceToFormData(formData, archiveFile)
         const response = await apiFetch('/api/mikrotik/wireguard/import', {
           method: 'POST',
           body: formData,
@@ -891,7 +934,7 @@ const MikroTikManagement: React.FC = () => {
           setBthUserName(importedBthUser)
         }
 
-        addToast('success', `WireGuard importado: ${payload.source_file || archiveFile.name}`)
+        addToast('success', sourceKind === 'qr' ? `QR importado: ${payload.source_file || archiveFile.name}` : `WireGuard importado: ${payload.source_file || archiveFile.name}`)
       } catch (error) {
         console.error('Error importing WireGuard archive:', error)
         const message = error instanceof Error ? error.message : ''
@@ -904,7 +947,7 @@ const MikroTikManagement: React.FC = () => {
         setWireGuardImporting(false)
       }
     },
-    [addToast, apiFetch, bthPrivateKey, bthUserName, safeJson]
+    [addToast, apiFetch, appendWireGuardSourceToFormData, bthPrivateKey, bthUserName, safeJson]
   )
 
   const onboardRouterFromWireGuardArchive = useCallback(
@@ -926,15 +969,18 @@ const MikroTikManagement: React.FC = () => {
       setWireGuardOnboarding(true)
       try {
         const formData = new FormData()
-        formData.append('archive', archiveFile)
+        const sourceKind = await appendWireGuardSourceToFormData(formData, archiveFile)
         if (routerForm.name.trim()) formData.append('name', routerForm.name.trim())
         if (routerForm.ip_address.trim()) formData.append('ip_address', routerForm.ip_address.trim())
         formData.append('username', routerForm.username.trim())
         formData.append('password', routerForm.password)
         formData.append('api_port', String(Number(routerForm.api_port || '8728')))
         formData.append('write_probe', wireGuardWriteProbe ? 'true' : 'false')
-        formData.append('bootstrap_bth', wireGuardBootstrapOnboard ? 'true' : 'false')
-        if (wireGuardBootstrapOnboard) {
+        formData.append('auto_vps_link', 'true')
+
+        const shouldBootstrapBth = wireGuardBootstrapOnboard && sourceKind !== 'qr'
+        formData.append('bootstrap_bth', shouldBootstrapBth ? 'true' : 'false')
+        if (shouldBootstrapBth) {
           formData.append('bth_user_name', bthUserName.trim() || 'noc-vps')
           if (bthPrivateKey.trim()) formData.append('bth_private_key', bthPrivateKey.trim())
           formData.append('bth_allow_lan', bthAllowLan ? 'true' : 'false')
@@ -957,6 +1003,16 @@ const MikroTikManagement: React.FC = () => {
           setBootstrapResult(payload.bootstrap)
           if (payload.bootstrap.success === false) {
             addToast('error', payload.bootstrap.error || 'Bootstrap automatico no pudo ejecutarse por API')
+          }
+        }
+        if (payload.vps_sync) {
+          if (payload.vps_sync.success) {
+            addToast('success', `Vinculacion VPS completada (${payload.vps_sync.mode || 'auto'})`)
+          } else if (payload.vps_sync.manual_command) {
+            await copyToClipboard(String(payload.vps_sync.manual_command || ''))
+            addToast('error', `${payload.vps_sync.message || 'No se pudo vincular en VPS'}. Comando manual copiado.`)
+          } else if (payload.vps_sync.message) {
+            addToast('error', payload.vps_sync.message)
           }
         }
         setWireGuardImportSummary({
@@ -1005,6 +1061,7 @@ const MikroTikManagement: React.FC = () => {
       safeJson,
       wireGuardBootstrapOnboard,
       wireGuardWriteProbe,
+      appendWireGuardSourceToFormData,
     ]
   )
 
@@ -1187,8 +1244,6 @@ const MikroTikManagement: React.FC = () => {
           allow_lan: bthAllowLan,
           fast_link_vps: true,
         }
-        const privateKey = bthPrivateKey.trim()
-        if (privateKey) payloadBody.private_key = privateKey
         const response = await apiFetch(`/api/mikrotik/routers/${selectedRouter.id}/back-to-home/bootstrap`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1256,24 +1311,15 @@ const MikroTikManagement: React.FC = () => {
       }
     }
 
-    const profile = quickConnect.access_profile?.effective_scope || 'private'
     const reachable = Boolean(quickConnect.back_to_home?.reachable)
 
-    const baseSteps: ExpressStepState[] = profile === 'public'
-      ? [
-          { id: 'direct_acl', label: 'Aplicar ACL directa', status: 'pending' },
-          { id: 'verify_direct', label: 'Validar acceso directo', status: 'pending' },
-          { id: 'wg_tunnel', label: 'Fallback WireGuard', status: 'pending' },
-          { id: 'wg_register_peer', label: 'Registrar peer en VPS', status: 'pending' },
-          { id: 'verify_wg', label: 'Validar tunel WireGuard', status: 'pending' },
-          { id: 'bth_bootstrap', label: 'Fallback BTH', status: 'pending' },
-        ]
-      : [
-          { id: 'wg_tunnel', label: 'Aplicar tunel WireGuard', status: 'pending' },
-          { id: 'wg_register_peer', label: 'Registrar peer en VPS', status: 'pending' },
-          { id: 'verify_wg', label: 'Validar tunel WireGuard', status: 'pending' },
-          { id: 'bth_bootstrap', label: 'Fallback BTH', status: 'pending' },
-        ]
+    const baseSteps: ExpressStepState[] = [
+      { id: 'bth_bootstrap', label: 'Back To Home automatico', status: 'pending' },
+      { id: 'verify_bth', label: 'Validar operacion BTH', status: 'pending' },
+      { id: 'wg_tunnel', label: 'WireGuard opcional', status: 'pending' },
+      { id: 'wg_register_peer', label: 'Registrar peer en VPS', status: 'pending' },
+      { id: 'verify_wg', label: 'Validar tunel WireGuard', status: 'pending' },
+    ]
     setExpressSteps(baseSteps)
     setExpressConnecting(true)
 
@@ -1284,24 +1330,29 @@ const MikroTikManagement: React.FC = () => {
             id: 'manual_local',
             label: 'Paso local requerido',
             status: 'failed',
-            detail: 'Router no alcanzable por API. Ejecuta script minimo BTH local y vuelve a intentar.',
+            detail: 'Router no alcanzable por API. Importa QR BTH o ejecuta script minimo local y vuelve a intentar.',
           },
         ])
         const minimalScript = quickConnect.scripts.bth_enable_minimal_script || ''
         if (minimalScript) {
           await copyToClipboard(minimalScript)
         }
-        addToast('error', 'Router no alcanzable. Copie script minimo BTH para ejecutar en WinBox.')
+        addToast('error', 'Router no alcanzable. Importa QR BTH o ejecuta script minimo en WinBox.')
         return
       }
 
       let connected = false
 
-      if (profile === 'public') {
-        const directOk = await executeScriptStep('direct_acl', 'ACL directa', quickConnect.scripts.direct_api_script || '')
-        if (directOk) {
-          connected = await testConnectionStep('verify_direct', 'Conexion directa operativa')
+      const bthResult = await bootstrapBthStep('bth_bootstrap')
+      if (bthResult.ok) {
+        if (bthResult.operational) {
+          updateStep('verify_bth', 'success', 'Back To Home operativo y vinculado al sistema')
+          connected = true
+        } else {
+          connected = await testConnectionStep('verify_bth', 'Conexion operativa tras BTH')
         }
+      } else {
+        updateStep('verify_bth', 'failed', bthResult.detail)
       }
 
       if (!connected) {
@@ -1321,20 +1372,6 @@ const MikroTikManagement: React.FC = () => {
         updateStep('wg_tunnel', 'skipped', 'No requerido')
         updateStep('wg_register_peer', 'skipped', 'No requerido')
         updateStep('verify_wg', 'skipped', 'No requerido')
-      }
-
-      if (!connected) {
-        const bthResult = await bootstrapBthStep('bth_bootstrap')
-        if (bthResult.ok) {
-          if (bthResult.operational) {
-            updateStep('verify_wg', 'success', 'Back To Home operativo y vinculado al sistema')
-            connected = true
-          } else {
-            connected = await testConnectionStep('verify_wg', 'Conexion operativa tras BTH')
-          }
-        }
-      } else {
-        updateStep('bth_bootstrap', 'skipped', 'No requerido')
       }
 
       if (connected) {
@@ -1389,8 +1426,6 @@ const MikroTikManagement: React.FC = () => {
         allow_lan: bthAllowLan,
         comment: 'FastISP VPS',
       }
-      const privateKey = bthPrivateKey.trim()
-      if (privateKey) payloadBody.private_key = privateKey
       const response = await apiFetch(`/api/mikrotik/routers/${selectedRouter.id}/back-to-home/users/add`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1460,8 +1495,6 @@ const MikroTikManagement: React.FC = () => {
         fast_link_vps: true,
         comment: 'FastISP VPS',
       }
-      const privateKey = bthPrivateKey.trim()
-      if (privateKey) payloadBody.private_key = privateKey
       const response = await apiFetch(`/api/mikrotik/routers/${selectedRouter.id}/back-to-home/bootstrap`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1589,9 +1622,9 @@ const MikroTikManagement: React.FC = () => {
         <div className="mb-3 rounded-lg border border-blue-200 bg-blue-50 p-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
-              <p className="text-xs font-semibold uppercase tracking-wide text-blue-800">Importar WireGuard</p>
+              <p className="text-xs font-semibold uppercase tracking-wide text-blue-800">Importar QR / WireGuard</p>
               <p className="text-xs text-blue-700">
-                Carga ZIP/CONF exportado para autocompletar host del router. La private key BTH ahora puede ser automatica por tenant.
+                Sube QR en imagen o ZIP/CONF para autocompletar tunel y vincular rapido. Back To Home usa identidad automatica por tenant.
               </p>
             </div>
             <button
@@ -1599,26 +1632,26 @@ const MikroTikManagement: React.FC = () => {
               disabled={wireGuardOnboarding}
               className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-60"
             >
-              {wireGuardOnboarding ? 'Conectando...' : 'Importar + conexion auto'}
+              {wireGuardOnboarding ? 'Conectando...' : 'QR/ZIP + conexion auto'}
             </button>
             <button
               onClick={handleWireGuardFilePick}
               disabled={wireGuardImporting}
               className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
             >
-              {wireGuardImporting ? 'Importando...' : 'Solo previsualizar ZIP'}
+              {wireGuardImporting ? 'Importando...' : 'Solo leer QR/ZIP'}
             </button>
             <input
               ref={wireGuardFileInputRef}
               type="file"
-              accept=".zip,.conf,.cfg,.txt"
+              accept=".zip,.conf,.cfg,.txt,image/png,image/jpeg,image/webp,image/bmp"
               className="hidden"
               onChange={handleWireGuardFileChange}
             />
             <input
               ref={wireGuardOnboardFileInputRef}
               type="file"
-              accept=".zip,.conf,.cfg,.txt"
+              accept=".zip,.conf,.cfg,.txt,image/png,image/jpeg,image/webp,image/bmp"
               className="hidden"
               onChange={handleWireGuardOnboardFileChange}
             />
@@ -1979,20 +2012,13 @@ const MikroTikManagement: React.FC = () => {
                               <div className="mt-2 rounded border border-emerald-200 bg-white p-3">
                                 <p className="text-xs font-semibold uppercase text-emerald-800">Paso 2: Ejecutar conexion</p>
                                 <p className="mt-1 text-xs text-emerald-700">
-                                  Conexion Express intenta directo, luego WireGuard y por ultimo BTH si hace falta.
+                                  Conexion Express intenta Back To Home primero y usa WireGuard solo como opcion de respaldo.
                                 </p>
-                                <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-2">
+                                <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-1">
                                   <input
                                     value={bthUserName}
                                     onChange={(e) => setBthUserName(e.target.value)}
                                     placeholder="Usuario BTH (ej: noc-vps)"
-                                    className="rounded border border-emerald-300 px-2 py-1 text-xs text-gray-900"
-                                  />
-                                  <input
-                                    type="password"
-                                    value={bthPrivateKey}
-                                    onChange={(e) => setBthPrivateKey(e.target.value)}
-                                    placeholder="Private key WireGuard del VPS (opcional: vacio = automatica por tenant)"
                                     className="rounded border border-emerald-300 px-2 py-1 text-xs text-gray-900"
                                   />
                                 </div>
@@ -2006,13 +2032,9 @@ const MikroTikManagement: React.FC = () => {
                                   Permitir acceso LAN en fallback BTH
                                 </label>
                                 <p className="mt-2 text-xs text-emerald-700">
-                                  Llave VPS:{' '}
+                                  Identidad BTH:{' '}
                                   <strong>
-                                    {bthPrivateKey.trim()
-                                      ? 'manual'
-                                      : quickConnect.back_to_home?.managed_identity?.enabled
-                                        ? 'automatica por tenant'
-                                        : 'automatica pendiente'}
+                                    {quickConnect.back_to_home?.managed_identity?.enabled ? 'automatica por tenant' : 'pendiente'}
                                   </strong>
                                 </p>
                                 <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -2232,18 +2254,11 @@ const MikroTikManagement: React.FC = () => {
                                 Bootstrap 1 clic aplica DDNS + BTH + usuario VPS. "Solo habilitar" mantiene el flujo manual.
                               </p>
 
-                              <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-2">
+                              <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-1">
                                 <input
                                   value={bthUserName}
                                   onChange={(e) => setBthUserName(e.target.value)}
                                   placeholder="Usuario BTH (ej: noc-vps)"
-                                  className="rounded border border-gray-300 px-2 py-1 text-xs text-gray-900"
-                                />
-                                <input
-                                  type="password"
-                                  value={bthPrivateKey}
-                                  onChange={(e) => setBthPrivateKey(e.target.value)}
-                                  placeholder="Private key WireGuard del VPS (opcional: vacio = automatica por tenant)"
                                   className="rounded border border-gray-300 px-2 py-1 text-xs text-gray-900"
                                 />
                               </div>
@@ -2258,13 +2273,9 @@ const MikroTikManagement: React.FC = () => {
                                 Permitir acceso LAN desde este usuario BTH
                               </label>
                               <p className="mt-2 text-xs text-gray-600">
-                                Llave VPS:{' '}
+                                Identidad BTH:{' '}
                                 <strong>
-                                  {bthPrivateKey.trim()
-                                    ? 'manual'
-                                    : quickConnect.back_to_home?.managed_identity?.enabled
-                                      ? 'automatica por tenant'
-                                      : 'automatica pendiente'}
+                                  {quickConnect.back_to_home?.managed_identity?.enabled ? 'automatica por tenant' : 'automatica pendiente'}
                                 </strong>
                               </p>
 

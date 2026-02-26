@@ -23,6 +23,7 @@ import base64
 import binascii
 import shlex
 import subprocess
+from urllib.parse import parse_qs, unquote, urlparse
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import x25519
@@ -46,6 +47,7 @@ WG_PROFILE_ALLOWED_SUBNETS_DEFAULT = '10.250.0.0/16,10.251.0.0/16'
 WG_PROFILE_SERVER_PUBLIC_KEY_PLACEHOLDER = '<WIREGUARD_SERVER_PUBLIC_KEY>'
 WG_VPS_SYNC_MODE_DEFAULT = 'auto'
 WG_VPS_INTERFACE_DEFAULT = 'wg0'
+QR_SOURCE_DEFAULT_NAME = 'wireguard-qr.txt'
 
 
 def _decode_text_payload(raw_payload: bytes) -> str:
@@ -135,6 +137,139 @@ def _parse_wireguard_config(config_text: str) -> Dict[str, Any]:
         'endpoint': endpoint_payload.get('endpoint', ''),
         'endpoint_host': endpoint_payload.get('host', ''),
         'endpoint_port': endpoint_payload.get('port'),
+    }
+
+
+def _first_wireguard_interface_host(parsed_config: Dict[str, Any]) -> str:
+    addresses = parsed_config.get('interface_addresses')
+    if not isinstance(addresses, list):
+        return ''
+    for raw_address in addresses:
+        candidate = str(raw_address or '').strip()
+        if not candidate:
+            continue
+        if '/' in candidate:
+            try:
+                return str(ipaddress.ip_interface(candidate).ip)
+            except ValueError:
+                continue
+        try:
+            return str(ipaddress.ip_address(candidate))
+        except ValueError:
+            continue
+    return ''
+
+
+def _first_wireguard_interface_ip(parsed_config: Dict[str, Any]) -> str:
+    addresses = parsed_config.get('interface_addresses')
+    if not isinstance(addresses, list):
+        return ''
+    for raw_address in addresses:
+        normalized = _normalize_wg_allowed_ip(raw_address)
+        if normalized:
+            return normalized
+    return ''
+
+
+def _wireguard_config_from_uri(raw_payload: str) -> str:
+    uri = str(raw_payload or '').strip()
+    parsed = urlparse(uri)
+    query_pairs = parse_qs(parsed.query, keep_blank_values=True)
+    normalized_query: Dict[str, str] = {}
+    for key, values in query_pairs.items():
+        if not values:
+            continue
+        normalized_key = re.sub(r'[^a-z0-9]+', '', str(key).lower())
+        normalized_query[normalized_key] = str(values[0] or '').strip()
+
+    def _pick(*keys: str) -> str:
+        for key in keys:
+            normalized_key = re.sub(r'[^a-z0-9]+', '', str(key).lower())
+            value = str(normalized_query.get(normalized_key) or '').strip()
+            if value:
+                return value
+        return ''
+
+    interface_private_key = _pick('private_key', 'privatekey', 'interface_private_key')
+    peer_public_key = _pick('public_key', 'publickey', 'peer_public_key', 'server_public_key')
+    endpoint = _pick('endpoint', 'endpoint_address', 'server')
+    endpoint_port = _pick('endpoint_port', 'port')
+    if endpoint and endpoint_port and ':' not in endpoint:
+        endpoint = f'{endpoint}:{endpoint_port}'
+    interface_address = _pick('address', 'addresses', 'interface_address')
+    interface_dns = _pick('dns')
+    allowed_ips = _pick('allowed_ips', 'allowedips')
+    persistent_keepalive = _pick('persistent_keepalive', 'persistentkeepalive', 'keepalive')
+
+    if not interface_private_key or not peer_public_key:
+        raise ValueError('WireGuard URI is missing private/public key fields')
+
+    lines = [
+        '[Interface]',
+        f'PrivateKey = {interface_private_key}',
+    ]
+    if interface_address:
+        lines.append(f'Address = {interface_address}')
+    if interface_dns:
+        lines.append(f'DNS = {interface_dns}')
+
+    lines.extend(
+        [
+            '',
+            '[Peer]',
+            f'PublicKey = {peer_public_key}',
+        ]
+    )
+    if endpoint:
+        lines.append(f'Endpoint = {endpoint}')
+    if allowed_ips:
+        lines.append(f'AllowedIPs = {allowed_ips}')
+    if persistent_keepalive:
+        lines.append(f'PersistentKeepalive = {persistent_keepalive}')
+    return '\n'.join(lines) + '\n'
+
+
+def _normalize_wireguard_config_text(raw_payload: str) -> str:
+    payload_text = str(raw_payload or '').strip()
+    if not payload_text:
+        raise ValueError('WireGuard config text is empty')
+
+    decoded = unquote(payload_text)
+    candidate_texts = [decoded, payload_text]
+    for candidate in candidate_texts:
+        lowered = str(candidate or '').lower()
+        if '[interface]' in lowered and '[peer]' in lowered:
+            return str(candidate)
+
+    uri_text = decoded if decoded.lower().startswith(('wireguard://', 'wg://')) else payload_text
+    if str(uri_text).lower().startswith(('wireguard://', 'wg://')):
+        return _wireguard_config_from_uri(uri_text)
+
+    raise ValueError('WireGuard config text is not valid')
+
+
+def _router_wireguard_identity_from_parsed_config(parsed_config: Dict[str, Any], router_id: Any) -> Dict[str, Any]:
+    private_key = str(parsed_config.get('interface_private_key') or '').strip()
+    if not private_key:
+        return {'success': False, 'error': 'WireGuard config does not include interface private key'}
+    try:
+        public_key = _wireguard_public_key_from_private_base64(private_key)
+    except Exception as exc:
+        return {'success': False, 'error': f'Invalid interface private key in config: {exc}'}
+
+    selected_peer_ip = _first_wireguard_interface_ip(parsed_config) or _safe_router_wireguard_allowed_ip(router_id)
+    selected_peer_ip = _normalize_wg_allowed_ip(selected_peer_ip)
+    if not selected_peer_ip:
+        selected_peer_ip = _safe_router_wireguard_allowed_ip(router_id)
+
+    addresses = parsed_config.get('interface_addresses') if isinstance(parsed_config.get('interface_addresses'), list) else []
+    return {
+        'success': True,
+        'interface_name': 'wg-fastisp',
+        'public_key': public_key,
+        'addresses': addresses,
+        'selected_peer_ip': selected_peer_ip,
+        'source': 'wireguard_config',
     }
 
 
@@ -724,7 +859,9 @@ def _build_access_profile(host_value: str, requested_scope_raw: Any) -> Dict[str
         final_scope = 'private'
         reason = 'Sin clasificacion IP exacta; se recomienda tunel seguro (WireGuard/BTH).'
 
-    recommended_transport = 'direct_ssh_api' if final_scope == 'public' else 'wireguard_or_back_to_home'
+    recommended_transport = 'back_to_home_first'
+    if final_scope == 'public':
+        recommended_transport = 'back_to_home_first_with_direct_fallback'
     allows_direct_inbound = final_scope == 'public'
 
     return {
@@ -741,7 +878,7 @@ def _build_access_profile(host_value: str, requested_scope_raw: Any) -> Dict[str
 
 def _build_connection_plan(access_profile: Dict[str, Any], back_to_home: Dict[str, Any]) -> Dict[str, Any]:
     effective_scope = str(access_profile.get('effective_scope') or 'private')
-    recommended_transport = str(access_profile.get('recommended_transport') or 'wireguard_or_back_to_home')
+    recommended_transport = str(access_profile.get('recommended_transport') or 'back_to_home_first')
     reachable = bool(back_to_home.get('reachable'))
     supports_bth = back_to_home.get('supported')
     supports_bth_users = back_to_home.get('bth_users_supported')
@@ -752,29 +889,29 @@ def _build_connection_plan(access_profile: Dict[str, Any], back_to_home: Dict[st
     actions: List[Dict[str, Any]] = []
 
     if effective_scope == 'public':
-        status = 'direct_public'
-        title = 'Conexion directa por IP publica'
-        summary = 'Puedes usar SSH/API directo con ACL estricta. Mantener VPN como respaldo.'
+        status = 'public_bth_first'
+        title = 'Conexion guiada (Back To Home primero)'
+        summary = 'Aunque haya IP publica, prioriza BTH por seguridad. Acceso directo queda como contingencia.'
         actions = [
             {
+                'id': 'bootstrap_bth_auto',
+                'label': 'Bootstrap BTH automatico',
+                'description': 'Vincula router al sistema con identidad administrada por tenant (sin key manual).',
+                'requires_local_access': False,
+                'auto_available': bool(supports_bth_users),
+            },
+            {
                 'id': 'apply_direct_acl',
-                'label': 'Aplicar ACL de gestion',
-                'description': 'Ejecuta el script directo para exponer API/SSH solo a IPs autorizadas.',
+                'label': 'ACL directa opcional',
+                'description': 'Opcional: habilita acceso directo solo para contingencia con ACL estricta.',
                 'script_key': 'direct_api_script',
                 'requires_local_access': False,
                 'auto_available': True,
             },
             {
-                'id': 'test_direct_access',
-                'label': 'Probar acceso directo',
-                'description': 'Verifica login SSH/API desde NOC.',
-                'requires_local_access': False,
-                'auto_available': True,
-            },
-            {
                 'id': 'prepare_tunnel_fallback',
-                'label': 'Preparar fallback VPN',
-                'description': 'Mantener WireGuard/BTH como contingencia operativa.',
+                'label': 'WireGuard opcional',
+                'description': 'Opcional para mejorar latencia en operacion masiva.',
                 'script_key': 'wireguard_site_to_vps_script',
                 'requires_local_access': False,
                 'auto_available': False,
@@ -783,21 +920,21 @@ def _build_connection_plan(access_profile: Dict[str, Any], back_to_home: Dict[st
     else:
         if reachable:
             if supports_bth:
-                status = 'private_reachable_bth_ready'
-                title = 'Conexion privada lista para tunel'
-                summary = 'Router accesible por API. Puedes completar BTH automatico o usar WireGuard.'
+                status = 'private_reachable_bth_first'
+                title = 'Conexion privada lista (BTH recomendado)'
+                summary = 'Router accesible por API. Completa BTH automatico primero y deja WireGuard como opcional.'
                 actions = [
                     {
                         'id': 'bootstrap_bth_auto',
                         'label': 'Bootstrap BTH automatico',
-                        'description': 'Crear usuario BTH desde el panel (requiere private key del VPS).',
+                        'description': 'Crear usuario BTH desde el panel con identidad administrada por tenant.',
                         'requires_local_access': False,
                         'auto_available': bool(supports_bth_users),
                     },
                     {
                         'id': 'wireguard_tunnel',
                         'label': 'WireGuard site-to-site',
-                        'description': 'Túnel recomendado para NOC masivo y menor latencia.',
+                        'description': 'Opcional para NOC masivo y menor latencia.',
                         'script_key': 'wireguard_site_to_vps_script',
                         'requires_local_access': False,
                         'auto_available': True,
@@ -820,7 +957,7 @@ def _build_connection_plan(access_profile: Dict[str, Any], back_to_home: Dict[st
         else:
             status = 'private_unreachable_needs_local_step'
             title = 'Conexion privada requiere paso local inicial'
-            summary = 'No hay acceso API aun. Ejecuta script minimo local (WinBox) para habilitar BTH o tunel y luego reintenta.'
+            summary = 'No hay acceso API aun. Usa QR BTH o script minimo local para habilitar y luego reintenta.'
             actions = [
                 {
                     'id': 'local_bth_enable',
@@ -840,7 +977,7 @@ def _build_connection_plan(access_profile: Dict[str, Any], back_to_home: Dict[st
                 {
                     'id': 'wireguard_tunnel',
                     'label': 'Alternativa WireGuard',
-                    'description': 'Si BTH no aplica, usa tunel WireGuard site-to-site.',
+                    'description': 'Opcional: si BTH no aplica, usa tunel WireGuard site-to-site.',
                     'script_key': 'wireguard_site_to_vps_script',
                     'requires_local_access': True,
                     'auto_available': False,
@@ -973,9 +1110,17 @@ def _build_router_readiness_payload(service: MikroTikService, run_write_probe: b
 
 
 def _read_wireguard_config_from_upload() -> tuple[str, str]:
+    config_text = str((request.form or {}).get('config_text') or '').strip()
+    source_name = str((request.form or {}).get('source_name') or QR_SOURCE_DEFAULT_NAME).strip() or QR_SOURCE_DEFAULT_NAME
+    if config_text:
+        normalized_text = _normalize_wireguard_config_text(config_text)
+        if len(normalized_text.encode('utf-8')) > WIREGUARD_IMPORT_MAX_BYTES:
+            raise ValueError('config_text exceeds 2MB limit')
+        return normalized_text, source_name
+
     upload = request.files.get('archive') or request.files.get('file')
     if upload is None:
-        raise ValueError('archive file is required')
+        raise ValueError('archive file or config_text is required')
 
     raw_payload = upload.read() or b''
     if len(raw_payload) == 0:
@@ -988,7 +1133,8 @@ def _read_wireguard_config_from_upload() -> tuple[str, str]:
     is_zip = lowered_name.endswith('.zip') or raw_payload.startswith(b'PK')
 
     if not is_zip:
-        return _decode_text_payload(raw_payload), source_name
+        text_payload = _decode_text_payload(raw_payload)
+        return _normalize_wireguard_config_text(text_payload), source_name
 
     with zipfile.ZipFile(io.BytesIO(raw_payload)) as archive:
         members = [name for name in archive.namelist() if not name.endswith('/')]
@@ -1004,9 +1150,11 @@ def _read_wireguard_config_from_upload() -> tuple[str, str]:
             except Exception:
                 continue
             text = _decode_text_payload(payload)
-            lowered = text.lower()
-            if '[interface]' in lowered and '[peer]' in lowered:
-                return text, member
+            try:
+                normalized = _normalize_wireguard_config_text(text)
+                return normalized, member
+            except ValueError:
+                continue
 
     raise ValueError('no WireGuard configuration found in archive')
 
@@ -1496,16 +1644,18 @@ def import_wireguard_archive():
         if not parsed.get('is_wireguard_config'):
             return jsonify({'success': False, 'error': 'File is not a valid WireGuard config'}), 400
 
+        tunnel_host = _first_wireguard_interface_host(parsed)
         endpoint_host = str(parsed.get('endpoint_host') or '').strip()
         safe_host = re.sub(r'[^a-zA-Z0-9.-]+', '-', endpoint_host).strip('-') if endpoint_host else ''
         suggested_name = f'Nodo-{safe_host}'[:80] if safe_host else ''
 
         suggestions = {
             'router_name': suggested_name,
-            'router_ip_or_host': endpoint_host,
+            'router_ip_or_host': tunnel_host or endpoint_host,
             'api_port': 8728,
             'bth_private_key': str(parsed.get('interface_private_key') or ''),
             'bth_user_name': 'noc-vps',
+            'router_tunnel_ip': tunnel_host or None,
         }
 
         return jsonify(
@@ -1549,8 +1699,9 @@ def onboard_router_from_wireguard_archive():
         return jsonify({'success': False, 'error': 'Could not parse WireGuard archive'}), 500
 
     form = request.form or {}
-    raw_endpoint_host = str(form.get('ip_address') or parsed.get('endpoint_host') or '').strip()
-    endpoint_host, endpoint_port_hint = _normalize_router_host(raw_endpoint_host)
+    parsed_tunnel_host = _first_wireguard_interface_host(parsed)
+    raw_endpoint_host = str(form.get('ip_address') or parsed_tunnel_host or parsed.get('endpoint_host') or '').strip()
+    endpoint_host, _ = _normalize_router_host(raw_endpoint_host)
     if not endpoint_host:
         return jsonify({'success': False, 'error': 'ip_address or WireGuard endpoint host is required'}), 400
 
@@ -1568,7 +1719,7 @@ def onboard_router_from_wireguard_archive():
     raw_api_port = form.get('api_port')
     try:
         if raw_api_port in (None, ''):
-            api_port = int(endpoint_port_hint or 8728)
+            api_port = 8728
         else:
             api_port = int(raw_api_port)
     except (TypeError, ValueError):
@@ -1578,6 +1729,7 @@ def onboard_router_from_wireguard_archive():
 
     update_existing = _as_bool(form.get('update_existing'), default=True)
     run_write_probe = _as_bool(form.get('write_probe'), default=True)
+    auto_vps_link = _as_bool(form.get('auto_vps_link'), default=True)
     bootstrap_bth = _as_bool(form.get('bootstrap_bth'), default=False)
     requested_bth_user_name = str(form.get('bth_user_name') or '').strip()
     bth_user_name = requested_bth_user_name or 'noc-vps'
@@ -1641,6 +1793,51 @@ def onboard_router_from_wireguard_archive():
         'write_probe_enabled': run_write_probe,
     }
     bootstrap_payload: Optional[Dict[str, Any]] = None
+    vps_sync_payload: Dict[str, Any] = {
+        'success': False,
+        'mode': None,
+        'message': 'No ejecutado',
+        'manual_required': False,
+        'manual_command': '',
+        'attempts': [],
+    }
+    parsed_identity = _router_wireguard_identity_from_parsed_config(parsed, router.id)
+
+    if auto_vps_link:
+        if parsed_identity.get('success'):
+            try:
+                sync_result = _sync_router_peer_to_vps(
+                    str(parsed_identity.get('public_key') or '').strip(),
+                    str(parsed_identity.get('selected_peer_ip') or '').strip(),
+                    dict(form or {}),
+                )
+                vps_sync_payload = {
+                    'success': bool(sync_result.get('success')),
+                    'mode': sync_result.get('mode'),
+                    'message': sync_result.get('message') or '',
+                    'manual_required': bool(sync_result.get('manual_required')),
+                    'manual_command': sync_result.get('manual_command') or '',
+                    'attempts': sync_result.get('attempts') or [],
+                    'runtime': sync_result.get('runtime') or {},
+                }
+            except Exception as sync_exc:
+                vps_sync_payload = {
+                    'success': False,
+                    'mode': 'auto',
+                    'message': f'Error sincronizando peer VPS: {sync_exc}',
+                    'manual_required': False,
+                    'manual_command': '',
+                    'attempts': [],
+                }
+        else:
+            vps_sync_payload = {
+                'success': False,
+                'mode': 'skip',
+                'message': str(parsed_identity.get('error') or 'No se pudo derivar identidad WG desde config'),
+                'manual_required': False,
+                'manual_command': '',
+                'attempts': [],
+            }
 
     try:
         with MikroTikService(router.id) as service:
@@ -1706,6 +1903,8 @@ def onboard_router_from_wireguard_archive():
         'readiness': readiness_payload,
         'managed_identity': bth_identity,
         'private_key_source': bth_key_resolution.get('source') or 'tenant_managed',
+        'wireguard_router_identity': parsed_identity,
+        'vps_sync': vps_sync_payload,
     }
     if bootstrap_payload is not None:
         payload['bootstrap'] = bootstrap_payload
@@ -3745,3 +3944,4 @@ def run_enterprise_failover_test(router_id):
     except Exception as e:
         logger.error(f"Error running failover test for router {router_id}: {e}", exc_info=True)
         return jsonify({'success': False, 'error': str(e)}), 500
+
