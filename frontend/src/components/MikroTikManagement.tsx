@@ -387,6 +387,18 @@ const decodeWireGuardQrFromImage = async (file: File): Promise<string> => {
   }
 }
 
+const normalizeUiError = (error: unknown, fallback: string): string => {
+  const message = String(error instanceof Error ? error.message : '').trim()
+  if (!message) return fallback
+  const lowered = message.toLowerCase()
+  if (lowered.includes('unauthorized')) return 'Sesion expirada. Vuelve a iniciar sesion.'
+  if (lowered.includes('failed to fetch')) return 'No se pudo conectar al backend. Verifica VPS, dominio y red.'
+  if (lowered.includes('abort')) return 'Solicitud interrumpida. Reintenta con sesion activa.'
+  if (lowered.includes('qr')) return message
+  if (lowered.includes('decode')) return 'No se pudo leer la imagen QR. Usa PNG/JPG nítido o importa ZIP/CONF.'
+  return message
+}
+
 const MikroTikManagement: React.FC = () => {
   const [routers, setRouters] = useState<RouterItem[]>([])
   const [selectedRouter, setSelectedRouter] = useState<RouterItem | null>(null)
@@ -937,12 +949,7 @@ const MikroTikManagement: React.FC = () => {
         addToast('success', sourceKind === 'qr' ? `QR importado: ${payload.source_file || archiveFile.name}` : `WireGuard importado: ${payload.source_file || archiveFile.name}`)
       } catch (error) {
         console.error('Error importing WireGuard archive:', error)
-        const message = error instanceof Error ? error.message : ''
-        if (message.toLowerCase().includes('abort')) {
-          addToast('error', 'Solicitud interrumpida. Reintenta con sesion activa.')
-        } else {
-          addToast('error', 'Error de red importando WireGuard')
-        }
+        addToast('error', normalizeUiError(error, 'Error importando QR/ZIP'))
       } finally {
         setWireGuardImporting(false)
       }
@@ -1034,12 +1041,7 @@ const MikroTikManagement: React.FC = () => {
         }
       } catch (error) {
         console.error('Error onboarding WireGuard archive:', error)
-        const message = error instanceof Error ? error.message : ''
-        if (message.toLowerCase().includes('abort')) {
-          addToast('error', 'Solicitud interrumpida. Reingresa y prueba nuevamente.')
-        } else {
-          addToast('error', 'Error de red durante onboarding')
-        }
+        addToast('error', normalizeUiError(error, 'Error durante onboarding'))
       } finally {
         setWireGuardOnboarding(false)
       }
