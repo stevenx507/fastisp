@@ -41,6 +41,17 @@ interface RouterQuickGuidance {
   notes: string[]
 }
 
+interface RouterAccessProfile {
+  requested_scope?: string
+  detected_scope?: string
+  effective_scope?: string
+  is_ip?: boolean
+  host?: string
+  allows_direct_inbound?: boolean
+  recommended_transport?: string
+  reason?: string
+}
+
 interface RouterBackToHomeUser {
   name: string
   allow_lan: boolean
@@ -74,6 +85,7 @@ interface RouterBackToHomeStatus {
 
 interface RouterQuickConnectResponse {
   success: boolean
+  access_profile?: RouterAccessProfile
   scripts?: RouterQuickScripts
   guidance?: RouterQuickGuidance
   back_to_home?: RouterBackToHomeStatus
@@ -291,6 +303,7 @@ const MikroTikManagement: React.FC = () => {
   const wireGuardOnboardFileInputRef = useRef<HTMLInputElement | null>(null)
   const [sidePanel, setSidePanel] = useState<'none' | 'logs' | 'dhcp' | 'wifi'>('none')
   const [quickConnect, setQuickConnect] = useState<RouterQuickConnectResponse | null>(null)
+  const [quickConnectScope, setQuickConnectScope] = useState<'auto' | 'public' | 'private'>('auto')
   const [routerReadiness, setRouterReadiness] = useState<RouterReadinessPayload | null>(null)
   const [readinessLoading, setReadinessLoading] = useState(false)
   const [bootstrapResult, setBootstrapResult] = useState<RouterBackToHomeBootstrapData | null>(null)
@@ -445,10 +458,11 @@ const MikroTikManagement: React.FC = () => {
   )
 
   const loadQuickConnect = useCallback(
-    async (routerId: string) => {
+    async (routerId: string, scope: 'auto' | 'public' | 'private' = 'auto') => {
       setQuickLoading(true)
       try {
-        const response = await apiFetch(`/api/mikrotik/routers/${routerId}/quick-connect`)
+        const query = scope && scope !== 'auto' ? `?ip_scope=${scope}` : ''
+        const response = await apiFetch(`/api/mikrotik/routers/${routerId}/quick-connect${query}`)
         const payload = (await safeJson(response)) as RouterQuickConnectResponse | null
         if (response.ok && payload?.success) {
           setQuickConnect(payload)
@@ -541,7 +555,7 @@ const MikroTikManagement: React.FC = () => {
   useEffect(() => {
     if (!selectedRouter) return
     loadRouterStats(selectedRouter.id)
-    loadQuickConnect(selectedRouter.id)
+    loadQuickConnect(selectedRouter.id, quickConnectScope)
     loadRouterReadiness(selectedRouter.id)
     loadEnterpriseProfiles(selectedRouter.id)
     loadEnterpriseChangeLog(selectedRouter.id)
@@ -551,7 +565,7 @@ const MikroTikManagement: React.FC = () => {
     setRouterReadiness(null)
     setHardeningResult(null)
     setFailoverResult(null)
-  }, [loadEnterpriseChangeLog, loadEnterpriseProfiles, loadQuickConnect, loadRouterReadiness, loadRouterStats, selectedRouter])
+  }, [loadEnterpriseChangeLog, loadEnterpriseProfiles, loadQuickConnect, loadRouterReadiness, loadRouterStats, quickConnectScope, selectedRouter])
 
   const applyEnterpriseHardening = async () => {
     if (!selectedRouter) return
@@ -998,7 +1012,7 @@ const MikroTikManagement: React.FC = () => {
       } else {
         addToast('error', payload?.error || 'No se pudo habilitar Back To Home')
       }
-      await loadQuickConnect(selectedRouter.id)
+      await loadQuickConnect(selectedRouter.id, quickConnectScope)
     } catch (error) {
       console.error('Error enabling Back To Home:', error)
       addToast('error', 'Error de red habilitando Back To Home')
@@ -1040,7 +1054,7 @@ const MikroTikManagement: React.FC = () => {
       } else {
         addToast('error', payload?.error || 'No se pudo crear usuario BTH')
       }
-      await loadQuickConnect(selectedRouter.id)
+      await loadQuickConnect(selectedRouter.id, quickConnectScope)
     } catch (error) {
       console.error('Error creating Back To Home user:', error)
       addToast('error', 'Error de red creando usuario BTH')
@@ -1069,7 +1083,7 @@ const MikroTikManagement: React.FC = () => {
       } else {
         addToast('error', payload?.error || 'No se pudo eliminar usuario BTH')
       }
-      await loadQuickConnect(selectedRouter.id)
+      await loadQuickConnect(selectedRouter.id, quickConnectScope)
     } catch (error) {
       console.error('Error removing Back To Home user:', error)
       addToast('error', 'Error de red eliminando usuario BTH')
@@ -1115,7 +1129,7 @@ const MikroTikManagement: React.FC = () => {
       } else {
         addToast('error', payload?.error || 'No se pudo ejecutar bootstrap Back To Home')
       }
-      await loadQuickConnect(selectedRouter.id)
+      await loadQuickConnect(selectedRouter.id, quickConnectScope)
     } catch (error) {
       console.error('Error bootstrapping Back To Home:', error)
       addToast('error', 'Error de red ejecutando bootstrap BTH')
@@ -1437,6 +1451,45 @@ const MikroTikManagement: React.FC = () => {
                 {activeTab === 'config' && (
                   <div className="space-y-4">
                     <h4 className="text-lg font-semibold text-gray-900">Conexion remota rapida</h4>
+                    <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="text-sm font-semibold text-gray-800">Perfil de acceso WAN</p>
+                        <div className="flex items-center gap-2">
+                          <select
+                            value={quickConnectScope}
+                            onChange={(e) => setQuickConnectScope(e.target.value as 'auto' | 'public' | 'private')}
+                            className="rounded border border-gray-300 bg-white px-2 py-1 text-xs text-gray-900"
+                          >
+                            <option value="auto">Auto detectar</option>
+                            <option value="public">Forzar publica</option>
+                            <option value="private">Forzar privada</option>
+                          </select>
+                          <button
+                            onClick={() => selectedRouter && void loadQuickConnect(selectedRouter.id, quickConnectScope)}
+                            disabled={quickLoading}
+                            className="rounded bg-slate-700 px-2 py-1 text-xs font-semibold text-white hover:bg-slate-800 disabled:opacity-60"
+                          >
+                            Aplicar
+                          </button>
+                        </div>
+                      </div>
+                      {quickConnect?.access_profile && (
+                        <div className="mt-2 space-y-1 text-xs text-gray-700">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="rounded-full bg-slate-200 px-2 py-1 font-semibold text-slate-700">
+                              detectado: {quickConnect.access_profile.detected_scope || 'unknown'}
+                            </span>
+                            <span className="rounded-full bg-blue-100 px-2 py-1 font-semibold text-blue-700">
+                              efectivo: {quickConnect.access_profile.effective_scope || 'unknown'}
+                            </span>
+                            <span className="rounded-full bg-emerald-100 px-2 py-1 font-semibold text-emerald-700">
+                              recomendado: {quickConnect.access_profile.recommended_transport || '-'}
+                            </span>
+                          </div>
+                          <p>{quickConnect.access_profile.reason || '-'}</p>
+                        </div>
+                      )}
+                    </div>
                     <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
                       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                         <p className="text-sm font-semibold text-gray-800">Readiness remoto del router</p>

@@ -14,6 +14,7 @@ from app.tenancy import current_tenant_id, tenant_access_allowed
 import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+import ipaddress
 import io
 import re
 import uuid
@@ -124,6 +125,60 @@ def _normalize_router_host(raw_value: str) -> tuple[str, Optional[int]]:
     host = str(parsed.get('host') or raw_value or '').strip()
     port = parsed.get('port')
     return host, port
+
+
+def _normalize_ip_scope_token(raw_value: Any) -> str:
+    token = str(raw_value or '').strip().lower()
+    if token in ('public', 'publica', 'publico'):
+        return 'public'
+    if token in ('private', 'privada', 'privado'):
+        return 'private'
+    return 'auto'
+
+
+def _build_access_profile(host_value: str, requested_scope_raw: Any) -> Dict[str, Any]:
+    requested_scope = _normalize_ip_scope_token(requested_scope_raw)
+    host = str(host_value or '').strip()
+
+    is_ip = False
+    detected_scope = 'unknown'
+    reason = 'Host/DNS requiere verificacion manual de si es publico o privado.'
+    normalized_host = host
+
+    try:
+        ip_obj = ipaddress.ip_address(host)
+        is_ip = True
+        normalized_host = str(ip_obj)
+        if ip_obj.is_global:
+            detected_scope = 'public'
+            reason = f'IP global enrutable detectada: {normalized_host}.'
+        else:
+            detected_scope = 'private'
+            reason = f'IP no global/NAT detectada: {normalized_host}.'
+    except ValueError:
+        pass
+
+    final_scope = detected_scope
+    if requested_scope in ('public', 'private'):
+        final_scope = requested_scope
+        reason = f'Modo forzado por operador: {requested_scope}.'
+    elif detected_scope == 'unknown':
+        final_scope = 'private'
+        reason = 'Sin clasificacion IP exacta; se recomienda tunel seguro (WireGuard/BTH).'
+
+    recommended_transport = 'direct_ssh_api' if final_scope == 'public' else 'wireguard_or_back_to_home'
+    allows_direct_inbound = final_scope == 'public'
+
+    return {
+        'requested_scope': requested_scope,
+        'detected_scope': detected_scope,
+        'effective_scope': final_scope,
+        'is_ip': is_ip,
+        'host': normalized_host,
+        'allows_direct_inbound': allows_direct_inbound,
+        'recommended_transport': recommended_transport,
+        'reason': reason,
+    }
 
 
 def _probe_write_access(service: MikroTikService) -> Dict[str, Any]:
@@ -1004,6 +1059,7 @@ def router_quick_connect(router_id):
     if not router:
         return jsonify({'success': False, 'error': 'Router not found'}), 404
 
+    ip_scope = request.args.get('ip_scope')
     allowed_mgmt = str(request.args.get('allowed_mgmt') or 'YOUR_PUBLIC_IP/32').strip() or 'YOUR_PUBLIC_IP/32'
     wg_endpoint = str(request.args.get('wg_endpoint') or 'vpn.fastisp.cloud:51820').strip() or 'vpn.fastisp.cloud:51820'
     wg_server_public_key = str(
@@ -1015,6 +1071,7 @@ def router_quick_connect(router_id):
     bth_user = str(request.args.get('bth_user') or 'noc-vps').strip() or 'noc-vps'
     bth_allow_lan = _as_bool(request.args.get('bth_allow_lan'), default=True)
     bth_private_key = str(request.args.get('bth_private_key') or '<BASE64_WG_PRIVATE_KEY>').strip() or '<BASE64_WG_PRIVATE_KEY>'
+    access_profile = _build_access_profile(router.ip_address, ip_scope)
 
     wg_endpoint_host = wg_endpoint
     wg_endpoint_port = 51820
@@ -1028,13 +1085,16 @@ def router_quick_connect(router_id):
             wg_endpoint_port = 51820
 
     router_peer_ip = f'10.250.{int(router.id) % 250}.2/32'
+    public_reachable = bool(access_profile.get('allows_direct_inbound'))
+    direct_script_title = '# Perfil publico: habilitar acceso directo con ACL estricta.\n' if public_reachable else '# Perfil privado/NAT: acceso directo WAN puede no funcionar; prioriza WireGuard/BTH.\n'
     scripts = {
         'direct_api_script': (
-            f"/ip service set api disabled=no port={router.api_port}\n"
-            "/ip service set ssh disabled=no port=22\n"
-            f"/ip firewall address-list add list=fastisp-management address={allowed_mgmt} comment=\"FastISP NOC\"\n"
-            f"/ip firewall filter add chain=input action=accept protocol=tcp dst-port={router.api_port},22 src-address-list=fastisp-management comment=\"FastISP remote access\"\n"
-            "/ip firewall filter add chain=input action=drop protocol=tcp dst-port=22,8728,8729 in-interface-list=WAN comment=\"Drop unmanaged remote\"\n"
+            direct_script_title
+            + f"/ip service set api disabled=no port={router.api_port}\n"
+            + "/ip service set ssh disabled=no port=22\n"
+            + f"/ip firewall address-list add list=fastisp-management address={allowed_mgmt} comment=\"FastISP NOC\"\n"
+            + f"/ip firewall filter add chain=input action=accept protocol=tcp dst-port={router.api_port},22 src-address-list=fastisp-management comment=\"FastISP remote access\"\n"
+            + "/ip firewall filter add chain=input action=drop protocol=tcp dst-port=22,8728,8729 in-interface-list=WAN comment=\"Drop unmanaged remote\"\n"
         ),
         'wireguard_site_to_vps_script': (
             "/interface/wireguard add name=wg-fastisp listen-port=13231 comment=\"FastISP NOC tunnel\"\n"
@@ -1042,8 +1102,16 @@ def router_quick_connect(router_id):
             f"/interface/wireguard/peers/add interface=wg-fastisp public-key=\"{wg_server_public_key}\" endpoint-address={wg_endpoint_host} endpoint-port={wg_endpoint_port} allowed-address={wg_allowed_subnets} persistent-keepalive=25s\n"
             "/ip/firewall/filter add chain=input action=accept protocol=udp dst-port=13231 comment=\"Allow WireGuard\"\n"
         ),
-        'windows_login': f"ssh {router.username}@{router.ip_address} -p 22",
-        'linux_login': f"ssh {router.username}@{router.ip_address} -p 22",
+        'windows_login': (
+            f"ssh {router.username}@{router.ip_address} -p 22"
+            if public_reachable
+            else f"# Requiere tunel: ssh {router.username}@{router.ip_address} -p 22 (via WG/BTH)"
+        ),
+        'linux_login': (
+            f"ssh {router.username}@{router.ip_address} -p 22"
+            if public_reachable
+            else f"# Requiere tunel: ssh {router.username}@{router.ip_address} -p 22 (via WG/BTH)"
+        ),
     }
 
     back_to_home = {
@@ -1138,19 +1206,37 @@ def router_quick_connect(router_id):
     except Exception as exc:
         back_to_home['error'] = str(exc)
 
+    if public_reachable:
+        guidance_back_to_home = [
+            'IP publica detectada: puedes operar por SSH/API directo con ACL estricta.',
+            'Mantener WireGuard/BTH como contingencia si el proveedor cambia a CGNAT.',
+            'No abrir API/SSH a internet completa; restringe por IP de NOC.',
+        ]
+    else:
+        guidance_back_to_home = [
+            'IP privada/NAT detectada: priorizar WireGuard site-to-site o Back To Home.',
+            'Back To Home funciona detras de NAT por relay MikroTik.',
+            'Para NOC masivo y menor latencia, preferir WireGuard dedicado cuando sea posible.',
+        ]
+
     guidance = {
-        'back_to_home': [
-            'Si, Back To Home puede funcionar aun con IP privadas porque usa relay/nube de MikroTik.',
-            'Para uso desde VPS, RouterOS 7.14+ permite usuarios BTH y perfil WireGuard exportable.',
-            'Para NOC masivo y menor latencia, preferir WireGuard site-to-site dedicado.',
-        ],
+        'back_to_home': guidance_back_to_home,
         'notes': [
+            str(access_profile.get('reason') or ''),
             'No expongas API/SSH sin ACL. Usa solo IPs de gestion o VPN privada.',
-            'Para despliegues masivos: preferir WireGuard site-to-site entre POP y VPS.',
             'Registra cada cambio en auditoria antes de activar modo live.',
         ],
     }
-    return jsonify({'success': True, 'router': router.to_dict(), 'scripts': scripts, 'guidance': guidance, 'back_to_home': back_to_home}), 200
+    return jsonify(
+        {
+            'success': True,
+            'router': router.to_dict(),
+            'access_profile': access_profile,
+            'scripts': scripts,
+            'guidance': guidance,
+            'back_to_home': back_to_home,
+        }
+    ), 200
 
 
 def _script_escape(value: Any) -> str:

@@ -84,6 +84,7 @@ def test_router_crud_and_quick_connect(client, app):
     assert quick_response.status_code == 200
     quick_payload = quick_response.get_json()
     assert quick_payload['success'] is True
+    assert 'access_profile' in quick_payload
     assert 'direct_api_script' in quick_payload['scripts']
     assert 'wireguard_site_to_vps_script' in quick_payload['scripts']
     assert isinstance(quick_payload['guidance']['back_to_home'], list)
@@ -96,6 +97,63 @@ def test_router_crud_and_quick_connect(client, app):
     assert delete_response.status_code == 200
     delete_payload = delete_response.get_json()
     assert delete_payload['success'] is True
+
+
+def test_quick_connect_marks_private_ip_for_tunnel_first(client, app, monkeypatch):
+    headers = _admin_headers(client, app)
+    monkeypatch.setattr(mikrotik_routes, 'MikroTikService', _DummyMikrotikQuickConnectService)
+
+    create_response = client.post(
+        '/api/mikrotik/routers',
+        json={
+            'name': 'Nodo-Privado',
+            'ip_address': '10.10.99.1',
+            'username': 'api-admin',
+            'password': 'router-pass',
+            'api_port': 8728,
+            'test_connection': False,
+        },
+        headers=headers,
+    )
+    assert create_response.status_code == 201
+    router_id = str(create_response.get_json()['router']['id'])
+
+    quick_response = client.get(f'/api/mikrotik/routers/{router_id}/quick-connect', headers=headers)
+    assert quick_response.status_code == 200
+    payload = quick_response.get_json()
+    profile = payload.get('access_profile') or {}
+    assert profile.get('effective_scope') == 'private'
+    assert profile.get('recommended_transport') == 'wireguard_or_back_to_home'
+    assert 'prioriza WireGuard/BTH' in str(payload['scripts']['direct_api_script'])
+
+
+def test_quick_connect_allows_scope_override_to_public(client, app, monkeypatch):
+    headers = _admin_headers(client, app)
+    monkeypatch.setattr(mikrotik_routes, 'MikroTikService', _DummyMikrotikQuickConnectService)
+
+    create_response = client.post(
+        '/api/mikrotik/routers',
+        json={
+            'name': 'Nodo-Override',
+            'ip_address': '10.10.98.1',
+            'username': 'api-admin',
+            'password': 'router-pass',
+            'api_port': 8728,
+            'test_connection': False,
+        },
+        headers=headers,
+    )
+    assert create_response.status_code == 201
+    router_id = str(create_response.get_json()['router']['id'])
+
+    quick_response = client.get(f'/api/mikrotik/routers/{router_id}/quick-connect?ip_scope=public', headers=headers)
+    assert quick_response.status_code == 200
+    payload = quick_response.get_json()
+    profile = payload.get('access_profile') or {}
+    assert profile.get('requested_scope') == 'public'
+    assert profile.get('effective_scope') == 'public'
+    assert profile.get('recommended_transport') == 'direct_ssh_api'
+    assert payload['scripts']['windows_login'].startswith('ssh ')
 
 
 class _DummyMikrotikService:
@@ -279,6 +337,18 @@ class _DummyMikrotikOnboardService:
     def execute_script(self, script_content):
         self.__class__.scripts.append(str(script_content))
         return {'success': True, 'result': 'ok'}
+
+
+class _DummyMikrotikQuickConnectService:
+    def __init__(self, router_id):
+        self.router_id = router_id
+        self.api = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
 
 
 class _DummyMikrotikOnboardNoApiService:
