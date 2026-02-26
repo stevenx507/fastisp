@@ -405,10 +405,16 @@ def _register_wireguard_peer_local(commands: Dict[str, Any], persist: bool, time
     set_result = _run_local_command(commands.get('argv_set') or [], timeout_seconds=timeout_seconds)
     if not set_result.get('ok'):
         detail = set_result.get('stderr') or set_result.get('stdout') or set_result.get('error') or 'wg set failed'
+        detail_text = str(detail or '')
+        if 'No such file or directory' in detail_text and "'wg'" in detail_text:
+            detail_text = (
+                "No se encontro binario 'wg' en runtime del backend. "
+                "Usa sync_mode=ssh o ejecuta el comando manual en el VPS host."
+            )
         return {
             'success': False,
             'mode': 'local',
-            'message': f'wg set failed: {detail}',
+            'message': f'wg set failed: {detail_text}',
             'set_result': set_result,
         }
 
@@ -705,12 +711,12 @@ def _sync_router_peer_to_vps(
 
     error_message = 'No se pudo registrar peer automaticamente en el VPS.'
     if attempts:
-        first_error = next(
-            (str(item.get('message') or '').strip() for item in attempts if str(item.get('message') or '').strip()),
+        last_error = next(
+            (str(item.get('message') or '').strip() for item in reversed(attempts) if str(item.get('message') or '').strip()),
             '',
         )
-        if first_error:
-            error_message = first_error
+        if last_error:
+            error_message = last_error
 
     return {
         'success': False,

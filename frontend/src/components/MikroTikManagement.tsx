@@ -1017,9 +1017,9 @@ const MikroTikManagement: React.FC = () => {
             addToast('success', `Vinculacion VPS completada (${payload.vps_sync.mode || 'auto'})`)
           } else if (payload.vps_sync.manual_command) {
             await copyToClipboard(String(payload.vps_sync.manual_command || ''))
-            addToast('error', `${payload.vps_sync.message || 'No se pudo vincular en VPS'}. Comando manual copiado.`)
+            addToast('info', `${payload.vps_sync.message || 'Vinculacion VPS pendiente'}. Comando manual copiado.`)
           } else if (payload.vps_sync.message) {
-            addToast('error', payload.vps_sync.message)
+            addToast('info', payload.vps_sync.message)
           }
         }
         setWireGuardImportSummary({
