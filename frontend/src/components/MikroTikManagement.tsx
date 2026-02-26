@@ -318,6 +318,9 @@ const MikroTikManagement: React.FC = () => {
   const [bthActionLoading, setBthActionLoading] = useState(false)
   const [expressConnecting, setExpressConnecting] = useState(false)
   const [expressSteps, setExpressSteps] = useState<ExpressStepState[]>([])
+  const [connectionWizardStep, setConnectionWizardStep] = useState<1 | 2 | 3>(1)
+  const [showAdvancedScripts, setShowAdvancedScripts] = useState(false)
+  const [wizardValidating, setWizardValidating] = useState(false)
 
   const [aiAnalysis, setAiAnalysis] = useState<string | null>(null)
   const [aiError, setAiError] = useState<string | null>(null)
@@ -590,6 +593,8 @@ const MikroTikManagement: React.FC = () => {
     setAiAnalysis(null)
     setAiError(null)
     setBootstrapResult(null)
+    setConnectionWizardStep(1)
+    setExpressSteps([])
     setRouterReadiness(null)
     setHardeningResult(null)
     setFailoverResult(null)
@@ -1033,12 +1038,48 @@ const MikroTikManagement: React.FC = () => {
     return ''
   }, [])
 
+  const runWizardDetection = async () => {
+    if (!selectedRouter) return
+    try {
+      await loadQuickConnect(selectedRouter.id, quickConnectScope)
+      await loadRouterReadiness(selectedRouter.id)
+      setConnectionWizardStep(2)
+      addToast('success', 'Deteccion completada. Continua con la conexion express.')
+    } catch (error) {
+      console.error('Error running wizard detection:', error)
+      addToast('error', 'No se pudo completar la deteccion')
+    }
+  }
+
+  const runWizardValidation = async () => {
+    if (!selectedRouter) return
+    setWizardValidating(true)
+    try {
+      const response = await apiFetch(`/api/mikrotik/routers/${selectedRouter.id}/test-connection`)
+      const payload = (await safeJson(response)) as { success?: boolean; error?: string } | null
+      await loadQuickConnect(selectedRouter.id, quickConnectScope)
+      await loadRouterReadiness(selectedRouter.id)
+      setConnectionWizardStep(3)
+      if (response.ok && payload?.success) {
+        addToast('success', 'Validacion completada: router alcanzable')
+      } else {
+        addToast('error', payload?.error || 'Validacion fallida: router no alcanzable')
+      }
+    } catch (error) {
+      console.error('Error running wizard validation:', error)
+      addToast('error', 'Error de red en validacion')
+    } finally {
+      setWizardValidating(false)
+    }
+  }
+
   const runConnectionExpress = async () => {
     if (!selectedRouter || !quickConnect?.scripts) return
     if (!changeTicket.trim() || !preflightAck) {
       addToast('error', 'Conexion Express requiere change_ticket y preflight_ack=true')
       return
     }
+    setConnectionWizardStep(2)
 
     const updateStep = (id: string, status: ExpressStepState['status'], detail?: string) => {
       setExpressSteps((prev) => prev.map((step) => (step.id === id ? { ...step, status, detail } : step)))
@@ -1192,6 +1233,7 @@ const MikroTikManagement: React.FC = () => {
       setExpressConnecting(false)
       await loadQuickConnect(selectedRouter.id, quickConnectScope)
       await loadRouterReadiness(selectedRouter.id)
+      setConnectionWizardStep(3)
     }
   }
 
@@ -1773,15 +1815,129 @@ const MikroTikManagement: React.FC = () => {
                                 {quickConnect.connection_plan.recommended_transport || '-'}
                               </span>
                             </div>
-                            <div className="mt-2">
-                              <button
-                                onClick={() => void runConnectionExpress()}
-                                disabled={expressConnecting || bthActionLoading || quickLoading}
-                                className="rounded bg-emerald-700 px-3 py-1 text-xs font-semibold text-white hover:bg-emerald-800 disabled:opacity-60"
-                              >
-                                {expressConnecting ? 'Conectando...' : 'Conectar Router Ahora'}
-                              </button>
+                            <div className="mt-2 flex flex-wrap gap-2">
+                              {[1, 2, 3].map((step) => (
+                                <button
+                                  key={step}
+                                  onClick={() => setConnectionWizardStep(step as 1 | 2 | 3)}
+                                  className={`rounded px-3 py-1 text-xs font-semibold ${
+                                    connectionWizardStep === step
+                                      ? 'bg-emerald-700 text-white'
+                                      : 'bg-white text-emerald-800'
+                                  }`}
+                                >
+                                  Paso {step}
+                                </button>
+                              ))}
                             </div>
+
+                            {connectionWizardStep === 1 && (
+                              <div className="mt-2 rounded border border-emerald-200 bg-white p-3">
+                                <p className="text-xs font-semibold uppercase text-emerald-800">Paso 1: Deteccion</p>
+                                <p className="mt-1 text-xs text-emerald-700">
+                                  Detecta automaticamente si conviene conexion directa o tunel (WireGuard/BTH).
+                                </p>
+                                <div className="mt-2 flex flex-wrap items-center gap-2">
+                                  <button
+                                    onClick={() => void runWizardDetection()}
+                                    disabled={quickLoading || readinessLoading}
+                                    className="rounded bg-emerald-700 px-3 py-1 text-xs font-semibold text-white hover:bg-emerald-800 disabled:opacity-60"
+                                  >
+                                    {quickLoading || readinessLoading ? 'Detectando...' : 'Detectar ruta'}
+                                  </button>
+                                  <button
+                                    onClick={() => setConnectionWizardStep(2)}
+                                    className="rounded bg-slate-200 px-3 py-1 text-xs font-semibold text-slate-900 hover:bg-slate-300"
+                                  >
+                                    Continuar al paso 2
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+
+                            {connectionWizardStep === 2 && (
+                              <div className="mt-2 rounded border border-emerald-200 bg-white p-3">
+                                <p className="text-xs font-semibold uppercase text-emerald-800">Paso 2: Ejecutar conexion</p>
+                                <p className="mt-1 text-xs text-emerald-700">
+                                  Conexion Express intenta directo, luego WireGuard y por ultimo BTH si hace falta.
+                                </p>
+                                <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-2">
+                                  <input
+                                    value={bthUserName}
+                                    onChange={(e) => setBthUserName(e.target.value)}
+                                    placeholder="Usuario BTH (ej: noc-vps)"
+                                    className="rounded border border-emerald-300 px-2 py-1 text-xs text-gray-900"
+                                  />
+                                  <input
+                                    type="password"
+                                    value={bthPrivateKey}
+                                    onChange={(e) => setBthPrivateKey(e.target.value)}
+                                    placeholder="Private key WireGuard del VPS (para fallback BTH)"
+                                    className="rounded border border-emerald-300 px-2 py-1 text-xs text-gray-900"
+                                  />
+                                </div>
+                                <label className="mt-2 flex items-center gap-2 text-xs text-emerald-800">
+                                  <input
+                                    type="checkbox"
+                                    checked={bthAllowLan}
+                                    onChange={(e) => setBthAllowLan(e.target.checked)}
+                                    className="rounded border-emerald-300"
+                                  />
+                                  Permitir acceso LAN en fallback BTH
+                                </label>
+                                <div className="mt-2 flex flex-wrap items-center gap-2">
+                                  <button
+                                    onClick={() => void runConnectionExpress()}
+                                    disabled={expressConnecting || bthActionLoading || quickLoading}
+                                    className="rounded bg-emerald-700 px-3 py-1 text-xs font-semibold text-white hover:bg-emerald-800 disabled:opacity-60"
+                                  >
+                                    {expressConnecting ? 'Conectando...' : 'Conectar Router Ahora'}
+                                  </button>
+                                  <button
+                                    onClick={() => setConnectionWizardStep(3)}
+                                    className="rounded bg-slate-200 px-3 py-1 text-xs font-semibold text-slate-900 hover:bg-slate-300"
+                                  >
+                                    Ir al paso 3
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+
+                            {connectionWizardStep === 3 && (
+                              <div className="mt-2 rounded border border-emerald-200 bg-white p-3">
+                                <p className="text-xs font-semibold uppercase text-emerald-800">Paso 3: Validar</p>
+                                <p className="mt-1 text-xs text-emerald-700">
+                                  Verifica que el router responda y que la ruta remota quede operativa.
+                                </p>
+                                <div className="mt-2 flex flex-wrap items-center gap-2">
+                                  <span className={`rounded px-2 py-1 text-xs font-semibold ${routerReadiness?.checks?.find((item) => item.id === 'api_connectivity')?.ok ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
+                                    API {routerReadiness?.checks?.find((item) => item.id === 'api_connectivity')?.ok ? 'OK' : 'pendiente'}
+                                  </span>
+                                  <span className={`rounded px-2 py-1 text-xs font-semibold ${quickConnect.back_to_home?.reachable ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+                                    Reachability {quickConnect.back_to_home?.reachable ? 'OK' : 'sin confirmar'}
+                                  </span>
+                                  <span className={`rounded px-2 py-1 text-xs font-semibold ${expressSteps.some((step) => step.status === 'failed') ? 'bg-rose-100 text-rose-700' : 'bg-blue-100 text-blue-700'}`}>
+                                    Fallback {expressSteps.some((step) => step.status === 'failed') ? 'con incidencias' : 'sin incidencias'}
+                                  </span>
+                                </div>
+                                <div className="mt-2 flex flex-wrap items-center gap-2">
+                                  <button
+                                    onClick={() => void runWizardValidation()}
+                                    disabled={wizardValidating || quickLoading || readinessLoading}
+                                    className="rounded bg-emerald-700 px-3 py-1 text-xs font-semibold text-white hover:bg-emerald-800 disabled:opacity-60"
+                                  >
+                                    {wizardValidating ? 'Validando...' : 'Validar conexion'}
+                                  </button>
+                                  <button
+                                    onClick={() => setConnectionWizardStep(1)}
+                                    className="rounded bg-slate-200 px-3 py-1 text-xs font-semibold text-slate-900 hover:bg-slate-300"
+                                  >
+                                    Reiniciar asistente
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+
                             {expressSteps.length > 0 && (
                               <div className="mt-2 space-y-1">
                                 {expressSteps.map((step) => {
@@ -1804,6 +1960,17 @@ const MikroTikManagement: React.FC = () => {
                                 })}
                               </div>
                             )}
+
+                            <div className="mt-2 flex items-center justify-between rounded border border-emerald-200 bg-white p-2">
+                              <p className="text-xs text-emerald-800">Modo avanzado (scripts/manual)</p>
+                              <button
+                                onClick={() => setShowAdvancedScripts((prev) => !prev)}
+                                className="rounded bg-emerald-700 px-2 py-1 text-xs font-semibold text-white hover:bg-emerald-800"
+                              >
+                                {showAdvancedScripts ? 'Ocultar avanzado' : 'Mostrar avanzado'}
+                              </button>
+                            </div>
+
                             {(quickConnect.connection_plan.actions || []).length > 0 && (
                               <div className="mt-2 space-y-2">
                                 {(quickConnect.connection_plan.actions || []).map((action) => {
@@ -1843,6 +2010,8 @@ const MikroTikManagement: React.FC = () => {
                             )}
                           </div>
                         )}
+                        {showAdvancedScripts && (
+                          <>
                         <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
                           <div className="mb-2 flex items-center justify-between">
                             <p className="text-sm font-semibold text-gray-800">Script acceso directo API/SSH</p>
@@ -2075,6 +2244,8 @@ const MikroTikManagement: React.FC = () => {
                               <p className="text-xs text-rose-700">Error BTH: {quickConnect.back_to_home.error}</p>
                             )}
                           </div>
+                        )}
+                        </>
                         )}
                       </>
                     )}
