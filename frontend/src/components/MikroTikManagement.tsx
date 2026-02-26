@@ -59,6 +59,13 @@ interface RouterConnectionPlan {
   actions?: RouterConnectionPlanAction[]
 }
 
+interface ExpressStepState {
+  id: string
+  label: string
+  status: 'pending' | 'running' | 'success' | 'failed' | 'skipped'
+  detail?: string
+}
+
 interface RouterAccessProfile {
   requested_scope?: string
   detected_scope?: string
@@ -309,6 +316,8 @@ const MikroTikManagement: React.FC = () => {
   const [creatingRouter, setCreatingRouter] = useState(false)
   const [quickLoading, setQuickLoading] = useState(false)
   const [bthActionLoading, setBthActionLoading] = useState(false)
+  const [expressConnecting, setExpressConnecting] = useState(false)
+  const [expressSteps, setExpressSteps] = useState<ExpressStepState[]>([])
 
   const [aiAnalysis, setAiAnalysis] = useState<string | null>(null)
   const [aiError, setAiError] = useState<string | null>(null)
@@ -1024,6 +1033,168 @@ const MikroTikManagement: React.FC = () => {
     return ''
   }, [])
 
+  const runConnectionExpress = async () => {
+    if (!selectedRouter || !quickConnect?.scripts) return
+    if (!changeTicket.trim() || !preflightAck) {
+      addToast('error', 'Conexion Express requiere change_ticket y preflight_ack=true')
+      return
+    }
+
+    const updateStep = (id: string, status: ExpressStepState['status'], detail?: string) => {
+      setExpressSteps((prev) => prev.map((step) => (step.id === id ? { ...step, status, detail } : step)))
+    }
+
+    const executeScriptStep = async (stepId: string, label: string, scriptContent: string) => {
+      updateStep(stepId, 'running')
+      try {
+        const response = await apiFetch(`/api/mikrotik/routers/${selectedRouter.id}/execute-script`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(withChangeTicket({ script: scriptContent })),
+        })
+        const payload = (await safeJson(response)) as { success?: boolean; error?: string; result?: string } | null
+        if (response.ok && payload?.success) {
+          updateStep(stepId, 'success', `${label} aplicado`)
+          return true
+        }
+        updateStep(stepId, 'failed', payload?.error || `Fallo ${label}`)
+        return false
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : `Fallo ${label}`
+        updateStep(stepId, 'failed', detail)
+        return false
+      }
+    }
+
+    const testConnectionStep = async (stepId: string, detailOnSuccess: string) => {
+      updateStep(stepId, 'running')
+      try {
+        const response = await apiFetch(`/api/mikrotik/routers/${selectedRouter.id}/test-connection`)
+        const payload = (await safeJson(response)) as { success?: boolean; error?: string } | null
+        if (response.ok && payload?.success) {
+          updateStep(stepId, 'success', detailOnSuccess)
+          return true
+        }
+        updateStep(stepId, 'failed', payload?.error || 'Router aun no responde por API')
+        return false
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : 'Fallo de red en test'
+        updateStep(stepId, 'failed', detail)
+        return false
+      }
+    }
+
+    const bootstrapBthStep = async (stepId: string) => {
+      if (!bthPrivateKey.trim()) {
+        updateStep(stepId, 'skipped', 'Falta private key BTH')
+        return false
+      }
+      updateStep(stepId, 'running')
+      try {
+        const response = await apiFetch(`/api/mikrotik/routers/${selectedRouter.id}/back-to-home/bootstrap`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            withChangeTicket({
+              confirm: true,
+              user_name: bthUserName.trim() || 'noc-vps',
+              private_key: bthPrivateKey.trim(),
+              allow_lan: bthAllowLan,
+            })
+          ),
+        })
+        const payload = (await safeJson(response)) as RouterBackToHomeBootstrapResponse | null
+        if (response.ok && payload?.success) {
+          if (payload.bootstrap) setBootstrapResult(payload.bootstrap)
+          updateStep(stepId, 'success', 'Bootstrap BTH completado')
+          return true
+        }
+        updateStep(stepId, 'failed', payload?.error || 'No se pudo ejecutar bootstrap BTH')
+        return false
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : 'Fallo bootstrap BTH'
+        updateStep(stepId, 'failed', detail)
+        return false
+      }
+    }
+
+    const profile = quickConnect.access_profile?.effective_scope || 'private'
+    const reachable = Boolean(quickConnect.back_to_home?.reachable)
+
+    const baseSteps: ExpressStepState[] = profile === 'public'
+      ? [
+          { id: 'direct_acl', label: 'Aplicar ACL directa', status: 'pending' },
+          { id: 'verify_direct', label: 'Validar acceso directo', status: 'pending' },
+          { id: 'wg_tunnel', label: 'Fallback WireGuard', status: 'pending' },
+          { id: 'verify_wg', label: 'Validar tunel WireGuard', status: 'pending' },
+          { id: 'bth_bootstrap', label: 'Fallback BTH', status: 'pending' },
+        ]
+      : [
+          { id: 'wg_tunnel', label: 'Aplicar tunel WireGuard', status: 'pending' },
+          { id: 'verify_wg', label: 'Validar tunel WireGuard', status: 'pending' },
+          { id: 'bth_bootstrap', label: 'Fallback BTH', status: 'pending' },
+        ]
+    setExpressSteps(baseSteps)
+    setExpressConnecting(true)
+
+    try {
+      if (!reachable) {
+        setExpressSteps([
+          {
+            id: 'manual_local',
+            label: 'Paso local requerido',
+            status: 'failed',
+            detail: 'Router no alcanzable por API. Ejecuta script minimo BTH local y vuelve a intentar.',
+          },
+        ])
+        const minimalScript = quickConnect.scripts.bth_enable_minimal_script || ''
+        if (minimalScript) {
+          await copyToClipboard(minimalScript)
+        }
+        addToast('error', 'Router no alcanzable. Copie script minimo BTH para ejecutar en WinBox.')
+        return
+      }
+
+      let connected = false
+
+      if (profile === 'public') {
+        const directOk = await executeScriptStep('direct_acl', 'ACL directa', quickConnect.scripts.direct_api_script || '')
+        if (directOk) {
+          connected = await testConnectionStep('verify_direct', 'Conexion directa operativa')
+        }
+      }
+
+      if (!connected) {
+        const wgOk = await executeScriptStep('wg_tunnel', 'tunel WireGuard', quickConnect.scripts.wireguard_site_to_vps_script || '')
+        if (wgOk) {
+          connected = await testConnectionStep('verify_wg', 'Conexion por WireGuard operativa')
+        }
+      } else {
+        updateStep('wg_tunnel', 'skipped', 'No requerido')
+        updateStep('verify_wg', 'skipped', 'No requerido')
+      }
+
+      if (!connected) {
+        const bthOk = await bootstrapBthStep('bth_bootstrap')
+        if (bthOk) {
+          connected = await testConnectionStep('verify_wg', 'Conexion operativa tras BTH')
+        }
+      } else {
+        updateStep('bth_bootstrap', 'skipped', 'No requerido')
+      }
+
+      if (connected) {
+        addToast('success', 'Conexion Express completada')
+      } else {
+        addToast('error', 'Conexion Express no pudo completar acceso remoto. Revisar pasos marcados en rojo.')
+      }
+    } finally {
+      setExpressConnecting(false)
+      await loadQuickConnect(selectedRouter.id, quickConnectScope)
+      await loadRouterReadiness(selectedRouter.id)
+    }
+  }
+
   const enableBackToHome = async () => {
     if (!selectedRouter) return
     setBthActionLoading(true)
@@ -1602,6 +1773,37 @@ const MikroTikManagement: React.FC = () => {
                                 {quickConnect.connection_plan.recommended_transport || '-'}
                               </span>
                             </div>
+                            <div className="mt-2">
+                              <button
+                                onClick={() => void runConnectionExpress()}
+                                disabled={expressConnecting || bthActionLoading || quickLoading}
+                                className="rounded bg-emerald-700 px-3 py-1 text-xs font-semibold text-white hover:bg-emerald-800 disabled:opacity-60"
+                              >
+                                {expressConnecting ? 'Conectando...' : 'Conectar Router Ahora'}
+                              </button>
+                            </div>
+                            {expressSteps.length > 0 && (
+                              <div className="mt-2 space-y-1">
+                                {expressSteps.map((step) => {
+                                  const toneClass =
+                                    step.status === 'success'
+                                      ? 'bg-emerald-100 text-emerald-800'
+                                      : step.status === 'failed'
+                                        ? 'bg-rose-100 text-rose-800'
+                                        : step.status === 'running'
+                                          ? 'bg-blue-100 text-blue-800'
+                                          : step.status === 'skipped'
+                                            ? 'bg-slate-200 text-slate-700'
+                                            : 'bg-white text-slate-700'
+                                  return (
+                                    <div key={step.id} className={`rounded px-2 py-1 text-xs ${toneClass}`}>
+                                      <strong>{step.label}</strong>
+                                      {step.detail ? `: ${step.detail}` : ''}
+                                    </div>
+                                  )
+                                })}
+                              </div>
+                            )}
                             {(quickConnect.connection_plan.actions || []).length > 0 && (
                               <div className="mt-2 space-y-2">
                                 {(quickConnect.connection_plan.actions || []).map((action) => {
