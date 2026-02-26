@@ -144,6 +144,28 @@ interface RouterQuickConnectResponse {
   back_to_home?: RouterBackToHomeStatus
 }
 
+interface RouterWireGuardRegisterAttempt {
+  transport?: string
+  success?: boolean
+  mode?: string
+  message?: string
+}
+
+interface RouterWireGuardRegisterVpsSync {
+  success?: boolean
+  mode?: string
+  message?: string
+  manual_required?: boolean
+  manual_command?: string
+  attempts?: RouterWireGuardRegisterAttempt[]
+}
+
+interface RouterWireGuardRegisterResponse {
+  success?: boolean
+  error?: string
+  vps_sync?: RouterWireGuardRegisterVpsSync
+}
+
 interface RouterBackToHomeBootstrapData {
   success?: boolean
   error?: string
@@ -1182,6 +1204,40 @@ const MikroTikManagement: React.FC = () => {
       }
     }
 
+    const registerWireGuardPeerStep = async (stepId: string) => {
+      updateStep(stepId, 'running')
+      try {
+        const response = await apiFetch(`/api/mikrotik/routers/${selectedRouter.id}/wireguard/register-peer`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            withChangeTicket({
+              router_interface: 'wg-fastisp',
+            })
+          ),
+        })
+        const payload = (await safeJson(response)) as RouterWireGuardRegisterResponse | null
+        if (response.ok && payload?.success) {
+          const mode = payload?.vps_sync?.mode || 'auto'
+          updateStep(stepId, 'success', `Peer registrado en VPS (${mode})`)
+          return true
+        }
+        const detail = payload?.error || payload?.vps_sync?.message || 'No se pudo registrar peer en VPS'
+        const manualCommand = String(payload?.vps_sync?.manual_command || '').trim()
+        if (manualCommand) {
+          await copyToClipboard(manualCommand)
+          updateStep(stepId, 'failed', `${detail}. Comando copiado al portapapeles`)
+        } else {
+          updateStep(stepId, 'failed', detail)
+        }
+        return false
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : 'Fallo registrando peer WireGuard en VPS'
+        updateStep(stepId, 'failed', detail)
+        return false
+      }
+    }
+
     const profile = quickConnect.access_profile?.effective_scope || 'private'
     const reachable = Boolean(quickConnect.back_to_home?.reachable)
 
@@ -1190,11 +1246,13 @@ const MikroTikManagement: React.FC = () => {
           { id: 'direct_acl', label: 'Aplicar ACL directa', status: 'pending' },
           { id: 'verify_direct', label: 'Validar acceso directo', status: 'pending' },
           { id: 'wg_tunnel', label: 'Fallback WireGuard', status: 'pending' },
+          { id: 'wg_register_peer', label: 'Registrar peer en VPS', status: 'pending' },
           { id: 'verify_wg', label: 'Validar tunel WireGuard', status: 'pending' },
           { id: 'bth_bootstrap', label: 'Fallback BTH', status: 'pending' },
         ]
       : [
           { id: 'wg_tunnel', label: 'Aplicar tunel WireGuard', status: 'pending' },
+          { id: 'wg_register_peer', label: 'Registrar peer en VPS', status: 'pending' },
           { id: 'verify_wg', label: 'Validar tunel WireGuard', status: 'pending' },
           { id: 'bth_bootstrap', label: 'Fallback BTH', status: 'pending' },
         ]
@@ -1231,10 +1289,19 @@ const MikroTikManagement: React.FC = () => {
       if (!connected) {
         const wgOk = await executeScriptStep('wg_tunnel', 'tunel WireGuard', quickConnect.scripts.wireguard_site_to_vps_script || '')
         if (wgOk) {
-          connected = await testConnectionStep('verify_wg', 'Conexion por WireGuard operativa')
+          const registered = await registerWireGuardPeerStep('wg_register_peer')
+          if (registered) {
+            connected = await testConnectionStep('verify_wg', 'Conexion por WireGuard operativa')
+          } else {
+            updateStep('verify_wg', 'skipped', 'Pendiente: registro de peer en VPS')
+          }
+        } else {
+          updateStep('wg_register_peer', 'skipped', 'No aplicado: tunel WG fallo')
+          updateStep('verify_wg', 'skipped', 'No aplicado: tunel WG fallo')
         }
       } else {
         updateStep('wg_tunnel', 'skipped', 'No requerido')
+        updateStep('wg_register_peer', 'skipped', 'No requerido')
         updateStep('verify_wg', 'skipped', 'No requerido')
       }
 

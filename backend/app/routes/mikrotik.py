@@ -21,9 +21,12 @@ import uuid
 import zipfile
 import base64
 import binascii
+import shlex
+import subprocess
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import x25519
+import paramiko
 
 mikrotik_bp = Blueprint('mikrotik', __name__)
 logger = logging.getLogger(__name__)
@@ -41,6 +44,8 @@ _TENANT_SETTING_SENTINEL = object()
 WG_PROFILE_ENDPOINT_DEFAULT = 'vpn.fastisp.cloud:51820'
 WG_PROFILE_ALLOWED_SUBNETS_DEFAULT = '10.250.0.0/16,10.251.0.0/16'
 WG_PROFILE_SERVER_PUBLIC_KEY_PLACEHOLDER = '<WIREGUARD_SERVER_PUBLIC_KEY>'
+WG_VPS_SYNC_MODE_DEFAULT = 'auto'
+WG_VPS_INTERFACE_DEFAULT = 'wg0'
 
 
 def _decode_text_payload(raw_payload: bytes) -> str:
@@ -183,6 +188,404 @@ def _normalize_wireguard_endpoint(raw_value: Any) -> Dict[str, Any]:
         'endpoint': endpoint,
         'host': host,
         'port': int(port),
+    }
+
+
+def _normalize_wg_vps_sync_mode(raw_value: Any) -> str:
+    token = str(raw_value or '').strip().lower()
+    if token in ('auto', 'local', 'ssh', 'manual'):
+        return token
+    return WG_VPS_SYNC_MODE_DEFAULT
+
+
+def _normalize_wg_allowed_ip(raw_value: Any) -> str:
+    candidate = str(raw_value or '').strip()
+    if not candidate:
+        return ''
+    if '/' in candidate:
+        try:
+            iface = ipaddress.ip_interface(candidate)
+            return f'{iface.ip}/{iface.network.prefixlen}'
+        except ValueError:
+            return ''
+    try:
+        ip_obj = ipaddress.ip_address(candidate)
+        return f'{ip_obj}/32' if ip_obj.version == 4 else f'{ip_obj}/128'
+    except ValueError:
+        return ''
+
+
+def _safe_router_wireguard_allowed_ip(router_id: Any) -> str:
+    try:
+        token = int(router_id)
+    except (TypeError, ValueError):
+        token = 0
+    octet = token % 250
+    if octet <= 0:
+        octet = 1
+    return f'10.250.{octet}.2/32'
+
+
+def _build_wg_set_commands(vps_interface: str, peer_public_key: str, allowed_ip: str) -> Dict[str, Any]:
+    iface = str(vps_interface or WG_VPS_INTERFACE_DEFAULT).strip() or WG_VPS_INTERFACE_DEFAULT
+    peer_key = str(peer_public_key or '').strip()
+    allowed = str(allowed_ip or '').strip()
+    argv_set = ['wg', 'set', iface, 'peer', peer_key, 'allowed-ips', allowed]
+    argv_save = ['wg-quick', 'save', iface]
+    shell_set = ' '.join(shlex.quote(part) for part in argv_set)
+    shell_save = ' '.join(shlex.quote(part) for part in argv_save)
+    return {
+        'interface': iface,
+        'allowed_ip': allowed,
+        'peer_public_key': peer_key,
+        'argv_set': argv_set,
+        'argv_save': argv_save,
+        'shell_set': shell_set,
+        'shell_save': shell_save,
+    }
+
+
+def _run_local_command(argv: List[str], timeout_seconds: int = 8) -> Dict[str, Any]:
+    try:
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=max(1, int(timeout_seconds)),
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        return {'ok': False, 'error': str(exc), 'stdout': '', 'stderr': ''}
+    except Exception as exc:
+        return {'ok': False, 'error': str(exc), 'stdout': '', 'stderr': ''}
+    return {
+        'ok': completed.returncode == 0,
+        'return_code': completed.returncode,
+        'stdout': str(completed.stdout or '').strip(),
+        'stderr': str(completed.stderr or '').strip(),
+    }
+
+
+def _register_wireguard_peer_local(commands: Dict[str, Any], persist: bool, timeout_seconds: int = 8) -> Dict[str, Any]:
+    set_result = _run_local_command(commands.get('argv_set') or [], timeout_seconds=timeout_seconds)
+    if not set_result.get('ok'):
+        detail = set_result.get('stderr') or set_result.get('stdout') or set_result.get('error') or 'wg set failed'
+        return {
+            'success': False,
+            'mode': 'local',
+            'message': f'wg set failed: {detail}',
+            'set_result': set_result,
+        }
+
+    save_result: Optional[Dict[str, Any]] = None
+    if persist:
+        save_result = _run_local_command(commands.get('argv_save') or [], timeout_seconds=timeout_seconds)
+        if not save_result.get('ok'):
+            detail = save_result.get('stderr') or save_result.get('stdout') or save_result.get('error') or 'wg-quick save failed'
+            return {
+                'success': False,
+                'mode': 'local',
+                'message': f'wg-quick save failed: {detail}',
+                'set_result': set_result,
+                'save_result': save_result,
+            }
+
+    return {
+        'success': True,
+        'mode': 'local',
+        'message': 'Peer registrado en VPS via comando local.',
+        'set_result': set_result,
+        'save_result': save_result,
+    }
+
+
+def _run_ssh_command(
+    ssh_client: paramiko.SSHClient,
+    command: str,
+    timeout_seconds: int = 8,
+) -> Dict[str, Any]:
+    try:
+        _, stdout, stderr = ssh_client.exec_command(command, timeout=max(1, int(timeout_seconds)))
+        exit_status = stdout.channel.recv_exit_status()
+        stdout_text = stdout.read().decode('utf-8', errors='ignore').strip()
+        stderr_text = stderr.read().decode('utf-8', errors='ignore').strip()
+    except Exception as exc:
+        return {'ok': False, 'error': str(exc), 'stdout': '', 'stderr': ''}
+    return {
+        'ok': exit_status == 0,
+        'return_code': exit_status,
+        'stdout': stdout_text,
+        'stderr': stderr_text,
+    }
+
+
+def _register_wireguard_peer_via_ssh(
+    commands: Dict[str, Any],
+    persist: bool,
+    ssh_host: str,
+    ssh_user: str,
+    ssh_port: int = 22,
+    ssh_password: str = '',
+    ssh_key_path: str = '',
+    timeout_seconds: int = 8,
+    use_sudo: bool = True,
+) -> Dict[str, Any]:
+    if not ssh_host or not ssh_user:
+        return {
+            'success': False,
+            'mode': 'ssh',
+            'message': 'MIKROTIK_WG_VPS_SSH_HOST y MIKROTIK_WG_VPS_SSH_USER son requeridos para modo ssh.',
+        }
+
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    connect_kwargs: Dict[str, Any] = {
+        'hostname': ssh_host,
+        'username': ssh_user,
+        'port': int(ssh_port or 22),
+        'timeout': max(2, int(timeout_seconds)),
+        'banner_timeout': max(2, int(timeout_seconds)),
+        'auth_timeout': max(2, int(timeout_seconds)),
+        'look_for_keys': bool(ssh_key_path),
+    }
+    if ssh_key_path:
+        connect_kwargs['key_filename'] = ssh_key_path
+    if ssh_password:
+        connect_kwargs['password'] = ssh_password
+
+    try:
+        client.connect(**connect_kwargs)
+    except Exception as exc:
+        return {'success': False, 'mode': 'ssh', 'message': f'SSH connect failed: {exc}'}
+
+    prefixed_set = str(commands.get('shell_set') or '').strip()
+    prefixed_save = str(commands.get('shell_save') or '').strip()
+    if use_sudo:
+        prefixed_set = f'sudo -n {prefixed_set}'
+        prefixed_save = f'sudo -n {prefixed_save}'
+
+    try:
+        set_result = _run_ssh_command(client, prefixed_set, timeout_seconds=timeout_seconds)
+        if not set_result.get('ok') and use_sudo:
+            stderr_lower = str(set_result.get('stderr') or '').lower()
+            if 'sudo:' in stderr_lower or 'permission denied' in stderr_lower:
+                set_result = _run_ssh_command(client, str(commands.get('shell_set') or ''), timeout_seconds=timeout_seconds)
+        if not set_result.get('ok'):
+            detail = set_result.get('stderr') or set_result.get('stdout') or set_result.get('error') or 'wg set failed'
+            return {
+                'success': False,
+                'mode': 'ssh',
+                'message': f'wg set failed por SSH: {detail}',
+                'set_result': set_result,
+            }
+
+        save_result: Optional[Dict[str, Any]] = None
+        if persist:
+            save_result = _run_ssh_command(client, prefixed_save, timeout_seconds=timeout_seconds)
+            if not save_result.get('ok') and use_sudo:
+                stderr_lower = str(save_result.get('stderr') or '').lower()
+                if 'sudo:' in stderr_lower or 'permission denied' in stderr_lower:
+                    save_result = _run_ssh_command(client, str(commands.get('shell_save') or ''), timeout_seconds=timeout_seconds)
+            if not save_result.get('ok'):
+                detail = save_result.get('stderr') or save_result.get('stdout') or save_result.get('error') or 'wg-quick save failed'
+                return {
+                    'success': False,
+                    'mode': 'ssh',
+                    'message': f'wg-quick save failed por SSH: {detail}',
+                    'set_result': set_result,
+                    'save_result': save_result,
+                }
+
+        return {
+            'success': True,
+            'mode': 'ssh',
+            'message': f'Peer registrado en VPS via SSH ({ssh_user}@{ssh_host}).',
+            'set_result': set_result,
+            'save_result': save_result,
+        }
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+
+
+def _resolve_wg_sync_runtime(payload: Dict[str, Any]) -> Dict[str, Any]:
+    data = payload or {}
+    mode = _normalize_wg_vps_sync_mode(data.get('sync_mode') or current_app.config.get('MIKROTIK_WG_VPS_SYNC_MODE'))
+    vps_interface = str(data.get('vps_interface') or current_app.config.get('MIKROTIK_WG_VPS_INTERFACE') or WG_VPS_INTERFACE_DEFAULT).strip() or WG_VPS_INTERFACE_DEFAULT
+    persist = _as_bool(data.get('persist'), default=_as_bool(current_app.config.get('MIKROTIK_WG_VPS_PERSIST'), default=True))
+    ssh_host = str(data.get('ssh_host') or current_app.config.get('MIKROTIK_WG_VPS_SSH_HOST') or '').strip()
+    ssh_user = str(data.get('ssh_user') or current_app.config.get('MIKROTIK_WG_VPS_SSH_USER') or '').strip()
+    ssh_password = str(data.get('ssh_password') or current_app.config.get('MIKROTIK_WG_VPS_SSH_PASSWORD') or '').strip()
+    ssh_key_path = str(data.get('ssh_key_path') or current_app.config.get('MIKROTIK_WG_VPS_SSH_KEY_PATH') or '').strip()
+    ssh_port_raw = data.get('ssh_port') if data.get('ssh_port') not in (None, '') else current_app.config.get('MIKROTIK_WG_VPS_SSH_PORT')
+    timeout_raw = data.get('ssh_timeout_seconds') if data.get('ssh_timeout_seconds') not in (None, '') else current_app.config.get('MIKROTIK_WG_VPS_SSH_TIMEOUT_SECONDS')
+    use_sudo = _as_bool(data.get('ssh_use_sudo'), default=_as_bool(current_app.config.get('MIKROTIK_WG_VPS_SSH_USE_SUDO'), default=True))
+    try:
+        ssh_port = int(ssh_port_raw or 22)
+    except (TypeError, ValueError):
+        ssh_port = 22
+    try:
+        timeout_seconds = int(timeout_raw or 8)
+    except (TypeError, ValueError):
+        timeout_seconds = 8
+    timeout_seconds = min(max(timeout_seconds, 2), 30)
+
+    return {
+        'mode': mode,
+        'vps_interface': vps_interface,
+        'persist': persist,
+        'ssh_host': ssh_host,
+        'ssh_user': ssh_user,
+        'ssh_password': ssh_password,
+        'ssh_key_path': ssh_key_path,
+        'ssh_port': ssh_port,
+        'ssh_timeout_seconds': timeout_seconds,
+        'ssh_use_sudo': use_sudo,
+    }
+
+
+def _collect_router_wireguard_identity(
+    service: MikroTikService,
+    interface_name: str = 'wg-fastisp',
+) -> Dict[str, Any]:
+    api_obj = getattr(service, 'api', None)
+    if not api_obj:
+        return {'success': False, 'error': 'Router API no disponible'}
+
+    safe_interface = str(interface_name or 'wg-fastisp').strip() or 'wg-fastisp'
+    try:
+        interfaces_api = api_obj.get_resource('/interface/wireguard')
+        rows = interfaces_api.get(name=safe_interface) or []
+        interface_row = rows[0] if rows else None
+        if not interface_row:
+            return {'success': False, 'error': f'No existe interfaz WireGuard "{safe_interface}" en el router'}
+
+        public_key = str(_pick_value(interface_row, 'public-key', 'public_key') or '').strip()
+        if not _is_valid_wireguard_public_key(public_key):
+            return {'success': False, 'error': 'No se pudo leer una public key valida del router'}
+
+        addresses_api = api_obj.get_resource('/ip/address')
+        raw_addresses = addresses_api.get(interface=safe_interface) or []
+        normalized_addresses: List[str] = []
+        selected_peer_ip = ''
+        for row in raw_addresses:
+            candidate = _normalize_wg_allowed_ip(_pick_value(row, 'address'))
+            if not candidate:
+                continue
+            normalized_addresses.append(candidate)
+            if not selected_peer_ip and '/' in candidate and candidate.count('.') == 3:
+                selected_peer_ip = candidate
+
+        return {
+            'success': True,
+            'interface_name': safe_interface,
+            'public_key': public_key,
+            'addresses': normalized_addresses,
+            'selected_peer_ip': selected_peer_ip,
+        }
+    except Exception as exc:
+        return {'success': False, 'error': f'No se pudo leer identidad WireGuard: {exc}'}
+
+
+def _sync_router_peer_to_vps(
+    peer_public_key: str,
+    allowed_ip: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    runtime = _resolve_wg_sync_runtime(payload)
+    commands = _build_wg_set_commands(runtime.get('vps_interface') or WG_VPS_INTERFACE_DEFAULT, peer_public_key, allowed_ip)
+    manual_command = str(commands.get('shell_set') or '')
+    if runtime.get('persist'):
+        manual_command = f'{manual_command} && {commands.get("shell_save")}'
+
+    mode = str(runtime.get('mode') or WG_VPS_SYNC_MODE_DEFAULT)
+    attempts: List[Dict[str, Any]] = []
+
+    if mode == 'manual':
+        return {
+            'success': False,
+            'mode': mode,
+            'manual_required': True,
+            'message': 'Modo manual configurado; ejecuta el comando en el VPS.',
+            'manual_command': manual_command,
+            'runtime': runtime,
+            'commands': commands,
+            'attempts': attempts,
+        }
+
+    if mode in ('auto', 'local'):
+        local_result = _register_wireguard_peer_local(
+            commands,
+            persist=bool(runtime.get('persist')),
+            timeout_seconds=int(runtime.get('ssh_timeout_seconds') or 8),
+        )
+        attempts.append({'transport': 'local', **local_result})
+        if local_result.get('success'):
+            return {
+                'success': True,
+                'mode': 'local',
+                'message': local_result.get('message') or 'Peer registrado en VPS (local).',
+                'manual_command': manual_command,
+                'runtime': runtime,
+                'commands': commands,
+                'attempts': attempts,
+            }
+        if mode == 'local':
+            return {
+                'success': False,
+                'mode': 'local',
+                'message': local_result.get('message') or 'No se pudo registrar peer en modo local.',
+                'manual_required': True,
+                'manual_command': manual_command,
+                'runtime': runtime,
+                'commands': commands,
+                'attempts': attempts,
+            }
+
+    if mode in ('auto', 'ssh'):
+        ssh_result = _register_wireguard_peer_via_ssh(
+            commands,
+            persist=bool(runtime.get('persist')),
+            ssh_host=str(runtime.get('ssh_host') or ''),
+            ssh_user=str(runtime.get('ssh_user') or ''),
+            ssh_port=int(runtime.get('ssh_port') or 22),
+            ssh_password=str(runtime.get('ssh_password') or ''),
+            ssh_key_path=str(runtime.get('ssh_key_path') or ''),
+            timeout_seconds=int(runtime.get('ssh_timeout_seconds') or 8),
+            use_sudo=bool(runtime.get('ssh_use_sudo')),
+        )
+        attempts.append({'transport': 'ssh', **ssh_result})
+        if ssh_result.get('success'):
+            return {
+                'success': True,
+                'mode': 'ssh',
+                'message': ssh_result.get('message') or 'Peer registrado en VPS (SSH).',
+                'manual_command': manual_command,
+                'runtime': runtime,
+                'commands': commands,
+                'attempts': attempts,
+            }
+
+    error_message = 'No se pudo registrar peer automaticamente en el VPS.'
+    if attempts:
+        first_error = next(
+            (str(item.get('message') or '').strip() for item in attempts if str(item.get('message') or '').strip()),
+            '',
+        )
+        if first_error:
+            error_message = first_error
+
+    return {
+        'success': False,
+        'mode': mode,
+        'message': error_message,
+        'manual_required': True,
+        'manual_command': manual_command,
+        'runtime': runtime,
+        'commands': commands,
+        'attempts': attempts,
     }
 
 
@@ -1766,6 +2169,66 @@ def router_quick_connect(router_id):
             'back_to_home': back_to_home,
         }
     ), 200
+
+
+@mikrotik_bp.route('/routers/<router_id>/wireguard/register-peer', methods=['POST'])
+@admin_required()
+def register_router_wireguard_peer(router_id):
+    router = _router_for_request(router_id)
+    if not router:
+        return jsonify({'success': False, 'error': 'Router not found'}), 404
+
+    guard_error = _live_guard(require_preflight=True, required_default=True)
+    if guard_error:
+        return guard_error
+
+    data = request.get_json(silent=True) or {}
+    router_interface = str(data.get('router_interface') or data.get('router_wg_interface') or 'wg-fastisp').strip() or 'wg-fastisp'
+    requested_allowed_ip = _normalize_wg_allowed_ip(data.get('allowed_ip') or data.get('allowed_ips') or data.get('peer_ip'))
+    fallback_allowed_ip = _safe_router_wireguard_allowed_ip(router.id)
+
+    try:
+        with MikroTikService(router.id) as service:
+            if not service.api:
+                return jsonify({'success': False, 'error': 'Could not connect to router API'}), 502
+            router_identity = _collect_router_wireguard_identity(service, interface_name=router_interface)
+    except Exception as exc:
+        return jsonify({'success': False, 'error': f'Error reading router WireGuard identity: {exc}'}), 500
+
+    if not router_identity.get('success'):
+        return jsonify({'success': False, 'error': router_identity.get('error') or 'WireGuard interface not ready'}), 400
+
+    peer_public_key = str(router_identity.get('public_key') or '').strip()
+    if not _is_valid_wireguard_public_key(peer_public_key):
+        return jsonify({'success': False, 'error': 'Router WireGuard public key is invalid'}), 400
+
+    router_peer_ip = str(router_identity.get('selected_peer_ip') or '').strip()
+    allowed_ip = requested_allowed_ip or router_peer_ip or fallback_allowed_ip
+    allowed_ip = _normalize_wg_allowed_ip(allowed_ip)
+    if not allowed_ip:
+        return jsonify({'success': False, 'error': 'No valid allowed_ip available for peer registration'}), 400
+
+    sync_result = _sync_router_peer_to_vps(peer_public_key, allowed_ip, data)
+    payload = {
+        'success': bool(sync_result.get('success')),
+        'router': router.to_dict(),
+        'router_wireguard': {
+            'interface': router_identity.get('interface_name') or router_interface,
+            'public_key': peer_public_key,
+            'addresses': router_identity.get('addresses') or [],
+            'selected_allowed_ip': allowed_ip,
+        },
+        'vps_sync': {
+            'success': bool(sync_result.get('success')),
+            'mode': sync_result.get('mode'),
+            'message': sync_result.get('message'),
+            'manual_required': bool(sync_result.get('manual_required')),
+            'manual_command': sync_result.get('manual_command') or '',
+            'runtime': sync_result.get('runtime') or {},
+            'attempts': sync_result.get('attempts') or [],
+        },
+    }
+    return jsonify(payload), 200 if sync_result.get('success') else 502
 
 
 def _script_escape(value: Any) -> str:

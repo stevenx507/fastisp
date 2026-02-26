@@ -245,6 +245,169 @@ def test_wireguard_profile_routes_and_quick_connect_use_tenant_profile(client, a
     assert 'public-key="UkoIc1YP0iCZ0b/NGp39zhaLU02HfKI8aU+C2jp591M="' in str(quick_payload['scripts']['wireguard_site_to_vps_script'])
 
 
+class _DummyRouterOsResource:
+    def __init__(self, rows):
+        self.rows = list(rows or [])
+
+    def get(self, **kwargs):
+        if not kwargs:
+            return list(self.rows)
+        matched = []
+        for row in self.rows:
+            row_data = row or {}
+            ok = True
+            for key, value in kwargs.items():
+                direct = row_data.get(key)
+                alt_dash = row_data.get(str(key).replace('_', '-'))
+                alt_underscore = row_data.get(str(key).replace('-', '_'))
+                row_value = direct if direct is not None else alt_dash if alt_dash is not None else alt_underscore
+                if str(row_value) != str(value):
+                    ok = False
+                    break
+            if ok:
+                matched.append(row_data)
+        return matched
+
+
+class _DummyRouterOsApi:
+    def __init__(self):
+        self.resources = {
+            '/interface/wireguard': _DummyRouterOsResource(
+                [
+                    {
+                        'name': 'wg-fastisp',
+                        'public-key': '+pWAE0GglDtysNZ4+qR7vTRbT6A8JS14bPmsyRK4a20=',
+                    }
+                ]
+            ),
+            '/ip/address': _DummyRouterOsResource(
+                [
+                    {
+                        'interface': 'wg-fastisp',
+                        'address': '10.250.8.2/32',
+                    }
+                ]
+            ),
+        }
+
+    def get_resource(self, path):
+        return self.resources[path]
+
+
+class _DummyMikrotikWireGuardIdentityService:
+    def __init__(self, router_id):
+        self.router_id = router_id
+        self.api = _DummyRouterOsApi()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+def test_register_wireguard_peer_endpoint_syncs_vps_peer(client, app, monkeypatch):
+    headers = _admin_headers(client, app)
+    monkeypatch.setattr(mikrotik_routes, 'MikroTikService', _DummyMikrotikWireGuardIdentityService)
+
+    call_trace = {}
+
+    def _fake_sync(peer_public_key, allowed_ip, payload):
+        call_trace['peer_public_key'] = peer_public_key
+        call_trace['allowed_ip'] = allowed_ip
+        call_trace['payload'] = payload
+        return {
+            'success': True,
+            'mode': 'ssh',
+            'message': 'Peer registrado en VPS por SSH.',
+            'manual_command': 'wg set wg0 peer ...',
+            'runtime': {'mode': 'ssh', 'vps_interface': 'wg0'},
+            'attempts': [{'transport': 'ssh', 'success': True}],
+        }
+
+    monkeypatch.setattr(mikrotik_routes, '_sync_router_peer_to_vps', _fake_sync)
+
+    create_response = client.post(
+        '/api/mikrotik/routers',
+        json={
+            'name': 'Nodo-WG-Sync',
+            'ip_address': '10.10.91.1',
+            'username': 'api-admin',
+            'password': 'router-pass',
+            'api_port': 8728,
+            'test_connection': False,
+        },
+        headers=headers,
+    )
+    assert create_response.status_code == 201
+    router_id = str(create_response.get_json()['router']['id'])
+
+    response = client.post(
+        f'/api/mikrotik/routers/{router_id}/wireguard/register-peer',
+        json={
+            'change_ticket': 'CHG-WG-001',
+            'preflight_ack': True,
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['success'] is True
+    assert payload['router_wireguard']['interface'] == 'wg-fastisp'
+    assert payload['router_wireguard']['public_key'] == '+pWAE0GglDtysNZ4+qR7vTRbT6A8JS14bPmsyRK4a20='
+    assert payload['router_wireguard']['selected_allowed_ip'] == '10.250.8.2/32'
+    assert payload['vps_sync']['mode'] == 'ssh'
+    assert call_trace['peer_public_key'] == '+pWAE0GglDtysNZ4+qR7vTRbT6A8JS14bPmsyRK4a20='
+    assert call_trace['allowed_ip'] == '10.250.8.2/32'
+
+
+def test_register_wireguard_peer_endpoint_returns_manual_command_on_failure(client, app, monkeypatch):
+    headers = _admin_headers(client, app)
+    monkeypatch.setattr(mikrotik_routes, 'MikroTikService', _DummyMikrotikWireGuardIdentityService)
+    monkeypatch.setattr(
+        mikrotik_routes,
+        '_sync_router_peer_to_vps',
+        lambda _key, _ip, _payload: {
+            'success': False,
+            'mode': 'auto',
+            'message': 'No se pudo registrar peer automaticamente en el VPS.',
+            'manual_required': True,
+            'manual_command': 'wg set wg0 peer +pWAE... allowed-ips 10.250.8.2/32',
+            'runtime': {'mode': 'auto'},
+            'attempts': [{'transport': 'local', 'success': False}],
+        },
+    )
+
+    create_response = client.post(
+        '/api/mikrotik/routers',
+        json={
+            'name': 'Nodo-WG-Manual',
+            'ip_address': '10.10.92.1',
+            'username': 'api-admin',
+            'password': 'router-pass',
+            'api_port': 8728,
+            'test_connection': False,
+        },
+        headers=headers,
+    )
+    assert create_response.status_code == 201
+    router_id = str(create_response.get_json()['router']['id'])
+
+    response = client.post(
+        f'/api/mikrotik/routers/{router_id}/wireguard/register-peer',
+        json={
+            'change_ticket': 'CHG-WG-002',
+            'preflight_ack': True,
+        },
+        headers=headers,
+    )
+    assert response.status_code == 502
+    payload = response.get_json()
+    assert payload['success'] is False
+    assert payload['vps_sync']['manual_required'] is True
+    assert 'wg set wg0 peer' in str(payload['vps_sync']['manual_command'])
+
+
 class _DummyMikrotikService:
     scripts = []
 
