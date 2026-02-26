@@ -125,6 +125,9 @@ class Config:
     # MikroTik
     MIKROTIK_DEFAULT_USERNAME = os.environ.get('MIKROTIK_DEFAULT_USERNAME', 'admin')
     MIKROTIK_DEFAULT_PASSWORD = os.environ.get('MIKROTIK_DEFAULT_PASSWORD', '')
+    MIKROTIK_WG_ENDPOINT = os.environ.get('MIKROTIK_WG_ENDPOINT', 'vpn.fastisp.cloud:51820')
+    MIKROTIK_WG_SERVER_PUBLIC_KEY = os.environ.get('MIKROTIK_WG_SERVER_PUBLIC_KEY', '')
+    MIKROTIK_WG_ALLOWED_SUBNETS = os.environ.get('MIKROTIK_WG_ALLOWED_SUBNETS', '10.250.0.0/16,10.251.0.0/16')
     ROTATE_PASSWORDS_DRY_RUN = _as_bool(os.environ.get('ROTATE_PASSWORDS_DRY_RUN'), default=False)
     PASSWORD_ROTATION_LENGTH = os.environ.get('PASSWORD_ROTATION_LENGTH', '24')
     

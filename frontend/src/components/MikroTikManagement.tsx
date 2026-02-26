@@ -118,10 +118,27 @@ interface RouterBackToHomeStatus {
   error?: string
 }
 
+interface RouterWireGuardProfile {
+  endpoint?: string
+  endpoint_host?: string
+  endpoint_port?: number
+  server_public_key?: string
+  server_public_key_valid?: boolean
+  allowed_subnets?: string
+  ready?: boolean
+  issues?: string[]
+  source?: {
+    endpoint?: string
+    server_public_key?: string
+    allowed_subnets?: string
+  }
+}
+
 interface RouterQuickConnectResponse {
   success: boolean
   access_profile?: RouterAccessProfile
   connection_plan?: RouterConnectionPlan
+  wireguard_profile?: RouterWireGuardProfile
   scripts?: RouterQuickScripts
   guidance?: RouterQuickGuidance
   back_to_home?: RouterBackToHomeStatus
@@ -1805,6 +1822,23 @@ const MikroTikManagement: React.FC = () => {
                                 {quickConnect.connection_plan.recommended_transport || '-'}
                               </span>
                             </div>
+                            {quickConnect.wireguard_profile && (
+                              <div className={`mt-2 rounded border p-2 text-xs ${
+                                quickConnect.wireguard_profile.ready
+                                  ? 'border-emerald-200 bg-emerald-100 text-emerald-800'
+                                  : 'border-amber-200 bg-amber-50 text-amber-800'
+                              }`}>
+                                <p>
+                                  Perfil WG: <strong>{quickConnect.wireguard_profile.ready ? 'listo' : 'incompleto'}</strong> | endpoint:{' '}
+                                  <strong>{quickConnect.wireguard_profile.endpoint || '-'}</strong>
+                                </p>
+                                {!quickConnect.wireguard_profile.ready && (quickConnect.wireguard_profile.issues || []).length > 0 && (
+                                  <p className="mt-1">
+                                    {(quickConnect.wireguard_profile.issues || []).join(' | ')}
+                                  </p>
+                                )}
+                              </div>
+                            )}
                             <div className="mt-2 flex flex-wrap gap-2">
                               {[1, 2, 3].map((step) => (
                                 <button

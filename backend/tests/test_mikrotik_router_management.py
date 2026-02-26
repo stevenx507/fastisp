@@ -195,6 +195,56 @@ def test_quick_connect_includes_managed_identity_when_private_key_not_provided(c
     assert 'private-key="' in str(payload.get('back_to_home', {}).get('scripts', {}).get('add_vps_user_script', ''))
 
 
+def test_wireguard_profile_routes_and_quick_connect_use_tenant_profile(client, app, monkeypatch):
+    headers = _admin_headers(client, app)
+    monkeypatch.setattr(mikrotik_routes, 'MikroTikService', _DummyMikrotikQuickConnectService)
+
+    set_profile_response = client.post(
+        '/api/mikrotik/wireguard/profile',
+        json={
+            'endpoint': '187.77.47.232:51820',
+            'server_public_key': 'UkoIc1YP0iCZ0b/NGp39zhaLU02HfKI8aU+C2jp591M=',
+            'allowed_subnets': '10.250.0.1/32',
+        },
+        headers=headers,
+    )
+    assert set_profile_response.status_code == 200
+    set_payload = set_profile_response.get_json()
+    assert set_payload['success'] is True
+    assert set_payload['profile']['ready'] is True
+    assert set_payload['profile']['endpoint'] == '187.77.47.232:51820'
+
+    get_profile_response = client.get('/api/mikrotik/wireguard/profile', headers=headers)
+    assert get_profile_response.status_code == 200
+    get_payload = get_profile_response.get_json()
+    assert get_payload['success'] is True
+    assert get_payload['profile']['server_public_key_valid'] is True
+
+    create_response = client.post(
+        '/api/mikrotik/routers',
+        json={
+            'name': 'Nodo-WG-Profile',
+            'ip_address': '10.10.97.2',
+            'username': 'api-admin',
+            'password': 'router-pass',
+            'api_port': 8728,
+            'test_connection': False,
+        },
+        headers=headers,
+    )
+    assert create_response.status_code == 201
+    router_id = str(create_response.get_json()['router']['id'])
+
+    quick_response = client.get(f'/api/mikrotik/routers/{router_id}/quick-connect', headers=headers)
+    assert quick_response.status_code == 200
+    quick_payload = quick_response.get_json()
+    wg_profile = quick_payload.get('wireguard_profile') or {}
+    assert wg_profile.get('ready') is True
+    assert wg_profile.get('endpoint') == '187.77.47.232:51820'
+    assert 'endpoint-address=187.77.47.232' in str(quick_payload['scripts']['wireguard_site_to_vps_script'])
+    assert 'public-key="UkoIc1YP0iCZ0b/NGp39zhaLU02HfKI8aU+C2jp591M="' in str(quick_payload['scripts']['wireguard_site_to_vps_script'])
+
+
 class _DummyMikrotikService:
     scripts = []
 

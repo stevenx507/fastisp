@@ -34,7 +34,13 @@ ENTERPRISE_CHANGELOG: Dict[str, List[Dict[str, Any]]] = {}
 ENTERPRISE_CHANGE_INDEX: Dict[str, Dict[str, Any]] = {}
 WIREGUARD_IMPORT_MAX_BYTES = 2 * 1024 * 1024
 BTH_MANAGED_IDENTITY_SETTING_KEY = 'mikrotik_bth_managed_identity'
+WG_PROFILE_ENDPOINT_SETTING_KEY = 'mikrotik_wg_endpoint'
+WG_PROFILE_SERVER_PUBLIC_KEY_SETTING_KEY = 'mikrotik_wg_server_public_key'
+WG_PROFILE_ALLOWED_SUBNETS_SETTING_KEY = 'mikrotik_wg_allowed_subnets'
 _TENANT_SETTING_SENTINEL = object()
+WG_PROFILE_ENDPOINT_DEFAULT = 'vpn.fastisp.cloud:51820'
+WG_PROFILE_ALLOWED_SUBNETS_DEFAULT = '10.250.0.0/16,10.251.0.0/16'
+WG_PROFILE_SERVER_PUBLIC_KEY_PLACEHOLDER = '<WIREGUARD_SERVER_PUBLIC_KEY>'
 
 
 def _decode_text_payload(raw_payload: bytes) -> str:
@@ -132,6 +138,148 @@ def _normalize_router_host(raw_value: str) -> tuple[str, Optional[int]]:
     host = str(parsed.get('host') or raw_value or '').strip()
     port = parsed.get('port')
     return host, port
+
+
+def _looks_like_placeholder(value: str) -> bool:
+    token = str(value or '').strip()
+    if not token:
+        return False
+    return token.startswith('<') or token.endswith('>') or token.startswith('${')
+
+
+def _is_valid_wireguard_public_key(value: str) -> bool:
+    token = str(value or '').strip()
+    if not token or _looks_like_placeholder(token):
+        return False
+    try:
+        decoded = base64.b64decode(token.encode('ascii'), validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    return len(decoded) == 32
+
+
+def _normalize_wireguard_allowed_subnets(raw_value: Any) -> str:
+    if isinstance(raw_value, list):
+        tokens = [str(item or '').strip() for item in raw_value if str(item or '').strip()]
+    else:
+        tokens = _split_csv_values(str(raw_value or ''))
+    return ','.join(tokens) if tokens else WG_PROFILE_ALLOWED_SUBNETS_DEFAULT
+
+
+def _normalize_wireguard_endpoint(raw_value: Any) -> Dict[str, Any]:
+    raw_text = str(raw_value or '').strip()
+    if not raw_text:
+        raw_text = WG_PROFILE_ENDPOINT_DEFAULT
+    parsed = _parse_wireguard_endpoint(raw_text)
+    host = str(parsed.get('host') or '').strip()
+    port = parsed.get('port')
+    if not host:
+        host = str(_parse_wireguard_endpoint(WG_PROFILE_ENDPOINT_DEFAULT).get('host') or 'vpn.fastisp.cloud')
+    if port is None:
+        fallback_port = _parse_wireguard_endpoint(WG_PROFILE_ENDPOINT_DEFAULT).get('port')
+        port = int(fallback_port or 51820)
+    endpoint = f'{host}:{int(port)}'
+    return {
+        'endpoint': endpoint,
+        'host': host,
+        'port': int(port),
+    }
+
+
+def _resolve_wireguard_profile(raw_params: Dict[str, Any]) -> Dict[str, Any]:
+    tenant_endpoint = ''
+    tenant_public_key = ''
+    tenant_allowed_subnets = ''
+    endpoint_source = 'default'
+    public_key_source = 'default'
+    allowed_subnets_source = 'default'
+
+    endpoint_row = _tenant_setting_row(WG_PROFILE_ENDPOINT_SETTING_KEY)
+    if endpoint_row and endpoint_row.value is not None:
+        tenant_endpoint = str(endpoint_row.value).strip()
+        if tenant_endpoint:
+            endpoint_source = 'tenant_setting'
+
+    public_key_row = _tenant_setting_row(WG_PROFILE_SERVER_PUBLIC_KEY_SETTING_KEY)
+    if public_key_row and public_key_row.value is not None:
+        tenant_public_key = str(public_key_row.value).strip()
+        if tenant_public_key:
+            public_key_source = 'tenant_setting'
+
+    allowed_subnets_row = _tenant_setting_row(WG_PROFILE_ALLOWED_SUBNETS_SETTING_KEY)
+    if allowed_subnets_row and allowed_subnets_row.value is not None:
+        tenant_allowed_subnets = _normalize_wireguard_allowed_subnets(allowed_subnets_row.value)
+        if tenant_allowed_subnets:
+            allowed_subnets_source = 'tenant_setting'
+
+    env_endpoint = str(current_app.config.get('MIKROTIK_WG_ENDPOINT') or '').strip()
+    env_public_key = str(current_app.config.get('MIKROTIK_WG_SERVER_PUBLIC_KEY') or '').strip()
+    env_allowed_subnets_raw = current_app.config.get('MIKROTIK_WG_ALLOWED_SUBNETS')
+    env_allowed_subnets = (
+        _normalize_wireguard_allowed_subnets(env_allowed_subnets_raw)
+        if str(env_allowed_subnets_raw or '').strip()
+        else ''
+    )
+
+    request_endpoint = str(raw_params.get('wg_endpoint') or '').strip()
+    request_public_key = str(raw_params.get('wg_server_public_key') or '').strip()
+    request_allowed_subnets_raw = raw_params.get('wg_allowed_subnets')
+    request_allowed_subnets = (
+        _normalize_wireguard_allowed_subnets(request_allowed_subnets_raw)
+        if str(request_allowed_subnets_raw or '').strip()
+        else ''
+    )
+
+    raw_endpoint = request_endpoint or tenant_endpoint or env_endpoint or WG_PROFILE_ENDPOINT_DEFAULT
+    if request_endpoint:
+        endpoint_source = 'request'
+    elif tenant_endpoint:
+        endpoint_source = 'tenant_setting'
+    elif env_endpoint:
+        endpoint_source = 'env'
+
+    raw_public_key = request_public_key or tenant_public_key or env_public_key
+    if request_public_key:
+        public_key_source = 'request'
+    elif tenant_public_key:
+        public_key_source = 'tenant_setting'
+    elif env_public_key:
+        public_key_source = 'env'
+
+    raw_allowed_subnets = request_allowed_subnets or tenant_allowed_subnets or env_allowed_subnets or WG_PROFILE_ALLOWED_SUBNETS_DEFAULT
+    if request_allowed_subnets:
+        allowed_subnets_source = 'request'
+    elif tenant_allowed_subnets:
+        allowed_subnets_source = 'tenant_setting'
+    elif env_allowed_subnets:
+        allowed_subnets_source = 'env'
+
+    normalized_endpoint = _normalize_wireguard_endpoint(raw_endpoint)
+    public_key = str(raw_public_key or '').strip()
+    allowed_subnets = _normalize_wireguard_allowed_subnets(raw_allowed_subnets)
+    public_key_valid = _is_valid_wireguard_public_key(public_key)
+
+    issues: List[str] = []
+    if not public_key_valid:
+        issues.append('Define una public key valida para el servidor WireGuard en perfil global.')
+    if not normalized_endpoint.get('host'):
+        issues.append('Define endpoint WireGuard valido (host:port).')
+
+    return {
+        'endpoint': normalized_endpoint.get('endpoint'),
+        'endpoint_host': normalized_endpoint.get('host'),
+        'endpoint_port': int(normalized_endpoint.get('port') or 51820),
+        'server_public_key': public_key if public_key_valid else WG_PROFILE_SERVER_PUBLIC_KEY_PLACEHOLDER,
+        'server_public_key_valid': public_key_valid,
+        'allowed_subnets': allowed_subnets,
+        'ready': public_key_valid and bool(normalized_endpoint.get('host')),
+        'issues': issues,
+        'source': {
+            'endpoint': endpoint_source,
+            'server_public_key': public_key_source,
+            'allowed_subnets': allowed_subnets_source,
+        },
+    }
 
 
 def _normalize_ip_scope_token(raw_value: Any) -> str:
@@ -1366,6 +1514,44 @@ def delete_router(router_id):
     return jsonify({'success': True, 'deleted_id': str(router.id)}), 200
 
 
+@mikrotik_bp.route('/wireguard/profile', methods=['GET'])
+@admin_required()
+def get_wireguard_profile():
+    profile = _resolve_wireguard_profile({})
+    return jsonify({'success': True, 'profile': profile}), 200
+
+
+@mikrotik_bp.route('/wireguard/profile', methods=['POST'])
+@admin_required()
+def update_wireguard_profile():
+    payload = request.get_json(silent=True) or {}
+    endpoint = str(payload.get('endpoint') or '').strip()
+    server_public_key = str(payload.get('server_public_key') or '').strip()
+    allowed_subnets = payload.get('allowed_subnets')
+
+    if endpoint:
+        normalized_endpoint = _normalize_wireguard_endpoint(endpoint)
+        endpoint_host = str(normalized_endpoint.get('host') or '').strip()
+        endpoint_port = int(normalized_endpoint.get('port') or 0)
+        if not endpoint_host or endpoint_port < 1 or endpoint_port > 65535:
+            return jsonify({'success': False, 'error': 'endpoint must be valid host:port'}), 400
+        _tenant_setting_upsert(WG_PROFILE_ENDPOINT_SETTING_KEY, normalized_endpoint['endpoint'])
+
+    if server_public_key:
+        if not _is_valid_wireguard_public_key(server_public_key):
+            return jsonify({'success': False, 'error': 'server_public_key is not a valid WireGuard public key'}), 400
+        _tenant_setting_upsert(WG_PROFILE_SERVER_PUBLIC_KEY_SETTING_KEY, server_public_key)
+
+    if allowed_subnets is not None:
+        normalized_subnets = _normalize_wireguard_allowed_subnets(allowed_subnets)
+        if not normalized_subnets:
+            return jsonify({'success': False, 'error': 'allowed_subnets cannot be empty'}), 400
+        _tenant_setting_upsert(WG_PROFILE_ALLOWED_SUBNETS_SETTING_KEY, normalized_subnets)
+
+    profile = _resolve_wireguard_profile({})
+    return jsonify({'success': True, 'profile': profile}), 200
+
+
 @mikrotik_bp.route('/routers/<router_id>/quick-connect', methods=['GET'])
 @admin_required()
 def router_quick_connect(router_id):
@@ -1375,13 +1561,14 @@ def router_quick_connect(router_id):
 
     ip_scope = request.args.get('ip_scope')
     allowed_mgmt = str(request.args.get('allowed_mgmt') or 'YOUR_PUBLIC_IP/32').strip() or 'YOUR_PUBLIC_IP/32'
-    wg_endpoint = str(request.args.get('wg_endpoint') or 'vpn.fastisp.cloud:51820').strip() or 'vpn.fastisp.cloud:51820'
+    wireguard_profile = _resolve_wireguard_profile(dict(request.args or {}))
+    wg_endpoint = str(wireguard_profile.get('endpoint') or WG_PROFILE_ENDPOINT_DEFAULT).strip() or WG_PROFILE_ENDPOINT_DEFAULT
     wg_server_public_key = str(
-        request.args.get('wg_server_public_key') or '<WIREGUARD_SERVER_PUBLIC_KEY>'
-    ).strip() or '<WIREGUARD_SERVER_PUBLIC_KEY>'
+        wireguard_profile.get('server_public_key') or WG_PROFILE_SERVER_PUBLIC_KEY_PLACEHOLDER
+    ).strip() or WG_PROFILE_SERVER_PUBLIC_KEY_PLACEHOLDER
     wg_allowed_subnets = str(
-        request.args.get('wg_allowed_subnets') or '10.250.0.0/16,10.251.0.0/16'
-    ).strip() or '10.250.0.0/16,10.251.0.0/16'
+        wireguard_profile.get('allowed_subnets') or WG_PROFILE_ALLOWED_SUBNETS_DEFAULT
+    ).strip() or WG_PROFILE_ALLOWED_SUBNETS_DEFAULT
     requested_bth_user = str(request.args.get('bth_user') or '').strip()
     bth_user = requested_bth_user or 'noc-vps'
     bth_allow_lan = _as_bool(request.args.get('bth_allow_lan'), default=True)
@@ -1393,20 +1580,17 @@ def router_quick_connect(router_id):
         bth_user = str(bth_identity.get('user_name') or bth_user).strip() or bth_user
     access_profile = _build_access_profile(router.ip_address, ip_scope)
 
-    wg_endpoint_host = wg_endpoint
-    wg_endpoint_port = 51820
-    if ':' in wg_endpoint:
-        host_part, port_part = wg_endpoint.rsplit(':', 1)
-        try:
-            wg_endpoint_port = int(port_part)
-            wg_endpoint_host = host_part
-        except ValueError:
-            wg_endpoint_host = wg_endpoint
-            wg_endpoint_port = 51820
+    wg_endpoint_host = str(wireguard_profile.get('endpoint_host') or '')
+    wg_endpoint_port = int(wireguard_profile.get('endpoint_port') or 51820)
 
     router_peer_ip = f'10.250.{int(router.id) % 250}.2/32'
     public_reachable = bool(access_profile.get('allows_direct_inbound'))
     direct_script_title = '# Perfil publico: habilitar acceso directo con ACL estricta.\n' if public_reachable else '# Perfil privado/NAT: acceso directo WAN puede no funcionar; prioriza WireGuard/BTH.\n'
+    wg_script_header = (
+        '# Perfil WireGuard listo: aplica tunel FastISP.\n'
+        if bool(wireguard_profile.get('ready'))
+        else '# Perfil WireGuard incompleto: configura endpoint/public key en /api/mikrotik/wireguard/profile antes de ejecutar.\n'
+    )
     scripts = {
         'direct_api_script': (
             direct_script_title
@@ -1417,10 +1601,19 @@ def router_quick_connect(router_id):
             + "/ip firewall filter add chain=input action=drop protocol=tcp dst-port=22,8728,8729 in-interface-list=WAN comment=\"Drop unmanaged remote\"\n"
         ),
         'wireguard_site_to_vps_script': (
-            "/interface/wireguard add name=wg-fastisp listen-port=13231 comment=\"FastISP NOC tunnel\"\n"
-            f"/ip/address/add address={router_peer_ip} interface=wg-fastisp comment=\"FastISP tunnel\"\n"
-            f"/interface/wireguard/peers/add interface=wg-fastisp public-key=\"{wg_server_public_key}\" endpoint-address={wg_endpoint_host} endpoint-port={wg_endpoint_port} allowed-address={wg_allowed_subnets} persistent-keepalive=25s\n"
-            "/ip/firewall/filter add chain=input action=accept protocol=udp dst-port=13231 comment=\"Allow WireGuard\"\n"
+            wg_script_header
+            + ':local wgName "wg-fastisp"\n'
+            + f':local wgAddress "{router_peer_ip}"\n'
+            + f':local wgServerKey "{wg_server_public_key}"\n'
+            + f':local wgEndpoint "{wg_endpoint_host}"\n'
+            + f':local wgPort "{wg_endpoint_port}"\n'
+            + f':local wgAllowed "{wg_allowed_subnets}"\n'
+            + ':if ([:len $wgServerKey] = 0 || [:find $wgServerKey "<"] != nil) do={:error "WG server public key no configurada en FASTISP"}\n'
+            + ':if ([:len [/interface/wireguard/find where name=$wgName]] = 0) do={/interface/wireguard/add name=$wgName listen-port=13231 comment="FastISP NOC tunnel"}\n'
+            + ':if ([:len [/ip/address/find where interface=$wgName and address=$wgAddress]] = 0) do={/ip/address/add address=$wgAddress interface=$wgName comment="FastISP tunnel"}\n'
+            + '/interface/wireguard/peers/remove [find where interface=$wgName and comment="FastISP NOC peer"]\n'
+            + '/interface/wireguard/peers/add interface=$wgName public-key=$wgServerKey endpoint-address=$wgEndpoint endpoint-port=$wgPort allowed-address=$wgAllowed persistent-keepalive=25s comment="FastISP NOC peer"\n'
+            + ':if ([:len [/ip/firewall/filter/find where chain="input" action="accept" protocol="udp" dst-port="13231" comment="Allow WireGuard"]] = 0) do={/ip/firewall/filter/add chain=input action=accept protocol=udp dst-port=13231 comment="Allow WireGuard"}\n'
         ),
         'windows_login': (
             f"ssh {router.username}@{router.ip_address} -p 22"
@@ -1557,6 +1750,9 @@ def router_quick_connect(router_id):
             'Registra cada cambio en auditoria antes de activar modo live.',
         ],
     }
+    profile_issues = wireguard_profile.get('issues') if isinstance(wireguard_profile.get('issues'), list) else []
+    for issue in profile_issues:
+        guidance['notes'].append(f'WireGuard profile: {issue}')
     connection_plan = _build_connection_plan(access_profile, back_to_home)
     return jsonify(
         {
@@ -1564,6 +1760,7 @@ def router_quick_connect(router_id):
             'router': router.to_dict(),
             'access_profile': access_profile,
             'connection_plan': connection_plan,
+            'wireguard_profile': wireguard_profile,
             'scripts': scripts,
             'guidance': guidance,
             'back_to_home': back_to_home,
