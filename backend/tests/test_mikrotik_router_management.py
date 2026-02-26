@@ -162,6 +162,39 @@ def test_quick_connect_allows_scope_override_to_public(client, app, monkeypatch)
     assert payload['scripts']['windows_login'].startswith('ssh ')
 
 
+def test_quick_connect_includes_managed_identity_when_private_key_not_provided(client, app, monkeypatch):
+    headers = _admin_headers(client, app)
+    monkeypatch.setattr(mikrotik_routes, 'MikroTikService', _DummyMikrotikQuickConnectService)
+    monkeypatch.setattr(
+        mikrotik_routes,
+        '_generate_wireguard_private_key_base64',
+        lambda: 'AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=',
+    )
+
+    create_response = client.post(
+        '/api/mikrotik/routers',
+        json={
+            'name': 'Nodo-Managed-Key',
+            'ip_address': '10.10.97.1',
+            'username': 'api-admin',
+            'password': 'router-pass',
+            'api_port': 8728,
+            'test_connection': False,
+        },
+        headers=headers,
+    )
+    assert create_response.status_code == 201
+    router_id = str(create_response.get_json()['router']['id'])
+
+    quick_response = client.get(f'/api/mikrotik/routers/{router_id}/quick-connect', headers=headers)
+    assert quick_response.status_code == 200
+    payload = quick_response.get_json()
+    managed = payload.get('back_to_home', {}).get('managed_identity', {})
+    assert managed.get('enabled') is True
+    assert managed.get('key_source') == 'tenant_managed'
+    assert 'private-key="' in str(payload.get('back_to_home', {}).get('scripts', {}).get('add_vps_user_script', ''))
+
+
 class _DummyMikrotikService:
     scripts = []
 
@@ -236,6 +269,61 @@ def test_back_to_home_actions_execute_scripts(client, app, monkeypatch):
     assert any('/ip/cloud/back-to-home-users/remove' in script for script in _DummyMikrotikService.scripts)
 
 
+def test_back_to_home_add_user_uses_managed_key_when_private_missing(client, app, monkeypatch):
+    headers = _admin_headers(client, app)
+    _DummyMikrotikService.scripts = []
+    monkeypatch.setattr(mikrotik_routes, 'MikroTikService', _DummyMikrotikService)
+    monkeypatch.setattr(
+        mikrotik_routes,
+        '_generate_wireguard_private_key_base64',
+        lambda: 'AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=',
+    )
+
+    create_response = client.post(
+        '/api/mikrotik/routers',
+        json={
+            'name': 'Nodo-BTH-Managed',
+            'ip_address': '10.10.21.1',
+            'username': 'api-admin',
+            'password': 'router-pass',
+            'api_port': 8728,
+            'test_connection': False,
+        },
+        headers=headers,
+    )
+    assert create_response.status_code == 201
+    router_id = str(create_response.get_json()['router']['id'])
+
+    add_user_response = client.post(
+        f'/api/mikrotik/routers/{router_id}/back-to-home/users/add',
+        json={
+            'confirm': True,
+            'user_name': 'noc-vps',
+            'allow_lan': True,
+            'change_ticket': 'CHG-BTH-AUTO-001',
+            'preflight_ack': True,
+        },
+        headers=headers,
+    )
+    assert add_user_response.status_code == 200
+    payload = add_user_response.get_json()
+    assert payload['success'] is True
+    assert payload['private_key_source'] == 'tenant_managed'
+    assert payload['managed_identity']['enabled'] is True
+    assert any('private-key="AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="' in script for script in _DummyMikrotikService.scripts)
+
+    with app.app_context():
+        row = (
+            AdminSystemSetting.query
+            .filter(AdminSystemSetting.tenant_id.is_(None))
+            .filter_by(key='mikrotik_bth_managed_identity')
+            .first()
+        )
+        assert row is not None
+        assert isinstance(row.value, dict)
+        assert str((row.value or {}).get('private_key_encrypted') or '').strip() != ''
+
+
 def test_back_to_home_actions_require_confirmation(client, app):
     headers = _admin_headers(client, app)
 
@@ -307,6 +395,49 @@ def test_back_to_home_bootstrap_runs_single_flow(client, app, monkeypatch):
     assert payload['bootstrap']['user_name'] == 'noc-vps'
     assert any('/ip/cloud/set back-to-home-vpn=enabled' in script for script in _DummyMikrotikService.scripts)
     assert any('/ip/cloud/back-to-home-users/add' in script for script in _DummyMikrotikService.scripts)
+
+
+def test_back_to_home_bootstrap_uses_managed_key_when_private_missing(client, app, monkeypatch):
+    headers = _admin_headers(client, app)
+    _DummyMikrotikService.scripts = []
+    monkeypatch.setattr(mikrotik_routes, 'MikroTikService', _DummyMikrotikService)
+    monkeypatch.setattr(
+        mikrotik_routes,
+        '_generate_wireguard_private_key_base64',
+        lambda: 'AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=',
+    )
+
+    create_response = client.post(
+        '/api/mikrotik/routers',
+        json={
+            'name': 'Nodo-BTH-Bootstrap-Auto',
+            'ip_address': '10.10.41.1',
+            'username': 'api-admin',
+            'password': 'router-pass',
+            'api_port': 8728,
+            'test_connection': False,
+        },
+        headers=headers,
+    )
+    assert create_response.status_code == 201
+    router_id = str(create_response.get_json()['router']['id'])
+
+    bootstrap_response = client.post(
+        f'/api/mikrotik/routers/{router_id}/back-to-home/bootstrap',
+        json={
+            'confirm': True,
+            'user_name': 'noc-vps',
+            'allow_lan': True,
+            'change_ticket': 'CHG-BTH-004',
+            'preflight_ack': True,
+        },
+        headers=headers,
+    )
+    assert bootstrap_response.status_code == 200
+    payload = bootstrap_response.get_json()
+    assert payload['success'] is True
+    assert payload['private_key_source'] == 'tenant_managed'
+    assert any('private-key="AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM="' in script for script in _DummyMikrotikService.scripts)
 
 
 class _DummyMikrotikRiskService:

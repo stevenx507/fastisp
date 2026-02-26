@@ -104,6 +104,16 @@ interface RouterBackToHomeStatus {
   users?: RouterBackToHomeUser[]
   users_error?: string
   scripts?: RouterBackToHomeScripts
+  managed_identity?: {
+    enabled?: boolean
+    source?: string
+    key_source?: string
+    user_name?: string
+    public_key?: string | null
+    tenant_id?: number | null
+    created_now?: boolean
+    error?: string | null
+  }
   limitations?: string[]
   error?: string
 }
@@ -1126,23 +1136,19 @@ const MikroTikManagement: React.FC = () => {
     }
 
     const bootstrapBthStep = async (stepId: string) => {
-      if (!bthPrivateKey.trim()) {
-        updateStep(stepId, 'skipped', 'Falta private key BTH')
-        return false
-      }
       updateStep(stepId, 'running')
       try {
+        const payloadBody: Record<string, unknown> = {
+          confirm: true,
+          user_name: bthUserName.trim() || 'noc-vps',
+          allow_lan: bthAllowLan,
+        }
+        const privateKey = bthPrivateKey.trim()
+        if (privateKey) payloadBody.private_key = privateKey
         const response = await apiFetch(`/api/mikrotik/routers/${selectedRouter.id}/back-to-home/bootstrap`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(
-            withChangeTicket({
-              confirm: true,
-              user_name: bthUserName.trim() || 'noc-vps',
-              private_key: bthPrivateKey.trim(),
-              allow_lan: bthAllowLan,
-            })
-          ),
+          body: JSON.stringify(withChangeTicket(payloadBody)),
         })
         const payload = (await safeJson(response)) as RouterBackToHomeBootstrapResponse | null
         if (response.ok && payload?.success) {
@@ -1264,28 +1270,25 @@ const MikroTikManagement: React.FC = () => {
   const createBackToHomeUser = async () => {
     if (!selectedRouter) return
     const userName = bthUserName.trim()
-    const privateKey = bthPrivateKey.trim()
     if (!userName) {
       addToast('error', 'Ingresa un nombre de usuario BTH')
       return
     }
-    if (!privateKey) {
-      addToast('error', 'Ingresa la private key WireGuard del VPS')
-      return
-    }
     setBthActionLoading(true)
     try {
+      const payloadBody: Record<string, unknown> = {
+        confirm: true,
+        user_name: userName,
+        allow_lan: bthAllowLan,
+        comment: 'FastISP VPS',
+      }
+      const privateKey = bthPrivateKey.trim()
+      if (privateKey) payloadBody.private_key = privateKey
       const response = await apiFetch(`/api/mikrotik/routers/${selectedRouter.id}/back-to-home/users/add`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(
-          withChangeTicket({
-            confirm: true,
-            user_name: userName,
-            private_key: privateKey,
-            allow_lan: bthAllowLan,
-            comment: 'FastISP VPS',
-          })
+          withChangeTicket(payloadBody)
         ),
       })
       const payload = (await safeJson(response)) as { success?: boolean; error?: string } | null
@@ -1335,30 +1338,27 @@ const MikroTikManagement: React.FC = () => {
   const bootstrapBackToHome = async () => {
     if (!selectedRouter) return
     const userName = bthUserName.trim()
-    const privateKey = bthPrivateKey.trim()
     if (!userName) {
       addToast('error', 'Ingresa un nombre de usuario BTH')
-      return
-    }
-    if (!privateKey) {
-      addToast('error', 'Ingresa la private key WireGuard del VPS')
       return
     }
 
     setBthActionLoading(true)
     try {
+      const payloadBody: Record<string, unknown> = {
+        confirm: true,
+        user_name: userName,
+        allow_lan: bthAllowLan,
+        replace_existing_user: true,
+        comment: 'FastISP VPS',
+      }
+      const privateKey = bthPrivateKey.trim()
+      if (privateKey) payloadBody.private_key = privateKey
       const response = await apiFetch(`/api/mikrotik/routers/${selectedRouter.id}/back-to-home/bootstrap`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(
-          withChangeTicket({
-            confirm: true,
-            user_name: userName,
-            private_key: privateKey,
-            allow_lan: bthAllowLan,
-            replace_existing_user: true,
-            comment: 'FastISP VPS',
-          })
+          withChangeTicket(payloadBody)
         ),
       })
       const payload = (await safeJson(response)) as RouterBackToHomeBootstrapResponse | null
@@ -1388,13 +1388,8 @@ const MikroTikManagement: React.FC = () => {
   const confirmCreateBackToHomeUser = () => {
     if (!selectedRouter) return
     const userName = bthUserName.trim()
-    const privateKey = bthPrivateKey.trim()
     if (!userName) {
       addToast('error', 'Ingresa un nombre de usuario BTH')
-      return
-    }
-    if (!privateKey) {
-      addToast('error', 'Ingresa la private key WireGuard del VPS')
       return
     }
     openConfirm(`Crear usuario Back To Home ${userName} en ${selectedRouter.name}?`, () => {
@@ -1405,13 +1400,8 @@ const MikroTikManagement: React.FC = () => {
   const confirmBootstrapBackToHome = () => {
     if (!selectedRouter) return
     const userName = bthUserName.trim()
-    const privateKey = bthPrivateKey.trim()
     if (!userName) {
       addToast('error', 'Ingresa un nombre de usuario BTH')
-      return
-    }
-    if (!privateKey) {
-      addToast('error', 'Ingresa la private key WireGuard del VPS')
       return
     }
     openConfirm(`Aplicar bootstrap BTH 1 clic en ${selectedRouter.name} para usuario ${userName}?`, () => {
@@ -1488,7 +1478,7 @@ const MikroTikManagement: React.FC = () => {
             <div>
               <p className="text-xs font-semibold uppercase tracking-wide text-blue-800">Importar WireGuard</p>
               <p className="text-xs text-blue-700">
-                Carga ZIP/CONF exportado para autocompletar host del router y private key para bootstrap BTH.
+                Carga ZIP/CONF exportado para autocompletar host del router. La private key BTH ahora puede ser automatica por tenant.
               </p>
             </div>
             <button
@@ -1872,7 +1862,7 @@ const MikroTikManagement: React.FC = () => {
                                     type="password"
                                     value={bthPrivateKey}
                                     onChange={(e) => setBthPrivateKey(e.target.value)}
-                                    placeholder="Private key WireGuard del VPS (para fallback BTH)"
+                                    placeholder="Private key WireGuard del VPS (opcional: vacio = automatica por tenant)"
                                     className="rounded border border-emerald-300 px-2 py-1 text-xs text-gray-900"
                                   />
                                 </div>
@@ -1885,6 +1875,16 @@ const MikroTikManagement: React.FC = () => {
                                   />
                                   Permitir acceso LAN en fallback BTH
                                 </label>
+                                <p className="mt-2 text-xs text-emerald-700">
+                                  Llave VPS:{' '}
+                                  <strong>
+                                    {bthPrivateKey.trim()
+                                      ? 'manual'
+                                      : quickConnect.back_to_home?.managed_identity?.enabled
+                                        ? 'automatica por tenant'
+                                        : 'automatica pendiente'}
+                                  </strong>
+                                </p>
                                 <div className="mt-2 flex flex-wrap items-center gap-2">
                                   <button
                                     onClick={() => void runConnectionExpress()}
@@ -2113,7 +2113,7 @@ const MikroTikManagement: React.FC = () => {
                                   type="password"
                                   value={bthPrivateKey}
                                   onChange={(e) => setBthPrivateKey(e.target.value)}
-                                  placeholder="Private key WireGuard del VPS"
+                                  placeholder="Private key WireGuard del VPS (opcional: vacio = automatica por tenant)"
                                   className="rounded border border-gray-300 px-2 py-1 text-xs text-gray-900"
                                 />
                               </div>
@@ -2127,6 +2127,16 @@ const MikroTikManagement: React.FC = () => {
                                 />
                                 Permitir acceso LAN desde este usuario BTH
                               </label>
+                              <p className="mt-2 text-xs text-gray-600">
+                                Llave VPS:{' '}
+                                <strong>
+                                  {bthPrivateKey.trim()
+                                    ? 'manual'
+                                    : quickConnect.back_to_home?.managed_identity?.enabled
+                                      ? 'automatica por tenant'
+                                      : 'automatica pendiente'}
+                                </strong>
+                              </p>
 
                               <div className="mt-3">
                                 <button

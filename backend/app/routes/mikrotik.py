@@ -1,7 +1,7 @@
 """
 MikroTik API endpoints
 """
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import get_jwt_identity
 from app.routes.main_routes import admin_required
 from app import db
@@ -19,6 +19,11 @@ import io
 import re
 import uuid
 import zipfile
+import base64
+import binascii
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import x25519
 
 mikrotik_bp = Blueprint('mikrotik', __name__)
 logger = logging.getLogger(__name__)
@@ -28,6 +33,8 @@ logger = logging.getLogger(__name__)
 ENTERPRISE_CHANGELOG: Dict[str, List[Dict[str, Any]]] = {}
 ENTERPRISE_CHANGE_INDEX: Dict[str, Dict[str, Any]] = {}
 WIREGUARD_IMPORT_MAX_BYTES = 2 * 1024 * 1024
+BTH_MANAGED_IDENTITY_SETTING_KEY = 'mikrotik_bth_managed_identity'
+_TENANT_SETTING_SENTINEL = object()
 
 
 def _decode_text_payload(raw_payload: bytes) -> str:
@@ -538,6 +545,190 @@ def _tenant_router_query():
     return query
 
 
+def _tenant_setting_row(key_name: str, tenant_id: Any = _TENANT_SETTING_SENTINEL) -> Optional[AdminSystemSetting]:
+    scoped_tenant = current_tenant_id() if tenant_id is _TENANT_SETTING_SENTINEL else tenant_id
+    query = AdminSystemSetting.query.filter_by(key=key_name)
+    if scoped_tenant is None:
+        query = query.filter(AdminSystemSetting.tenant_id.is_(None))
+    else:
+        query = query.filter(AdminSystemSetting.tenant_id == scoped_tenant)
+    return query.first()
+
+
+def _tenant_setting_upsert(key_name: str, value: Any, tenant_id: Any = _TENANT_SETTING_SENTINEL) -> AdminSystemSetting:
+    scoped_tenant = current_tenant_id() if tenant_id is _TENANT_SETTING_SENTINEL else tenant_id
+    row = _tenant_setting_row(key_name, tenant_id=scoped_tenant)
+    if row is None:
+        row = AdminSystemSetting(
+            tenant_id=scoped_tenant,
+            key=key_name,
+            value=value,
+            updated_by=None,
+            updated_at=datetime.utcnow(),
+        )
+    else:
+        row.value = value
+        row.updated_at = datetime.utcnow()
+    db.session.add(row)
+    db.session.commit()
+    return row
+
+
+def _secret_fernet() -> Fernet:
+    encryption_key = current_app.config.get('ENCRYPTION_KEY')
+    if not encryption_key:
+        raise RuntimeError('ENCRYPTION_KEY is required')
+    if isinstance(encryption_key, str):
+        encryption_key = encryption_key.encode('utf-8')
+    return Fernet(encryption_key)
+
+
+def _encrypt_secret_value(plaintext: str) -> str:
+    token = _secret_fernet().encrypt(str(plaintext or '').encode('utf-8'))
+    return token.decode('utf-8')
+
+
+def _decrypt_secret_value(token: str) -> str:
+    decrypted = _secret_fernet().decrypt(str(token or '').encode('utf-8'))
+    return decrypted.decode('utf-8')
+
+
+def _generate_wireguard_private_key_base64() -> str:
+    private_key = x25519.X25519PrivateKey.generate()
+    private_bytes = private_key.private_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PrivateFormat.Raw,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    return base64.b64encode(private_bytes).decode('ascii')
+
+
+def _wireguard_public_key_from_private_base64(private_key_base64: str) -> str:
+    try:
+        raw_private = base64.b64decode(str(private_key_base64 or '').encode('ascii'), validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError('invalid base64 private key') from exc
+    if len(raw_private) != 32:
+        raise ValueError('invalid WireGuard private key length')
+    private_key = x25519.X25519PrivateKey.from_private_bytes(raw_private)
+    public_bytes = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    return base64.b64encode(public_bytes).decode('ascii')
+
+
+def _managed_bth_identity_metadata(identity: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        'enabled': bool(identity.get('private_key')),
+        'source': identity.get('source') or 'tenant_managed',
+        'user_name': identity.get('user_name') or 'noc-vps',
+        'public_key': identity.get('public_key') or None,
+        'tenant_id': identity.get('tenant_id'),
+        'created_now': bool(identity.get('created_now')),
+        'error': identity.get('error') or None,
+    }
+
+
+def _get_or_create_managed_bth_identity(
+    preferred_user_name: str = 'noc-vps',
+    create_if_missing: bool = True,
+) -> Dict[str, Any]:
+    tenant_id = current_tenant_id()
+    requested_user = str(preferred_user_name or '').strip() or 'noc-vps'
+    row = _tenant_setting_row(BTH_MANAGED_IDENTITY_SETTING_KEY, tenant_id=tenant_id)
+    raw_value = row.value if row and isinstance(row.value, dict) else {}
+    if not isinstance(raw_value, dict):
+        raw_value = {}
+
+    private_key = ''
+    public_key = str(raw_value.get('public_key') or '').strip()
+    encrypted_private_key = str(raw_value.get('private_key_encrypted') or '').strip()
+    stored_user_name = str(raw_value.get('user_name') or '').strip() or requested_user
+    created_now = False
+    needs_persist = False
+    error_message = ''
+
+    if encrypted_private_key:
+        try:
+            private_key = _decrypt_secret_value(encrypted_private_key)
+        except Exception as exc:
+            logger.warning('Could not decrypt managed BTH key for tenant %s: %s', tenant_id, exc)
+            error_message = 'stored_key_unreadable'
+            private_key = ''
+            public_key = ''
+            needs_persist = True
+
+    if private_key and not public_key:
+        try:
+            public_key = _wireguard_public_key_from_private_base64(private_key)
+            needs_persist = True
+        except Exception as exc:
+            logger.warning('Could not derive public key for tenant %s: %s', tenant_id, exc)
+            private_key = ''
+            public_key = ''
+            error_message = 'stored_key_invalid'
+            needs_persist = True
+
+    if not private_key and create_if_missing:
+        private_key = _generate_wireguard_private_key_base64()
+        public_key = _wireguard_public_key_from_private_base64(private_key)
+        created_now = True
+        needs_persist = True
+
+    effective_user_name = stored_user_name or requested_user
+    if effective_user_name != stored_user_name:
+        needs_persist = True
+
+    if needs_persist and private_key:
+        payload = {
+            'version': 1,
+            'user_name': effective_user_name,
+            'public_key': public_key,
+            'private_key_encrypted': _encrypt_secret_value(private_key),
+            'created_at': str(raw_value.get('created_at') or datetime.utcnow().isoformat() + 'Z'),
+            'updated_at': datetime.utcnow().isoformat() + 'Z',
+        }
+        _tenant_setting_upsert(BTH_MANAGED_IDENTITY_SETTING_KEY, payload, tenant_id=tenant_id)
+
+    return {
+        'tenant_id': tenant_id,
+        'user_name': effective_user_name,
+        'private_key': private_key,
+        'public_key': public_key,
+        'created_now': created_now,
+        'source': 'tenant_managed',
+        'error': error_message,
+    }
+
+
+def _resolve_bth_key_for_request(
+    provided_private_key: str,
+    preferred_user_name: str = 'noc-vps',
+) -> Dict[str, Any]:
+    manual_key = str(provided_private_key or '').strip()
+    if manual_key:
+        return {
+            'private_key': manual_key,
+            'source': 'manual_override',
+            'identity': _managed_bth_identity_metadata(
+                {
+                    'private_key': manual_key,
+                    'user_name': preferred_user_name,
+                    'source': 'manual_override',
+                    'tenant_id': current_tenant_id(),
+                }
+            ),
+        }
+
+    managed_identity = _get_or_create_managed_bth_identity(preferred_user_name=preferred_user_name, create_if_missing=True)
+    return {
+        'private_key': str(managed_identity.get('private_key') or '').strip(),
+        'source': 'tenant_managed',
+        'identity': _managed_bth_identity_metadata(managed_identity),
+    }
+
+
 def _router_for_request(router_id: Any) -> Optional[MikroTikRouter]:
     try:
         normalized = int(router_id)
@@ -552,13 +743,7 @@ def _router_for_request(router_id: Any) -> Optional[MikroTikRouter]:
 
 
 def _tenant_setting_bool(key_name: str, default: bool = False) -> bool:
-    tenant_id = current_tenant_id()
-    query = AdminSystemSetting.query.filter_by(key=key_name)
-    if tenant_id is None:
-        query = query.filter(AdminSystemSetting.tenant_id.is_(None))
-    else:
-        query = query.filter(AdminSystemSetting.tenant_id == tenant_id)
-    row = query.first()
+    row = _tenant_setting_row(key_name)
     if row is None:
         return default
     value = row.value
@@ -843,8 +1028,14 @@ def onboard_router_from_wireguard_archive():
     update_existing = _as_bool(form.get('update_existing'), default=True)
     run_write_probe = _as_bool(form.get('write_probe'), default=True)
     bootstrap_bth = _as_bool(form.get('bootstrap_bth'), default=False)
-    bth_user_name = str(form.get('bth_user_name') or 'noc-vps').strip() or 'noc-vps'
-    bth_private_key = str(form.get('bth_private_key') or parsed.get('interface_private_key') or '').strip()
+    requested_bth_user_name = str(form.get('bth_user_name') or '').strip()
+    bth_user_name = requested_bth_user_name or 'noc-vps'
+    provided_bth_private_key = str(form.get('bth_private_key') or parsed.get('interface_private_key') or '').strip()
+    bth_key_resolution = _resolve_bth_key_for_request(provided_bth_private_key, preferred_user_name=bth_user_name)
+    bth_private_key = str(bth_key_resolution.get('private_key') or '').strip()
+    bth_identity = bth_key_resolution.get('identity') or {}
+    if not requested_bth_user_name and isinstance(bth_identity, dict):
+        bth_user_name = str(bth_identity.get('user_name') or bth_user_name).strip() or bth_user_name
     bth_allow_lan = _as_bool(form.get('bth_allow_lan'), default=True)
     replace_existing_user = _as_bool(form.get('replace_existing_user'), default=True)
     update_time = _as_bool(form.get('update_time'), default=True)
@@ -857,7 +1048,7 @@ def onboard_router_from_wireguard_archive():
         if guard_error:
             return guard_error
         if not bth_private_key:
-            return jsonify({'success': False, 'error': 'bth_private_key is required for bootstrap'}), 400
+            return jsonify({'success': False, 'error': 'No private key available for bootstrap (manual or managed)'}), 400
 
     tenant_id = current_tenant_id()
     existing = _tenant_router_query().filter_by(ip_address=endpoint_host).first()
@@ -910,6 +1101,8 @@ def onboard_router_from_wireguard_archive():
                         'success': False,
                         'error': 'No se pudo conectar por API al router para bootstrap automatico.',
                         'user_name': bth_user_name,
+                        'private_key_source': bth_key_resolution.get('source') or 'tenant_managed',
+                        'managed_identity': bth_identity,
                     }
                     readiness_payload.setdefault('recommendations', []).append(
                         'Verifica conectividad API (host/IP y puerto) o desactiva bootstrap automatico para registrar primero el router.'
@@ -945,6 +1138,8 @@ def onboard_router_from_wireguard_archive():
                         'runtime': runtime,
                         'user_name': bth_user_name,
                         'user_visible_after_run': user_visible,
+                        'private_key_source': bth_key_resolution.get('source') or 'tenant_managed',
+                        'managed_identity': bth_identity,
                     }
     except Exception as exc:
         logger.error('Error on WireGuard onboarding for router %s: %s', router.id, exc, exc_info=True)
@@ -958,6 +1153,8 @@ def onboard_router_from_wireguard_archive():
         'source_file': source_file,
         'wireguard': parsed,
         'readiness': readiness_payload,
+        'managed_identity': bth_identity,
+        'private_key_source': bth_key_resolution.get('source') or 'tenant_managed',
     }
     if bootstrap_payload is not None:
         payload['bootstrap'] = bootstrap_payload
@@ -1185,9 +1382,15 @@ def router_quick_connect(router_id):
     wg_allowed_subnets = str(
         request.args.get('wg_allowed_subnets') or '10.250.0.0/16,10.251.0.0/16'
     ).strip() or '10.250.0.0/16,10.251.0.0/16'
-    bth_user = str(request.args.get('bth_user') or 'noc-vps').strip() or 'noc-vps'
+    requested_bth_user = str(request.args.get('bth_user') or '').strip()
+    bth_user = requested_bth_user or 'noc-vps'
     bth_allow_lan = _as_bool(request.args.get('bth_allow_lan'), default=True)
-    bth_private_key = str(request.args.get('bth_private_key') or '<BASE64_WG_PRIVATE_KEY>').strip() or '<BASE64_WG_PRIVATE_KEY>'
+    requested_bth_private_key = str(request.args.get('bth_private_key') or '').strip()
+    bth_key_resolution = _resolve_bth_key_for_request(requested_bth_private_key, preferred_user_name=bth_user)
+    bth_private_key = str(bth_key_resolution.get('private_key') or '').strip() or '<BASE64_WG_PRIVATE_KEY>'
+    bth_identity = bth_key_resolution.get('identity') or {}
+    if not requested_bth_user and isinstance(bth_identity, dict):
+        bth_user = str(bth_identity.get('user_name') or bth_user).strip() or bth_user
     access_profile = _build_access_profile(router.ip_address, ip_scope)
 
     wg_endpoint_host = wg_endpoint
@@ -1260,6 +1463,11 @@ def router_quick_connect(router_id):
                 f'/interface/wireguard/peers/show-client-config {bth_user}\n'
             ),
             'generate_private_key_hint': 'wg genkey | base64 -w0',
+        },
+        'managed_identity': {
+            **(bth_identity if isinstance(bth_identity, dict) else {}),
+            'key_source': bth_key_resolution.get('source') or 'tenant_managed',
+            'user_name': bth_user,
         },
         'limitations': [
             'Back To Home por relay puede tener mas latencia que un túnel WireGuard sitio-a-sitio.',
@@ -1520,12 +1728,11 @@ def add_back_to_home_user(router_id):
     if not _as_bool(data.get('confirm'), default=False):
         return jsonify({'success': False, 'error': 'confirm=true is required'}), 400
 
-    user_name = str(data.get('user_name') or data.get('name') or '').strip()
-    private_key = str(data.get('private_key') or '').strip()
-    if not user_name:
-        return jsonify({'success': False, 'error': 'user_name is required'}), 400
+    user_name = str(data.get('user_name') or data.get('name') or '').strip() or 'noc-vps'
+    key_resolution = _resolve_bth_key_for_request(str(data.get('private_key') or ''), preferred_user_name=user_name)
+    private_key = str(key_resolution.get('private_key') or '').strip()
     if not private_key:
-        return jsonify({'success': False, 'error': 'private_key is required'}), 400
+        return jsonify({'success': False, 'error': 'No private key available (manual or managed)'}), 400
 
     allow_lan = _as_bool(data.get('allow_lan'), default=True)
     comment = str(data.get('comment') or 'FastISP VPS').strip() or 'FastISP VPS'
@@ -1547,6 +1754,8 @@ def add_back_to_home_user(router_id):
                 'router': router.to_dict(),
                 'user_name': user_name,
                 'allow_lan': allow_lan,
+                'private_key_source': key_resolution.get('source') or 'tenant_managed',
+                'managed_identity': key_resolution.get('identity') or {},
                 'script': script_content,
                 'result': result,
             }
@@ -1609,12 +1818,11 @@ def bootstrap_back_to_home(router_id):
     if not _as_bool(data.get('confirm'), default=False):
         return jsonify({'success': False, 'error': 'confirm=true is required'}), 400
 
-    user_name = str(data.get('user_name') or data.get('name') or '').strip()
-    private_key = str(data.get('private_key') or '').strip()
-    if not user_name:
-        return jsonify({'success': False, 'error': 'user_name is required'}), 400
+    user_name = str(data.get('user_name') or data.get('name') or '').strip() or 'noc-vps'
+    key_resolution = _resolve_bth_key_for_request(str(data.get('private_key') or ''), preferred_user_name=user_name)
+    private_key = str(key_resolution.get('private_key') or '').strip()
     if not private_key:
-        return jsonify({'success': False, 'error': 'private_key is required'}), 400
+        return jsonify({'success': False, 'error': 'No private key available (manual or managed)'}), 400
 
     allow_lan = _as_bool(data.get('allow_lan'), default=True)
     replace_existing_user = _as_bool(data.get('replace_existing_user'), default=False)
@@ -1687,6 +1895,8 @@ def bootstrap_back_to_home(router_id):
             'script': script_content,
             'result': result,
             'back_to_home': observed,
+            'private_key_source': key_resolution.get('source') or 'tenant_managed',
+            'managed_identity': key_resolution.get('identity') or {},
             'bootstrap': {
                 'user_name': user_name,
                 'allow_lan': allow_lan,
