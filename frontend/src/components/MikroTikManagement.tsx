@@ -32,6 +32,7 @@ interface RouterCreateResponse {
 interface RouterQuickScripts {
   direct_api_script: string
   wireguard_site_to_vps_script: string
+  bth_enable_minimal_script?: string
   windows_login: string
   linux_login: string
 }
@@ -39,6 +40,23 @@ interface RouterQuickScripts {
 interface RouterQuickGuidance {
   back_to_home: string[]
   notes: string[]
+}
+
+interface RouterConnectionPlanAction {
+  id: string
+  label: string
+  description?: string
+  script_key?: string
+  requires_local_access?: boolean
+  auto_available?: boolean
+}
+
+interface RouterConnectionPlan {
+  status?: string
+  title?: string
+  summary?: string
+  recommended_transport?: string
+  actions?: RouterConnectionPlanAction[]
 }
 
 interface RouterAccessProfile {
@@ -86,6 +104,7 @@ interface RouterBackToHomeStatus {
 interface RouterQuickConnectResponse {
   success: boolean
   access_profile?: RouterAccessProfile
+  connection_plan?: RouterConnectionPlan
   scripts?: RouterQuickScripts
   guidance?: RouterQuickGuidance
   back_to_home?: RouterBackToHomeStatus
@@ -997,6 +1016,14 @@ const MikroTikManagement: React.FC = () => {
     addToast(ok ? 'success' : 'error', ok ? `${label} copiado` : `No se pudo copiar ${label}`)
   }
 
+  const resolveQuickScript = useCallback((scripts: RouterQuickScripts | undefined, scriptKey: string | undefined): string => {
+    if (!scripts || !scriptKey) return ''
+    if (scriptKey === 'direct_api_script') return scripts.direct_api_script || ''
+    if (scriptKey === 'wireguard_site_to_vps_script') return scripts.wireguard_site_to_vps_script || ''
+    if (scriptKey === 'bth_enable_minimal_script') return scripts.bth_enable_minimal_script || ''
+    return ''
+  }, [])
+
   const enableBackToHome = async () => {
     if (!selectedRouter) return
     setBthActionLoading(true)
@@ -1560,6 +1587,60 @@ const MikroTikManagement: React.FC = () => {
                     )}
                     {quickConnect?.scripts && (
                       <>
+                        {quickConnect.connection_plan && (
+                          <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3">
+                            <div className="flex flex-wrap items-start justify-between gap-2">
+                              <div>
+                                <p className="text-sm font-semibold text-emerald-800">
+                                  {quickConnect.connection_plan.title || 'Conexion Express'}
+                                </p>
+                                <p className="text-xs text-emerald-700">
+                                  {quickConnect.connection_plan.summary || 'Sigue los pasos recomendados.'}
+                                </p>
+                              </div>
+                              <span className="rounded-full bg-emerald-100 px-2 py-1 text-xs font-semibold text-emerald-700">
+                                {quickConnect.connection_plan.recommended_transport || '-'}
+                              </span>
+                            </div>
+                            {(quickConnect.connection_plan.actions || []).length > 0 && (
+                              <div className="mt-2 space-y-2">
+                                {(quickConnect.connection_plan.actions || []).map((action) => {
+                                  const scriptValue = resolveQuickScript(quickConnect.scripts, action.script_key)
+                                  return (
+                                    <div key={action.id} className="rounded border border-emerald-200 bg-white p-2">
+                                      <div className="flex flex-wrap items-center justify-between gap-2">
+                                        <div>
+                                          <p className="text-xs font-semibold text-emerald-900">{action.label}</p>
+                                          <p className="text-xs text-emerald-800">{action.description || '-'}</p>
+                                        </div>
+                                        <div className="flex items-center gap-1">
+                                          {action.requires_local_access && (
+                                            <span className="rounded bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
+                                              paso local
+                                            </span>
+                                          )}
+                                          {action.auto_available && (
+                                            <span className="rounded bg-blue-100 px-2 py-0.5 text-[10px] font-semibold text-blue-700">
+                                              auto
+                                            </span>
+                                          )}
+                                          {scriptValue && (
+                                            <button
+                                              onClick={() => copyScript(`script ${action.label}`, scriptValue)}
+                                              className="rounded bg-emerald-700 px-2 py-1 text-[10px] font-semibold text-white hover:bg-emerald-800"
+                                            >
+                                              Copiar script
+                                            </button>
+                                          )}
+                                        </div>
+                                      </div>
+                                    </div>
+                                  )
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        )}
                         <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
                           <div className="mb-2 flex items-center justify-between">
                             <p className="text-sm font-semibold text-gray-800">Script acceso directo API/SSH</p>

@@ -85,8 +85,10 @@ def test_router_crud_and_quick_connect(client, app):
     quick_payload = quick_response.get_json()
     assert quick_payload['success'] is True
     assert 'access_profile' in quick_payload
+    assert 'connection_plan' in quick_payload
     assert 'direct_api_script' in quick_payload['scripts']
     assert 'wireguard_site_to_vps_script' in quick_payload['scripts']
+    assert 'bth_enable_minimal_script' in quick_payload['scripts']
     assert isinstance(quick_payload['guidance']['back_to_home'], list)
     assert 'back_to_home' in quick_payload
     assert 'scripts' in quick_payload['back_to_home']
@@ -122,8 +124,10 @@ def test_quick_connect_marks_private_ip_for_tunnel_first(client, app, monkeypatc
     assert quick_response.status_code == 200
     payload = quick_response.get_json()
     profile = payload.get('access_profile') or {}
+    plan = payload.get('connection_plan') or {}
     assert profile.get('effective_scope') == 'private'
     assert profile.get('recommended_transport') == 'wireguard_or_back_to_home'
+    assert plan.get('status') == 'private_unreachable_needs_local_step'
     assert 'prioriza WireGuard/BTH' in str(payload['scripts']['direct_api_script'])
 
 
@@ -150,9 +154,11 @@ def test_quick_connect_allows_scope_override_to_public(client, app, monkeypatch)
     assert quick_response.status_code == 200
     payload = quick_response.get_json()
     profile = payload.get('access_profile') or {}
+    plan = payload.get('connection_plan') or {}
     assert profile.get('requested_scope') == 'public'
     assert profile.get('effective_scope') == 'public'
     assert profile.get('recommended_transport') == 'direct_ssh_api'
+    assert plan.get('status') == 'direct_public'
     assert payload['scripts']['windows_login'].startswith('ssh ')
 
 

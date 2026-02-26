@@ -181,6 +181,123 @@ def _build_access_profile(host_value: str, requested_scope_raw: Any) -> Dict[str
     }
 
 
+def _build_connection_plan(access_profile: Dict[str, Any], back_to_home: Dict[str, Any]) -> Dict[str, Any]:
+    effective_scope = str(access_profile.get('effective_scope') or 'private')
+    recommended_transport = str(access_profile.get('recommended_transport') or 'wireguard_or_back_to_home')
+    reachable = bool(back_to_home.get('reachable'))
+    supports_bth = back_to_home.get('supported')
+    supports_bth_users = back_to_home.get('bth_users_supported')
+
+    status = 'unknown'
+    title = 'Conexion Express'
+    summary = 'Revisa conectividad y aplica el metodo recomendado.'
+    actions: List[Dict[str, Any]] = []
+
+    if effective_scope == 'public':
+        status = 'direct_public'
+        title = 'Conexion directa por IP publica'
+        summary = 'Puedes usar SSH/API directo con ACL estricta. Mantener VPN como respaldo.'
+        actions = [
+            {
+                'id': 'apply_direct_acl',
+                'label': 'Aplicar ACL de gestion',
+                'description': 'Ejecuta el script directo para exponer API/SSH solo a IPs autorizadas.',
+                'script_key': 'direct_api_script',
+                'requires_local_access': False,
+                'auto_available': True,
+            },
+            {
+                'id': 'test_direct_access',
+                'label': 'Probar acceso directo',
+                'description': 'Verifica login SSH/API desde NOC.',
+                'requires_local_access': False,
+                'auto_available': True,
+            },
+            {
+                'id': 'prepare_tunnel_fallback',
+                'label': 'Preparar fallback VPN',
+                'description': 'Mantener WireGuard/BTH como contingencia operativa.',
+                'script_key': 'wireguard_site_to_vps_script',
+                'requires_local_access': False,
+                'auto_available': False,
+            },
+        ]
+    else:
+        if reachable:
+            if supports_bth:
+                status = 'private_reachable_bth_ready'
+                title = 'Conexion privada lista para tunel'
+                summary = 'Router accesible por API. Puedes completar BTH automatico o usar WireGuard.'
+                actions = [
+                    {
+                        'id': 'bootstrap_bth_auto',
+                        'label': 'Bootstrap BTH automatico',
+                        'description': 'Crear usuario BTH desde el panel (requiere private key del VPS).',
+                        'requires_local_access': False,
+                        'auto_available': bool(supports_bth_users),
+                    },
+                    {
+                        'id': 'wireguard_tunnel',
+                        'label': 'WireGuard site-to-site',
+                        'description': 'Túnel recomendado para NOC masivo y menor latencia.',
+                        'script_key': 'wireguard_site_to_vps_script',
+                        'requires_local_access': False,
+                        'auto_available': True,
+                    },
+                ]
+            else:
+                status = 'private_reachable_wireguard_only'
+                title = 'Conexion privada con WireGuard recomendado'
+                summary = 'Back To Home no confirmado por version RouterOS; usa WireGuard dedicado.'
+                actions = [
+                    {
+                        'id': 'wireguard_tunnel',
+                        'label': 'Aplicar tunel WireGuard',
+                        'description': 'Ejecuta script site-to-site y valida acceso.',
+                        'script_key': 'wireguard_site_to_vps_script',
+                        'requires_local_access': False,
+                        'auto_available': True,
+                    },
+                ]
+        else:
+            status = 'private_unreachable_needs_local_step'
+            title = 'Conexion privada requiere paso local inicial'
+            summary = 'No hay acceso API aun. Ejecuta script minimo local (WinBox) para habilitar BTH o tunel y luego reintenta.'
+            actions = [
+                {
+                    'id': 'local_bth_enable',
+                    'label': 'Ejecutar script minimo BTH',
+                    'description': 'Entra por WinBox local y ejecuta habilitacion basica BTH.',
+                    'script_key': 'bth_enable_minimal_script',
+                    'requires_local_access': True,
+                    'auto_available': False,
+                },
+                {
+                    'id': 'retry_probe',
+                    'label': 'Reintentar conexion desde panel',
+                    'description': 'Despues del paso local, refresca para validar reachability.',
+                    'requires_local_access': False,
+                    'auto_available': True,
+                },
+                {
+                    'id': 'wireguard_tunnel',
+                    'label': 'Alternativa WireGuard',
+                    'description': 'Si BTH no aplica, usa tunel WireGuard site-to-site.',
+                    'script_key': 'wireguard_site_to_vps_script',
+                    'requires_local_access': True,
+                    'auto_available': False,
+                },
+            ]
+
+    return {
+        'status': status,
+        'title': title,
+        'summary': summary,
+        'recommended_transport': recommended_transport,
+        'actions': actions,
+    }
+
+
 def _probe_write_access(service: MikroTikService) -> Dict[str, Any]:
     """
     Probe write permissions by creating/removing a temporary system script.
@@ -1112,6 +1229,11 @@ def router_quick_connect(router_id):
             if public_reachable
             else f"# Requiere tunel: ssh {router.username}@{router.ip_address} -p 22 (via WG/BTH)"
         ),
+        'bth_enable_minimal_script': (
+            '/ip/cloud/set ddns-enabled=yes update-time=yes\n'
+            '/ip/cloud/set back-to-home-vpn=enabled\n'
+            '/ip/cloud/print\n'
+        ),
     }
 
     back_to_home = {
@@ -1227,11 +1349,13 @@ def router_quick_connect(router_id):
             'Registra cada cambio en auditoria antes de activar modo live.',
         ],
     }
+    connection_plan = _build_connection_plan(access_profile, back_to_home)
     return jsonify(
         {
             'success': True,
             'router': router.to_dict(),
             'access_profile': access_profile,
+            'connection_plan': connection_plan,
             'scripts': scripts,
             'guidance': guidance,
             'back_to_home': back_to_home,
