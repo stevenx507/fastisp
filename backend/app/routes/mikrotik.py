@@ -2489,6 +2489,7 @@ def bootstrap_back_to_home(router_id):
     update_time = _as_bool(data.get('update_time'), default=True)
     ddns_enabled = _as_bool(data.get('ddns_enabled'), default=True)
     enable_vpn = _as_bool(data.get('enable_vpn'), default=True)
+    fast_link_vps = _as_bool(data.get('fast_link_vps'), default=True)
     comment = str(data.get('comment') or 'FastISP VPS').strip() or 'FastISP VPS'
 
     safe_name = _script_escape(user_name)
@@ -2509,6 +2510,15 @@ def bootstrap_back_to_home(router_id):
     script_lines.append('/ip/cloud/print')
     script_content = '\n'.join(script_lines)
 
+    vps_sync: Dict[str, Any] = {
+        'success': False,
+        'mode': None,
+        'message': 'No ejecutado',
+        'manual_required': False,
+        'manual_command': '',
+        'attempts': [],
+    }
+
     try:
         with MikroTikService(router.id) as service:
             if not service.api:
@@ -2517,6 +2527,52 @@ def bootstrap_back_to_home(router_id):
             exec_result = service.execute_script(script_content)
             result = exec_result if isinstance(exec_result, dict) else {'success': bool(exec_result), 'result': str(exec_result)}
             observed = _collect_back_to_home_runtime(service)
+
+            if bool(result.get('success')) and fast_link_vps:
+                try:
+                    router_identity = _collect_router_wireguard_identity(service, interface_name='wg-fastisp')
+                    if bool(router_identity.get('success')):
+                        peer_public_key = str(router_identity.get('public_key') or '').strip()
+                        selected_ip = _normalize_wg_allowed_ip(
+                            router_identity.get('selected_peer_ip') or _safe_router_wireguard_allowed_ip(router.id)
+                        )
+                        if _is_valid_wireguard_public_key(peer_public_key) and selected_ip:
+                            sync_result = _sync_router_peer_to_vps(peer_public_key, selected_ip, data)
+                            vps_sync = {
+                                'success': bool(sync_result.get('success')),
+                                'mode': sync_result.get('mode'),
+                                'message': sync_result.get('message'),
+                                'manual_required': bool(sync_result.get('manual_required')),
+                                'manual_command': sync_result.get('manual_command') or '',
+                                'attempts': sync_result.get('attempts') or [],
+                            }
+                        else:
+                            vps_sync = {
+                                'success': False,
+                                'mode': 'skip',
+                                'message': 'No se pudo derivar public key o IP de tunel para sync VPS.',
+                                'manual_required': False,
+                                'manual_command': '',
+                                'attempts': [],
+                            }
+                    else:
+                        vps_sync = {
+                            'success': False,
+                            'mode': 'skip',
+                            'message': str(router_identity.get('error') or 'Interfaz wg-fastisp no lista para sync VPS'),
+                            'manual_required': False,
+                            'manual_command': '',
+                            'attempts': [],
+                        }
+                except Exception as sync_exc:
+                    vps_sync = {
+                        'success': False,
+                        'mode': 'auto',
+                        'message': f'Error sincronizando peer VPS: {sync_exc}',
+                        'manual_required': False,
+                        'manual_command': '',
+                        'attempts': [],
+                    }
     except Exception as exc:
         logger.error("Error executing Back To Home bootstrap for router %s: %s", router_id, exc, exc_info=True)
         return jsonify({'success': False, 'error': str(exc)}), 500
@@ -2536,11 +2592,32 @@ def bootstrap_back_to_home(router_id):
     if observed.get('bth_users_supported') is True and not user_exists:
         missing.append(f'Back To Home user "{user_name}" was not visible after bootstrap.')
 
+    vpn_status_text = str(observed.get('vpn_status') or '').strip().lower()
+    vpn_running = not vpn_status_text or 'running' in vpn_status_text or 'connected' in vpn_status_text
+    bth_ok = (
+        bool(result.get('success'))
+        and observed.get('ddns_enabled') is not False
+        and bool(observed.get('vpn_dns_name'))
+        and vpn_running
+    )
+    if observed.get('bth_users_supported') is True:
+        bth_ok = bth_ok and user_exists
+
+    state = 'operational' if bth_ok else 'partial'
+    summary_message = (
+        'Back To Home operativo y vinculado.'
+        if bth_ok
+        else 'Bootstrap aplicado, pero faltan validaciones para quedar operativo.'
+    )
+
     next_steps = [
         f'/interface/wireguard/peers/show-client-config {user_name}',
-        'Import the generated WireGuard client profile on the VPS.',
-        'Run connectivity probe from VPS to router LAN before enabling live automation.',
+        'Validar trafico por BTH desde NOC antes de acciones live.',
     ]
+    if not vps_sync.get('success') and str(vps_sync.get('manual_command') or '').strip():
+        next_steps.append(f'Ejecuta comando VPS manual: {vps_sync.get("manual_command")}')
+    elif vps_sync.get('success'):
+        next_steps.append('Peer WireGuard de VPS sincronizado automaticamente.')
     if observed.get('vpn_dns_name'):
         next_steps.append(
             f'Use DNS "{observed.get("vpn_dns_name")}" for operational inventory and runbook references.'
@@ -2557,10 +2634,14 @@ def bootstrap_back_to_home(router_id):
             'back_to_home': observed,
             'private_key_source': key_resolution.get('source') or 'tenant_managed',
             'managed_identity': key_resolution.get('identity') or {},
+            'vps_sync': vps_sync,
             'bootstrap': {
                 'user_name': user_name,
                 'allow_lan': allow_lan,
                 'user_visible_after_run': user_exists,
+                'operational': bth_ok,
+                'state': state,
+                'message': summary_message,
                 'missing': missing,
                 'next_steps': next_steps,
             },

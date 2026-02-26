@@ -610,6 +610,81 @@ def test_back_to_home_bootstrap_runs_single_flow(client, app, monkeypatch):
     assert any('/ip/cloud/back-to-home-users/add' in script for script in _DummyMikrotikService.scripts)
 
 
+def test_back_to_home_bootstrap_marks_operational_when_runtime_is_ready(client, app, monkeypatch):
+    headers = _admin_headers(client, app)
+    _DummyMikrotikService.scripts = []
+    monkeypatch.setattr(mikrotik_routes, 'MikroTikService', _DummyMikrotikService)
+    monkeypatch.setattr(
+        mikrotik_routes,
+        '_collect_back_to_home_runtime',
+        lambda _service: {
+            'reachable': True,
+            'supported': True,
+            'bth_users_supported': True,
+            'ddns_enabled': True,
+            'vpn_status': 'running',
+            'vpn_dns_name': 'bbab0a75794c.vpn.mynetname.net',
+            'users': [{'name': 'noc-vps', 'allow_lan': True, 'disabled': False}],
+        },
+    )
+    monkeypatch.setattr(
+        mikrotik_routes,
+        '_collect_router_wireguard_identity',
+        lambda _service, interface_name='wg-fastisp': {
+            'success': True,
+            'interface_name': interface_name,
+            'public_key': '+pWAE0GglDtysNZ4+qR7vTRbT6A8JS14bPmsyRK4a20=',
+            'addresses': ['10.250.8.2/32'],
+            'selected_peer_ip': '10.250.8.2/32',
+        },
+    )
+    monkeypatch.setattr(
+        mikrotik_routes,
+        '_sync_router_peer_to_vps',
+        lambda _key, _allowed_ip, _payload: {
+            'success': True,
+            'mode': 'ssh',
+            'message': 'Peer registrado en VPS por SSH.',
+            'manual_command': '',
+            'runtime': {'mode': 'ssh'},
+            'attempts': [],
+        },
+    )
+
+    create_response = client.post(
+        '/api/mikrotik/routers',
+        json={
+            'name': 'Nodo-BTH-Operational',
+            'ip_address': '10.10.42.1',
+            'username': 'api-admin',
+            'password': 'router-pass',
+            'api_port': 8728,
+            'test_connection': False,
+        },
+        headers=headers,
+    )
+    assert create_response.status_code == 201
+    router_id = str(create_response.get_json()['router']['id'])
+
+    bootstrap_response = client.post(
+        f'/api/mikrotik/routers/{router_id}/back-to-home/bootstrap',
+        json={
+            'confirm': True,
+            'user_name': 'noc-vps',
+            'allow_lan': True,
+            'change_ticket': 'CHG-BTH-OP-001',
+            'preflight_ack': True,
+        },
+        headers=headers,
+    )
+    assert bootstrap_response.status_code == 200
+    payload = bootstrap_response.get_json()
+    assert payload['success'] is True
+    assert payload['bootstrap']['operational'] is True
+    assert payload['bootstrap']['state'] == 'operational'
+    assert payload['vps_sync']['success'] is True
+
+
 def test_back_to_home_bootstrap_uses_managed_key_when_private_missing(client, app, monkeypatch):
     headers = _admin_headers(client, app)
     _DummyMikrotikService.scripts = []

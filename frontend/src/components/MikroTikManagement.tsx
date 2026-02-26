@@ -172,6 +172,9 @@ interface RouterBackToHomeBootstrapData {
   user_name?: string
   allow_lan?: boolean
   user_visible_after_run?: boolean
+  operational?: boolean
+  state?: string
+  message?: string
   missing?: string[]
   next_steps?: string[]
 }
@@ -180,6 +183,7 @@ interface RouterBackToHomeBootstrapResponse {
   success?: boolean
   error?: string
   bootstrap?: RouterBackToHomeBootstrapData
+  vps_sync?: RouterWireGuardRegisterVpsSync
 }
 
 interface EnterpriseProfileOption {
@@ -1181,6 +1185,7 @@ const MikroTikManagement: React.FC = () => {
           confirm: true,
           user_name: bthUserName.trim() || 'noc-vps',
           allow_lan: bthAllowLan,
+          fast_link_vps: true,
         }
         const privateKey = bthPrivateKey.trim()
         if (privateKey) payloadBody.private_key = privateKey
@@ -1192,15 +1197,28 @@ const MikroTikManagement: React.FC = () => {
         const payload = (await safeJson(response)) as RouterBackToHomeBootstrapResponse | null
         if (response.ok && payload?.success) {
           if (payload.bootstrap) setBootstrapResult(payload.bootstrap)
-          updateStep(stepId, 'success', 'Bootstrap BTH completado')
-          return true
+          const detail = payload.bootstrap?.message || 'Bootstrap BTH completado'
+          updateStep(stepId, 'success', detail)
+          return {
+            ok: true,
+            operational: Boolean(payload.bootstrap?.operational),
+            detail,
+          }
         }
         updateStep(stepId, 'failed', payload?.error || 'No se pudo ejecutar bootstrap BTH')
-        return false
+        return {
+          ok: false,
+          operational: false,
+          detail: payload?.error || 'No se pudo ejecutar bootstrap BTH',
+        }
       } catch (error) {
         const detail = error instanceof Error ? error.message : 'Fallo bootstrap BTH'
         updateStep(stepId, 'failed', detail)
-        return false
+        return {
+          ok: false,
+          operational: false,
+          detail,
+        }
       }
     }
 
@@ -1306,9 +1324,14 @@ const MikroTikManagement: React.FC = () => {
       }
 
       if (!connected) {
-        const bthOk = await bootstrapBthStep('bth_bootstrap')
-        if (bthOk) {
-          connected = await testConnectionStep('verify_wg', 'Conexion operativa tras BTH')
+        const bthResult = await bootstrapBthStep('bth_bootstrap')
+        if (bthResult.ok) {
+          if (bthResult.operational) {
+            updateStep('verify_wg', 'success', 'Back To Home operativo y vinculado al sistema')
+            connected = true
+          } else {
+            connected = await testConnectionStep('verify_wg', 'Conexion operativa tras BTH')
+          }
         }
       } else {
         updateStep('bth_bootstrap', 'skipped', 'No requerido')
@@ -1434,6 +1457,7 @@ const MikroTikManagement: React.FC = () => {
         user_name: userName,
         allow_lan: bthAllowLan,
         replace_existing_user: true,
+        fast_link_vps: true,
         comment: 'FastISP VPS',
       }
       const privateKey = bthPrivateKey.trim()
@@ -1449,7 +1473,12 @@ const MikroTikManagement: React.FC = () => {
       if (response.ok && payload?.success) {
         setBootstrapResult(payload.bootstrap || null)
         const pendingCount = Array.isArray(payload.bootstrap?.missing) ? payload.bootstrap?.missing.length : 0
-        addToast('success', pendingCount > 0 ? `Bootstrap aplicado con ${pendingCount} pendiente(s)` : 'Bootstrap BTH aplicado correctamente')
+        const operational = Boolean(payload.bootstrap?.operational)
+        if (operational) {
+          addToast('success', payload.bootstrap?.message || 'Back To Home operativo y vinculado')
+        } else {
+          addToast('success', pendingCount > 0 ? `Bootstrap aplicado con ${pendingCount} pendiente(s)` : 'Bootstrap BTH aplicado correctamente')
+        }
       } else {
         addToast('error', payload?.error || 'No se pudo ejecutar bootstrap Back To Home')
       }
