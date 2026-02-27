@@ -344,6 +344,26 @@ interface WireGuardVpsSyncProfileResponse {
   error?: string
 }
 
+interface WireGuardVpsSyncProbeCheck {
+  id: string
+  ok: boolean
+  detail?: string
+}
+
+interface WireGuardVpsSyncProbePayload {
+  success?: boolean
+  mode?: string
+  message?: string
+  warnings?: string[]
+  checks?: WireGuardVpsSyncProbeCheck[]
+}
+
+interface WireGuardVpsSyncProbeResponse {
+  success?: boolean
+  probe?: WireGuardVpsSyncProbePayload
+  error?: string
+}
+
 interface RouterFormState {
   name: string
   ip_address: string
@@ -499,6 +519,7 @@ const MikroTikManagement: React.FC = () => {
   const [vpsSyncProfile, setVpsSyncProfile] = useState<WireGuardVpsSyncProfile>(defaultVpsSyncProfile)
   const [vpsSyncLoading, setVpsSyncLoading] = useState(false)
   const [vpsSyncSaving, setVpsSyncSaving] = useState(false)
+  const [vpsSyncTesting, setVpsSyncTesting] = useState(false)
   const [vpsSyncPassword, setVpsSyncPassword] = useState('')
   const [vpsSyncClearPassword, setVpsSyncClearPassword] = useState(false)
   const token = useAuthStore((state) => state.token)
@@ -792,6 +813,52 @@ const MikroTikManagement: React.FC = () => {
       setVpsSyncSaving(false)
     }
   }, [addToast, apiFetch, safeJson, vpsSyncClearPassword, vpsSyncPassword, vpsSyncProfile])
+
+  const testVpsSyncProfile = useCallback(async () => {
+    setVpsSyncTesting(true)
+    try {
+      const payloadBody: Record<string, unknown> = {
+        mode: vpsSyncProfile.mode,
+        vps_interface: vpsSyncProfile.vps_interface,
+        persist: vpsSyncProfile.persist,
+        ssh_host: vpsSyncProfile.ssh_host,
+        ssh_user: vpsSyncProfile.ssh_user,
+        ssh_port: Number(vpsSyncProfile.ssh_port || 22),
+        ssh_key_path: vpsSyncProfile.ssh_key_path,
+        ssh_timeout_seconds: Number(vpsSyncProfile.ssh_timeout_seconds || 8),
+        ssh_use_sudo: vpsSyncProfile.ssh_use_sudo,
+      }
+      if (vpsSyncPassword.trim()) payloadBody.ssh_password = vpsSyncPassword.trim()
+
+      const response = await apiFetch('/api/mikrotik/wireguard/vps-sync-profile/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payloadBody),
+      })
+      const payload = (await safeJson(response)) as WireGuardVpsSyncProbeResponse | null
+      if (!response.ok || !payload?.probe) {
+        addToast('error', payload?.error || 'No se pudo probar VPS sync')
+        return
+      }
+
+      if (payload.success) {
+        addToast('success', payload.probe.message || 'VPS sync listo')
+      } else {
+        addToast('error', payload.probe.message || 'VPS sync no listo')
+      }
+      for (const warning of payload.probe.warnings || []) {
+        addToast('info', warning)
+      }
+      for (const check of payload.probe.checks || []) {
+        if (!check.ok && check.detail) addToast('info', `${check.id}: ${check.detail}`)
+      }
+    } catch (error) {
+      console.error('Error testing WG VPS sync profile:', error)
+      addToast('error', normalizeUiError(error, 'Error probando VPS sync'))
+    } finally {
+      setVpsSyncTesting(false)
+    }
+  }, [addToast, apiFetch, safeJson, vpsSyncPassword, vpsSyncProfile])
 
   useEffect(() => {
     loadRouters()
@@ -1755,10 +1822,17 @@ const MikroTikManagement: React.FC = () => {
             </button>
             <button
               onClick={() => void saveVpsSyncProfile()}
-              disabled={vpsSyncLoading || vpsSyncSaving}
+              disabled={vpsSyncLoading || vpsSyncSaving || vpsSyncTesting}
               className="rounded bg-indigo-600 px-2 py-1 text-xs font-semibold text-white hover:bg-indigo-700 disabled:opacity-60"
             >
               {vpsSyncSaving ? 'Guardando...' : 'Guardar'}
+            </button>
+            <button
+              onClick={() => void testVpsSyncProfile()}
+              disabled={vpsSyncLoading || vpsSyncSaving || vpsSyncTesting}
+              className="rounded bg-emerald-600 px-2 py-1 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-60"
+            >
+              {vpsSyncTesting ? 'Probando...' : 'Probar SSH'}
             </button>
           </div>
         </div>

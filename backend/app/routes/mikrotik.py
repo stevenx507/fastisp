@@ -676,6 +676,131 @@ def _wg_vps_sync_profile_response(profile: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _probe_wg_vps_sync_runtime(runtime: Dict[str, Any]) -> Dict[str, Any]:
+    mode = _normalize_wg_vps_sync_mode(runtime.get('mode'))
+    timeout_seconds = int(runtime.get('ssh_timeout_seconds') or 8)
+    checks: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+
+    if mode == 'manual':
+        return {
+            'success': False,
+            'mode': mode,
+            'message': 'Modo manual: no hay automacion activa. Configura ssh/auto para enlace rapido.',
+            'checks': checks,
+            'warnings': ['Configura SSH para eliminar pasos manuales.'],
+        }
+
+    local_ok = False
+    if mode in ('auto', 'local'):
+        local_probe = _run_local_command(['wg', '--version'], timeout_seconds=timeout_seconds)
+        local_ok = bool(local_probe.get('ok'))
+        detail = (
+            local_probe.get('stdout')
+            or local_probe.get('stderr')
+            or local_probe.get('error')
+            or ('wg disponible en runtime local' if local_ok else 'wg no disponible en runtime local')
+        )
+        checks.append(
+            {
+                'id': 'local_wg_binary',
+                'ok': local_ok,
+                'detail': str(detail),
+            }
+        )
+        if mode == 'local':
+            return {
+                'success': local_ok,
+                'mode': mode,
+                'message': 'Runtime local listo para sync WG.' if local_ok else 'Runtime local sin binario wg.',
+                'checks': checks,
+                'warnings': warnings,
+            }
+
+    ssh_ok = False
+    if mode in ('auto', 'ssh'):
+        ssh_host = str(runtime.get('ssh_host') or '').strip()
+        ssh_user = str(runtime.get('ssh_user') or '').strip()
+        if not ssh_host or not ssh_user:
+            checks.append(
+                {
+                    'id': 'ssh_config',
+                    'ok': False,
+                    'detail': 'Faltan ssh_host o ssh_user.',
+                }
+            )
+            if mode == 'ssh':
+                return {
+                    'success': False,
+                    'mode': mode,
+                    'message': 'Modo SSH requiere ssh_host y ssh_user.',
+                    'checks': checks,
+                    'warnings': warnings,
+                }
+        else:
+            ssh_client = paramiko.SSHClient()
+            ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            connect_kwargs: Dict[str, Any] = {
+                'hostname': ssh_host,
+                'username': ssh_user,
+                'port': int(runtime.get('ssh_port') or 22),
+                'timeout': max(2, timeout_seconds),
+                'banner_timeout': max(2, timeout_seconds),
+                'auth_timeout': max(2, timeout_seconds),
+                'look_for_keys': bool(runtime.get('ssh_key_path')),
+            }
+            if runtime.get('ssh_key_path'):
+                connect_kwargs['key_filename'] = str(runtime.get('ssh_key_path'))
+            if runtime.get('ssh_password'):
+                connect_kwargs['password'] = str(runtime.get('ssh_password'))
+            try:
+                ssh_client.connect(**connect_kwargs)
+                checks.append({'id': 'ssh_connect', 'ok': True, 'detail': f'SSH conectado: {ssh_user}@{ssh_host}'})
+                probe_result = _run_ssh_command(
+                    ssh_client,
+                    "sh -lc 'command -v wg >/dev/null 2>&1 && echo WG_OK || echo WG_MISSING'",
+                    timeout_seconds=timeout_seconds,
+                )
+                probe_stdout = str(probe_result.get('stdout') or '').strip()
+                ssh_ok = 'WG_OK' in probe_stdout
+                checks.append(
+                    {
+                        'id': 'ssh_wg_binary',
+                        'ok': ssh_ok,
+                        'detail': probe_stdout or str(probe_result.get('stderr') or probe_result.get('error') or ''),
+                    }
+                )
+                if not ssh_ok:
+                    warnings.append('SSH conectado pero no se detecto binario wg en el VPS remoto.')
+            except Exception as exc:
+                checks.append({'id': 'ssh_connect', 'ok': False, 'detail': f'SSH error: {exc}'})
+                if mode == 'ssh':
+                    return {
+                        'success': False,
+                        'mode': mode,
+                        'message': f'No se pudo conectar por SSH: {exc}',
+                        'checks': checks,
+                        'warnings': warnings,
+                    }
+            finally:
+                try:
+                    ssh_client.close()
+                except Exception:
+                    pass
+
+    success = bool(local_ok or ssh_ok)
+    message = 'VPS sync listo para automatizacion.' if success else 'No hay ruta automatica valida (local/ssh) para VPS sync.'
+    if not success:
+        warnings.append('Configura modo SSH con credenciales validas o instala wg en runtime local.')
+    return {
+        'success': success,
+        'mode': mode,
+        'message': message,
+        'checks': checks,
+        'warnings': warnings,
+    }
+
+
 def _resolve_wg_sync_runtime(payload: Dict[str, Any]) -> Dict[str, Any]:
     data = payload or {}
     tenant_profile = _load_wg_vps_sync_profile()
@@ -2623,6 +2748,18 @@ def update_wireguard_vps_sync_profile():
         warnings.append('Modo SSH activo sin password ni key_path; configura autenticacion SSH.')
 
     return jsonify({'success': True, 'profile': response_profile, 'warnings': warnings}), 200
+
+
+@mikrotik_bp.route('/wireguard/vps-sync-profile/test', methods=['POST'])
+@admin_required()
+def test_wireguard_vps_sync_profile():
+    payload = request.get_json(silent=True) or {}
+    runtime_payload = dict(payload or {})
+    if runtime_payload.get('sync_mode') in (None, '') and runtime_payload.get('mode') not in (None, ''):
+        runtime_payload['sync_mode'] = runtime_payload.get('mode')
+    runtime = _resolve_wg_sync_runtime(runtime_payload)
+    probe = _probe_wg_vps_sync_runtime(runtime)
+    return jsonify({'success': bool(probe.get('success')), 'probe': probe}), 200
 
 
 @mikrotik_bp.route('/routers/<router_id>/quick-connect', methods=['GET'])

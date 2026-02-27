@@ -313,6 +313,51 @@ def test_wireguard_vps_sync_profile_routes_roundtrip(client, app):
     assert clear_payload['profile']['ssh_password_set'] is False
 
 
+def test_wireguard_vps_sync_profile_test_route_returns_probe_payload(client, app, monkeypatch):
+    headers = _admin_headers(client, app)
+
+    monkeypatch.setattr(
+        mikrotik_routes,
+        '_probe_wg_vps_sync_runtime',
+        lambda runtime: {
+            'success': True,
+            'mode': runtime.get('mode'),
+            'message': 'Probe OK',
+            'warnings': [],
+            'checks': [{'id': 'ssh_connect', 'ok': True, 'detail': 'ok'}],
+        },
+    )
+
+    response = client.post(
+        '/api/mikrotik/wireguard/vps-sync-profile/test',
+        json={
+            'mode': 'ssh',
+            'ssh_host': '127.0.0.1',
+            'ssh_user': 'root',
+            'ssh_port': 22,
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['success'] is True
+    assert payload['probe']['message'] == 'Probe OK'
+    assert payload['probe']['mode'] == 'ssh'
+
+
+def test_wireguard_vps_sync_profile_test_route_manual_mode_not_ready(client, app):
+    headers = _admin_headers(client, app)
+    response = client.post(
+        '/api/mikrotik/wireguard/vps-sync-profile/test',
+        json={'mode': 'manual'},
+        headers=headers,
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['success'] is False
+    assert 'Modo manual' in str(payload['probe']['message'])
+
+
 class _DummyRouterOsResource:
     def __init__(self, rows):
         self.rows = list(rows or [])
