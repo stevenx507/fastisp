@@ -264,6 +264,55 @@ def test_wireguard_profile_routes_and_quick_connect_use_tenant_profile(client, a
     assert ':local wgServerKey "UkoIc1YP0iCZ0b/NGp39zhaLU02HfKI8aU+C2jp591M="' in str(quick_payload['scripts']['wireguard_site_to_vps_script'])
 
 
+def test_wireguard_vps_sync_profile_routes_roundtrip(client, app):
+    headers = _admin_headers(client, app)
+
+    get_initial = client.get('/api/mikrotik/wireguard/vps-sync-profile', headers=headers)
+    assert get_initial.status_code == 200
+    initial_payload = get_initial.get_json()
+    assert initial_payload['success'] is True
+    assert initial_payload['profile']['mode'] in ('auto', 'manual', 'ssh', 'local')
+
+    update_response = client.post(
+        '/api/mikrotik/wireguard/vps-sync-profile',
+        json={
+            'mode': 'ssh',
+            'vps_interface': 'wg0',
+            'persist': True,
+            'ssh_host': '127.0.0.1',
+            'ssh_user': 'root',
+            'ssh_port': 22,
+            'ssh_timeout_seconds': 10,
+            'ssh_use_sudo': True,
+            'ssh_password': 'demo-password',
+        },
+        headers=headers,
+    )
+    assert update_response.status_code == 200
+    update_payload = update_response.get_json()
+    assert update_payload['success'] is True
+    assert update_payload['profile']['mode'] == 'ssh'
+    assert update_payload['profile']['ssh_password_set'] is True
+
+    get_after = client.get('/api/mikrotik/wireguard/vps-sync-profile', headers=headers)
+    assert get_after.status_code == 200
+    after_payload = get_after.get_json()
+    assert after_payload['success'] is True
+    assert after_payload['profile']['ssh_host'] == '127.0.0.1'
+    assert after_payload['profile']['ssh_user'] == 'root'
+    assert after_payload['profile']['ssh_password_set'] is True
+
+    clear_response = client.post(
+        '/api/mikrotik/wireguard/vps-sync-profile',
+        json={'clear_ssh_password': True},
+        headers=headers,
+    )
+    assert clear_response.status_code == 200
+    clear_payload = clear_response.get_json()
+    assert clear_payload['success'] is True
+    assert clear_payload['profile']['ssh_password_set'] is False
+
+
 class _DummyRouterOsResource:
     def __init__(self, rows):
         self.rows = list(rows or [])

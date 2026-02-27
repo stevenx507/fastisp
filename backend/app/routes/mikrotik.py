@@ -48,6 +48,7 @@ WG_PROFILE_SERVER_PUBLIC_KEY_PLACEHOLDER = '<WIREGUARD_SERVER_PUBLIC_KEY>'
 WG_VPS_SYNC_MODE_DEFAULT = 'auto'
 WG_VPS_INTERFACE_DEFAULT = 'wg0'
 QR_SOURCE_DEFAULT_NAME = 'wireguard-qr.txt'
+WG_VPS_SYNC_PROFILE_SETTING_KEY = 'mikrotik_wg_vps_sync_profile'
 
 
 def _decode_text_payload(raw_payload: bytes) -> str:
@@ -562,27 +563,208 @@ def _register_wireguard_peer_via_ssh(
             pass
 
 
+def _first_defined_value(*values: Any) -> Any:
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return None
+
+
+def _normalize_wg_vps_interface(raw_value: Any) -> str:
+    token = str(raw_value or '').strip()
+    if not token:
+        return WG_VPS_INTERFACE_DEFAULT
+    if not re.match(r'^[a-zA-Z0-9_.:-]+$', token):
+        return WG_VPS_INTERFACE_DEFAULT
+    return token
+
+
+def _normalize_wg_vps_ssh_port(raw_value: Any, default: int = 22) -> int:
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        parsed = int(default or 22)
+    return min(max(parsed, 1), 65535)
+
+
+def _normalize_wg_vps_timeout(raw_value: Any, default: int = 8) -> int:
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        parsed = int(default or 8)
+    return min(max(parsed, 2), 30)
+
+
+def _load_wg_vps_sync_profile() -> Dict[str, Any]:
+    row = _tenant_setting_row(WG_VPS_SYNC_PROFILE_SETTING_KEY)
+    raw_value = row.value if row and isinstance(row.value, dict) else {}
+    if not isinstance(raw_value, dict):
+        raw_value = {}
+
+    decrypted_password = ''
+    encrypted_password = str(raw_value.get('ssh_password_encrypted') or '').strip()
+    if encrypted_password:
+        try:
+            decrypted_password = _decrypt_secret_value(encrypted_password)
+        except Exception as exc:
+            logger.warning('Could not decrypt wg vps sync ssh password for tenant %s: %s', current_tenant_id(), exc)
+
+    return {
+        'mode': _normalize_wg_vps_sync_mode(raw_value.get('mode')),
+        'vps_interface': _normalize_wg_vps_interface(raw_value.get('vps_interface') or WG_VPS_INTERFACE_DEFAULT),
+        'persist': _as_bool(raw_value.get('persist'), default=True),
+        'ssh_host': str(raw_value.get('ssh_host') or '').strip(),
+        'ssh_user': str(raw_value.get('ssh_user') or '').strip(),
+        'ssh_port': _normalize_wg_vps_ssh_port(raw_value.get('ssh_port'), default=22),
+        'ssh_key_path': str(raw_value.get('ssh_key_path') or '').strip(),
+        'ssh_timeout_seconds': _normalize_wg_vps_timeout(raw_value.get('ssh_timeout_seconds'), default=8),
+        'ssh_use_sudo': _as_bool(raw_value.get('ssh_use_sudo'), default=True),
+        'ssh_password': decrypted_password,
+        'ssh_password_set': bool(decrypted_password or encrypted_password),
+        'updated_at': str(raw_value.get('updated_at') or '').strip() or None,
+    }
+
+
+def _persist_wg_vps_sync_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
+    payload = {
+        'version': 1,
+        'mode': _normalize_wg_vps_sync_mode(profile.get('mode')),
+        'vps_interface': _normalize_wg_vps_interface(profile.get('vps_interface')),
+        'persist': _as_bool(profile.get('persist'), default=True),
+        'ssh_host': str(profile.get('ssh_host') or '').strip(),
+        'ssh_user': str(profile.get('ssh_user') or '').strip(),
+        'ssh_port': _normalize_wg_vps_ssh_port(profile.get('ssh_port'), default=22),
+        'ssh_key_path': str(profile.get('ssh_key_path') or '').strip(),
+        'ssh_timeout_seconds': _normalize_wg_vps_timeout(profile.get('ssh_timeout_seconds'), default=8),
+        'ssh_use_sudo': _as_bool(profile.get('ssh_use_sudo'), default=True),
+        'updated_at': datetime.utcnow().isoformat() + 'Z',
+    }
+
+    ssh_password = str(profile.get('ssh_password') or '').strip()
+    if ssh_password:
+        payload['ssh_password_encrypted'] = _encrypt_secret_value(ssh_password)
+    else:
+        existing = _tenant_setting_row(WG_VPS_SYNC_PROFILE_SETTING_KEY)
+        existing_value = existing.value if existing and isinstance(existing.value, dict) else {}
+        existing_encrypted = str((existing_value or {}).get('ssh_password_encrypted') or '').strip()
+        if existing_encrypted:
+            payload['ssh_password_encrypted'] = existing_encrypted
+
+    if _as_bool(profile.get('clear_ssh_password'), default=False):
+        payload.pop('ssh_password_encrypted', None)
+
+    _tenant_setting_upsert(WG_VPS_SYNC_PROFILE_SETTING_KEY, payload)
+    return _load_wg_vps_sync_profile()
+
+
+def _wg_vps_sync_profile_response(profile: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        'mode': _normalize_wg_vps_sync_mode(profile.get('mode')),
+        'vps_interface': _normalize_wg_vps_interface(profile.get('vps_interface')),
+        'persist': _as_bool(profile.get('persist'), default=True),
+        'ssh_host': str(profile.get('ssh_host') or '').strip(),
+        'ssh_user': str(profile.get('ssh_user') or '').strip(),
+        'ssh_port': _normalize_wg_vps_ssh_port(profile.get('ssh_port'), default=22),
+        'ssh_key_path': str(profile.get('ssh_key_path') or '').strip(),
+        'ssh_timeout_seconds': _normalize_wg_vps_timeout(profile.get('ssh_timeout_seconds'), default=8),
+        'ssh_use_sudo': _as_bool(profile.get('ssh_use_sudo'), default=True),
+        'ssh_password_set': bool(profile.get('ssh_password_set')),
+        'updated_at': profile.get('updated_at'),
+    }
+
+
 def _resolve_wg_sync_runtime(payload: Dict[str, Any]) -> Dict[str, Any]:
     data = payload or {}
-    mode = _normalize_wg_vps_sync_mode(data.get('sync_mode') or current_app.config.get('MIKROTIK_WG_VPS_SYNC_MODE'))
-    vps_interface = str(data.get('vps_interface') or current_app.config.get('MIKROTIK_WG_VPS_INTERFACE') or WG_VPS_INTERFACE_DEFAULT).strip() or WG_VPS_INTERFACE_DEFAULT
-    persist = _as_bool(data.get('persist'), default=_as_bool(current_app.config.get('MIKROTIK_WG_VPS_PERSIST'), default=True))
-    ssh_host = str(data.get('ssh_host') or current_app.config.get('MIKROTIK_WG_VPS_SSH_HOST') or '').strip()
-    ssh_user = str(data.get('ssh_user') or current_app.config.get('MIKROTIK_WG_VPS_SSH_USER') or '').strip()
-    ssh_password = str(data.get('ssh_password') or current_app.config.get('MIKROTIK_WG_VPS_SSH_PASSWORD') or '').strip()
-    ssh_key_path = str(data.get('ssh_key_path') or current_app.config.get('MIKROTIK_WG_VPS_SSH_KEY_PATH') or '').strip()
-    ssh_port_raw = data.get('ssh_port') if data.get('ssh_port') not in (None, '') else current_app.config.get('MIKROTIK_WG_VPS_SSH_PORT')
-    timeout_raw = data.get('ssh_timeout_seconds') if data.get('ssh_timeout_seconds') not in (None, '') else current_app.config.get('MIKROTIK_WG_VPS_SSH_TIMEOUT_SECONDS')
-    use_sudo = _as_bool(data.get('ssh_use_sudo'), default=_as_bool(current_app.config.get('MIKROTIK_WG_VPS_SSH_USE_SUDO'), default=True))
-    try:
-        ssh_port = int(ssh_port_raw or 22)
-    except (TypeError, ValueError):
-        ssh_port = 22
-    try:
-        timeout_seconds = int(timeout_raw or 8)
-    except (TypeError, ValueError):
-        timeout_seconds = 8
-    timeout_seconds = min(max(timeout_seconds, 2), 30)
+    tenant_profile = _load_wg_vps_sync_profile()
+
+    mode_source = _first_defined_value(
+        data.get('sync_mode'),
+        tenant_profile.get('mode'),
+        current_app.config.get('MIKROTIK_WG_VPS_SYNC_MODE'),
+    )
+    mode = _normalize_wg_vps_sync_mode(mode_source)
+
+    interface_source = _first_defined_value(
+        data.get('vps_interface'),
+        tenant_profile.get('vps_interface'),
+        current_app.config.get('MIKROTIK_WG_VPS_INTERFACE'),
+        WG_VPS_INTERFACE_DEFAULT,
+    )
+    vps_interface = _normalize_wg_vps_interface(interface_source)
+
+    persist_source = _first_defined_value(
+        data.get('persist'),
+        tenant_profile.get('persist'),
+        current_app.config.get('MIKROTIK_WG_VPS_PERSIST'),
+    )
+    persist = _as_bool(persist_source, default=True)
+
+    ssh_host = str(
+        _first_defined_value(
+            data.get('ssh_host'),
+            tenant_profile.get('ssh_host'),
+            current_app.config.get('MIKROTIK_WG_VPS_SSH_HOST'),
+            '',
+        )
+        or ''
+    ).strip()
+    ssh_user = str(
+        _first_defined_value(
+            data.get('ssh_user'),
+            tenant_profile.get('ssh_user'),
+            current_app.config.get('MIKROTIK_WG_VPS_SSH_USER'),
+            '',
+        )
+        or ''
+    ).strip()
+    ssh_password = str(
+        _first_defined_value(
+            data.get('ssh_password'),
+            tenant_profile.get('ssh_password'),
+            current_app.config.get('MIKROTIK_WG_VPS_SSH_PASSWORD'),
+            '',
+        )
+        or ''
+    ).strip()
+    ssh_key_path = str(
+        _first_defined_value(
+            data.get('ssh_key_path'),
+            tenant_profile.get('ssh_key_path'),
+            current_app.config.get('MIKROTIK_WG_VPS_SSH_KEY_PATH'),
+            '',
+        )
+        or ''
+    ).strip()
+
+    ssh_port = _normalize_wg_vps_ssh_port(
+        _first_defined_value(
+            data.get('ssh_port'),
+            tenant_profile.get('ssh_port'),
+            current_app.config.get('MIKROTIK_WG_VPS_SSH_PORT'),
+            22,
+        ),
+        default=22,
+    )
+    timeout_seconds = _normalize_wg_vps_timeout(
+        _first_defined_value(
+            data.get('ssh_timeout_seconds'),
+            tenant_profile.get('ssh_timeout_seconds'),
+            current_app.config.get('MIKROTIK_WG_VPS_SSH_TIMEOUT_SECONDS'),
+            8,
+        ),
+        default=8,
+    )
+    use_sudo = _as_bool(
+        _first_defined_value(
+            data.get('ssh_use_sudo'),
+            tenant_profile.get('ssh_use_sudo'),
+            current_app.config.get('MIKROTIK_WG_VPS_SSH_USE_SUDO'),
+        ),
+        default=True,
+    )
 
     return {
         'mode': mode,
@@ -2387,6 +2569,60 @@ def update_wireguard_profile():
 
     profile = _resolve_wireguard_profile({})
     return jsonify({'success': True, 'profile': profile}), 200
+
+
+@mikrotik_bp.route('/wireguard/vps-sync-profile', methods=['GET'])
+@admin_required()
+def get_wireguard_vps_sync_profile():
+    profile = _load_wg_vps_sync_profile()
+    response_profile = _wg_vps_sync_profile_response(profile)
+    return jsonify({'success': True, 'profile': response_profile}), 200
+
+
+@mikrotik_bp.route('/wireguard/vps-sync-profile', methods=['POST'])
+@admin_required()
+def update_wireguard_vps_sync_profile():
+    payload = request.get_json(silent=True) or {}
+    current_profile = _load_wg_vps_sync_profile()
+    next_profile: Dict[str, Any] = dict(current_profile)
+
+    if 'mode' in payload:
+        next_profile['mode'] = _normalize_wg_vps_sync_mode(payload.get('mode'))
+    if 'vps_interface' in payload:
+        next_profile['vps_interface'] = _normalize_wg_vps_interface(payload.get('vps_interface'))
+    if 'persist' in payload:
+        next_profile['persist'] = _as_bool(payload.get('persist'), default=True)
+    if 'ssh_host' in payload:
+        next_profile['ssh_host'] = str(payload.get('ssh_host') or '').strip()
+    if 'ssh_user' in payload:
+        next_profile['ssh_user'] = str(payload.get('ssh_user') or '').strip()
+    if 'ssh_port' in payload:
+        next_profile['ssh_port'] = _normalize_wg_vps_ssh_port(payload.get('ssh_port'), default=22)
+    if 'ssh_key_path' in payload:
+        next_profile['ssh_key_path'] = str(payload.get('ssh_key_path') or '').strip()
+    if 'ssh_timeout_seconds' in payload:
+        next_profile['ssh_timeout_seconds'] = _normalize_wg_vps_timeout(payload.get('ssh_timeout_seconds'), default=8)
+    if 'ssh_use_sudo' in payload:
+        next_profile['ssh_use_sudo'] = _as_bool(payload.get('ssh_use_sudo'), default=True)
+
+    clear_ssh_password = _as_bool(payload.get('clear_ssh_password'), default=False)
+    next_profile['clear_ssh_password'] = clear_ssh_password
+    if 'ssh_password' in payload:
+        next_profile['ssh_password'] = str(payload.get('ssh_password') or '').strip()
+
+    saved_profile = _persist_wg_vps_sync_profile(next_profile)
+    response_profile = _wg_vps_sync_profile_response(saved_profile)
+
+    warnings: List[str] = []
+    mode = str(response_profile.get('mode') or WG_VPS_SYNC_MODE_DEFAULT)
+    ssh_host = str(response_profile.get('ssh_host') or '').strip()
+    ssh_user = str(response_profile.get('ssh_user') or '').strip()
+    if mode in ('auto', 'ssh') and (not ssh_host or not ssh_user):
+        warnings.append('SSH host/user no configurados; sync VPS puede quedar manual.')
+    if mode == 'ssh' and not response_profile.get('ssh_password_set') and not str(response_profile.get('ssh_key_path') or '').strip():
+        warnings.append('Modo SSH activo sin password ni key_path; configura autenticacion SSH.')
+
+    return jsonify({'success': True, 'profile': response_profile, 'warnings': warnings}), 200
 
 
 @mikrotik_bp.route('/routers/<router_id>/quick-connect', methods=['GET'])
