@@ -552,7 +552,7 @@ def _register_wireguard_peer_via_ssh(
         return {
             'success': True,
             'mode': 'ssh',
-            'message': f'Peer registrado en VPS via SSH ({ssh_user}@{ssh_host}).',
+            'message': 'Peer registrado en VPS via SSH (perfil gestionado por servidor).',
             'set_result': set_result,
             'save_result': save_result,
         }
@@ -743,7 +743,13 @@ def _probe_wg_vps_sync_runtime(runtime: Dict[str, Any]) -> Dict[str, Any]:
                 connect_kwargs['password'] = str(runtime.get('ssh_password'))
             try:
                 ssh_client.connect(**connect_kwargs)
-                checks.append({'id': 'ssh_connect', 'ok': True, 'detail': f'SSH conectado: {ssh_user}@{ssh_host}'})
+                checks.append(
+                    {
+                        'id': 'ssh_connect',
+                        'ok': True,
+                        'detail': 'SSH conectado (perfil gestionado por servidor)',
+                    }
+                )
                 probe_result = _run_ssh_command(
                     ssh_client,
                     "sh -lc 'command -v wg >/dev/null 2>&1 && echo WG_OK || echo WG_MISSING'",
@@ -1086,7 +1092,7 @@ def _sync_bth_profile_to_vps(parsed_config: Dict[str, Any], router_host: str, ro
                 return {
                     'success': True,
                     'mode': 'ssh_bth_profile',
-                    'message': f'Perfil BTH activado en VPS por SSH ({ssh_user}@{ssh_host}).',
+                    'message': 'Perfil BTH activado en VPS por SSH (perfil gestionado por servidor).',
                     'manual_required': False,
                     'manual_command': manual_command,
                     'runtime': runtime,
