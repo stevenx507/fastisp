@@ -171,6 +171,17 @@ def _first_wireguard_interface_ip(parsed_config: Dict[str, Any]) -> str:
     return ''
 
 
+def _is_back_to_home_client_profile(parsed_config: Dict[str, Any]) -> bool:
+    endpoint_host = str(parsed_config.get('endpoint_host') or '').strip().lower()
+    if not endpoint_host:
+        return False
+    if endpoint_host.endswith('.vpn.mynetname.net'):
+        return True
+    if '.vpn.mynetname.net' in endpoint_host:
+        return True
+    return False
+
+
 def _wireguard_config_from_uri(raw_payload: str) -> str:
     uri = str(raw_payload or '').strip()
     parsed = urlparse(uri)
@@ -727,6 +738,192 @@ def _sync_router_peer_to_vps(
         'runtime': runtime,
         'commands': commands,
         'attempts': attempts,
+    }
+
+
+def _build_bth_client_profile_name(router_id: Any) -> str:
+    try:
+        numeric = int(router_id)
+    except (TypeError, ValueError):
+        numeric = 0
+    if numeric <= 0:
+        numeric = abs(hash(str(router_id or 'router'))) % 99999
+    return f'wg-bth-r{numeric}'
+
+
+def _normalize_allowed_ips_for_bth_profile(parsed_config: Dict[str, Any], router_host: str) -> str:
+    raw_allowed = parsed_config.get('peer_allowed_ips')
+    tokens = [str(item or '').strip() for item in (raw_allowed or []) if str(item or '').strip()]
+    lowered = {token.lower() for token in tokens}
+    has_default_v4 = '0.0.0.0/0' in lowered
+    has_default_v6 = '::/0' in lowered
+
+    mgmt_allowed = _normalize_wg_allowed_ip(router_host)
+    if mgmt_allowed:
+        return mgmt_allowed
+
+    if tokens and not (has_default_v4 or has_default_v6):
+        return _normalize_wireguard_allowed_subnets(tokens)
+
+    fallback = _first_wireguard_interface_ip(parsed_config)
+    if fallback:
+        return fallback
+    return '0.0.0.0/0,::/0'
+
+
+def _build_bth_client_profile_config(parsed_config: Dict[str, Any], router_host: str, interface_name: str) -> str:
+    interface_private_key = str(parsed_config.get('interface_private_key') or '').strip()
+    peer_public_key = str(parsed_config.get('peer_public_key') or '').strip()
+    endpoint = str(parsed_config.get('endpoint') or '').strip()
+    if not interface_private_key or not peer_public_key or not endpoint:
+        raise ValueError('BTH profile requires interface private key, peer public key and endpoint')
+
+    interface_address = _first_wireguard_interface_ip(parsed_config)
+    if not interface_address:
+        interface_address = '10.255.255.2/32'
+    interface_dns_items = parsed_config.get('interface_dns') if isinstance(parsed_config.get('interface_dns'), list) else []
+    interface_dns = ', '.join([str(item or '').strip() for item in interface_dns_items if str(item or '').strip()])
+    allowed_ips = _normalize_allowed_ips_for_bth_profile(parsed_config, router_host)
+    keepalive = str(parsed_config.get('peer_persistent_keepalive') or '').strip() or '25'
+
+    lines = [
+        '[Interface]',
+        f'# {interface_name}',
+        f'Address = {interface_address}',
+        f'PrivateKey = {interface_private_key}',
+    ]
+    if interface_dns:
+        lines.append(f'DNS = {interface_dns}')
+    lines.extend(
+        [
+            '',
+            '[Peer]',
+            f'PublicKey = {peer_public_key}',
+            f'Endpoint = {endpoint}',
+            f'AllowedIPs = {allowed_ips}',
+            f'PersistentKeepalive = {keepalive}',
+        ]
+    )
+    return '\n'.join(lines) + '\n'
+
+
+def _build_bth_profile_manual_command(interface_name: str, config_text: str) -> str:
+    encoded = base64.b64encode(str(config_text or '').encode('utf-8')).decode('ascii')
+    iface = str(interface_name or '').strip()
+    return (
+        f'echo {shlex.quote(encoded)} | base64 -d | sudo tee /etc/wireguard/{iface}.conf >/dev/null\n'
+        f'sudo chmod 600 /etc/wireguard/{iface}.conf\n'
+        f'sudo wg-quick down {iface} >/dev/null 2>&1 || true\n'
+        f'sudo wg-quick up {iface}\n'
+        f'sudo systemctl enable wg-quick@{iface} >/dev/null 2>&1 || true\n'
+        f'sudo wg show {iface}'
+    )
+
+
+def _sync_bth_profile_to_vps(parsed_config: Dict[str, Any], router_host: str, router_id: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
+    runtime = _resolve_wg_sync_runtime(payload)
+    mode = str(runtime.get('mode') or WG_VPS_SYNC_MODE_DEFAULT)
+    profile_name = _build_bth_client_profile_name(router_id)
+    config_text = _build_bth_client_profile_config(parsed_config, router_host=router_host, interface_name=profile_name)
+    manual_command = _build_bth_profile_manual_command(profile_name, config_text)
+    attempts: List[Dict[str, Any]] = []
+
+    if mode == 'manual':
+        return {
+            'success': False,
+            'mode': 'manual',
+            'message': 'Perfil BTH detectado: ejecuta comando manual para levantar tunel WG cliente en VPS.',
+            'manual_required': True,
+            'manual_command': manual_command,
+            'runtime': runtime,
+            'attempts': attempts,
+            'profile_name': profile_name,
+        }
+
+    if mode in ('auto', 'ssh'):
+        ssh_host = str(runtime.get('ssh_host') or '').strip()
+        ssh_user = str(runtime.get('ssh_user') or '').strip()
+        if ssh_host and ssh_user:
+            encoded = base64.b64encode(str(config_text or '').encode('utf-8')).decode('ascii')
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            connect_kwargs: Dict[str, Any] = {
+                'hostname': ssh_host,
+                'username': ssh_user,
+                'port': int(runtime.get('ssh_port') or 22),
+                'timeout': max(2, int(runtime.get('ssh_timeout_seconds') or 8)),
+                'banner_timeout': max(2, int(runtime.get('ssh_timeout_seconds') or 8)),
+                'auth_timeout': max(2, int(runtime.get('ssh_timeout_seconds') or 8)),
+                'look_for_keys': bool(runtime.get('ssh_key_path')),
+            }
+            if runtime.get('ssh_key_path'):
+                connect_kwargs['key_filename'] = str(runtime.get('ssh_key_path'))
+            if runtime.get('ssh_password'):
+                connect_kwargs['password'] = str(runtime.get('ssh_password'))
+
+            try:
+                client.connect(**connect_kwargs)
+                cmds = [
+                    f'echo {shlex.quote(encoded)} | base64 -d | sudo tee /etc/wireguard/{profile_name}.conf >/dev/null',
+                    f'sudo chmod 600 /etc/wireguard/{profile_name}.conf',
+                    f'sudo wg-quick down {profile_name} >/dev/null 2>&1 || true',
+                    f'sudo wg-quick up {profile_name}',
+                    f'sudo systemctl enable wg-quick@{profile_name} >/dev/null 2>&1 || true',
+                    f'sudo wg show {profile_name}',
+                ]
+                last_result: Dict[str, Any] = {}
+                for cmd in cmds:
+                    last_result = _run_ssh_command(client, cmd, timeout_seconds=int(runtime.get('ssh_timeout_seconds') or 8))
+                    attempts.append({'transport': 'ssh', 'command': cmd, **last_result})
+                    if not last_result.get('ok'):
+                        detail = last_result.get('stderr') or last_result.get('stdout') or last_result.get('error') or 'ssh command failed'
+                        return {
+                            'success': False,
+                            'mode': 'ssh_bth_profile',
+                            'message': f'No se pudo activar perfil BTH por SSH: {detail}',
+                            'manual_required': True,
+                            'manual_command': manual_command,
+                            'runtime': runtime,
+                            'attempts': attempts,
+                            'profile_name': profile_name,
+                        }
+                return {
+                    'success': True,
+                    'mode': 'ssh_bth_profile',
+                    'message': f'Perfil BTH activado en VPS por SSH ({ssh_user}@{ssh_host}).',
+                    'manual_required': False,
+                    'manual_command': manual_command,
+                    'runtime': runtime,
+                    'attempts': attempts,
+                    'profile_name': profile_name,
+                }
+            except Exception as exc:
+                attempts.append({'transport': 'ssh', 'ok': False, 'error': str(exc)})
+                return {
+                    'success': False,
+                    'mode': 'ssh_bth_profile',
+                    'message': f'No se pudo conectar por SSH al VPS: {exc}',
+                    'manual_required': True,
+                    'manual_command': manual_command,
+                    'runtime': runtime,
+                    'attempts': attempts,
+                    'profile_name': profile_name,
+                }
+            finally:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+
+    return {
+        'success': False,
+        'mode': mode,
+        'message': 'Perfil BTH detectado. Configura sync_mode=ssh para activacion automatica en VPS o usa comando manual.',
+        'manual_required': True,
+        'manual_command': manual_command,
+        'runtime': runtime,
+        'attempts': attempts,
+        'profile_name': profile_name,
     }
 
 
@@ -1651,17 +1848,19 @@ def import_wireguard_archive():
             return jsonify({'success': False, 'error': 'File is not a valid WireGuard config'}), 400
 
         tunnel_host = _first_wireguard_interface_host(parsed)
+        is_bth_profile = _is_back_to_home_client_profile(parsed)
         endpoint_host = str(parsed.get('endpoint_host') or '').strip()
         safe_host = re.sub(r'[^a-zA-Z0-9.-]+', '-', endpoint_host).strip('-') if endpoint_host else ''
         suggested_name = f'Nodo-{safe_host}'[:80] if safe_host else ''
 
         suggestions = {
             'router_name': suggested_name,
-            'router_ip_or_host': tunnel_host or endpoint_host,
+            'router_ip_or_host': '' if is_bth_profile else (tunnel_host or endpoint_host),
             'api_port': 8728,
             'bth_private_key': str(parsed.get('interface_private_key') or ''),
             'bth_user_name': 'noc-vps',
             'router_tunnel_ip': tunnel_host or None,
+            'router_management_ip_required': bool(is_bth_profile),
         }
 
         return jsonify(
@@ -1706,7 +1905,16 @@ def onboard_router_from_wireguard_archive():
 
     form = request.form or {}
     parsed_tunnel_host = _first_wireguard_interface_host(parsed)
-    raw_endpoint_host = str(form.get('ip_address') or parsed_tunnel_host or parsed.get('endpoint_host') or '').strip()
+    is_bth_profile = _is_back_to_home_client_profile(parsed)
+    form_ip_address = str(form.get('ip_address') or '').strip()
+    if is_bth_profile and not form_ip_address:
+        return jsonify(
+            {
+                'success': False,
+                'error': 'Para perfil Back To Home por QR debes ingresar IP de gestion del router en "IP o DNS".',
+            }
+        ), 400
+    raw_endpoint_host = str(form_ip_address or parsed_tunnel_host or parsed.get('endpoint_host') or '').strip()
     endpoint_host, _ = _normalize_router_host(raw_endpoint_host)
     if not endpoint_host:
         return jsonify({'success': False, 'error': 'ip_address or WireGuard endpoint host is required'}), 400
@@ -1810,7 +2018,28 @@ def onboard_router_from_wireguard_archive():
     parsed_identity = _router_wireguard_identity_from_parsed_config(parsed, router.id)
 
     if auto_vps_link:
-        if parsed_identity.get('success'):
+        if is_bth_profile:
+            try:
+                sync_result = _sync_bth_profile_to_vps(parsed, router_host=endpoint_host, router_id=router.id, payload=dict(form or {}))
+                vps_sync_payload = {
+                    'success': bool(sync_result.get('success')),
+                    'mode': sync_result.get('mode'),
+                    'message': sync_result.get('message') or '',
+                    'manual_required': bool(sync_result.get('manual_required')),
+                    'manual_command': sync_result.get('manual_command') or '',
+                    'attempts': sync_result.get('attempts') or [],
+                    'runtime': sync_result.get('runtime') or {},
+                }
+            except Exception as sync_exc:
+                vps_sync_payload = {
+                    'success': False,
+                    'mode': 'bth_profile',
+                    'message': f'Error activando perfil BTH en VPS: {sync_exc}',
+                    'manual_required': False,
+                    'manual_command': '',
+                    'attempts': [],
+                }
+        elif parsed_identity.get('success'):
             try:
                 sync_result = _sync_router_peer_to_vps(
                     str(parsed_identity.get('public_key') or '').strip(),

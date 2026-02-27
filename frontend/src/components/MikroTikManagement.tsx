@@ -272,6 +272,7 @@ interface WireGuardImportSuggestions {
   bth_private_key?: string
   bth_user_name?: string
   router_tunnel_ip?: string | null
+  router_management_ip_required?: boolean
 }
 
 interface WireGuardImportResponse {
@@ -930,10 +931,11 @@ const MikroTikManagement: React.FC = () => {
 
         setWireGuardImportSummary(payload)
         const suggestions = payload.suggestions || {}
+        const suggestedIpOrHost = String(suggestions.router_ip_or_host || '').trim()
         setRouterForm((prev) => ({
           ...prev,
           name: prev.name.trim() ? prev.name : String(suggestions.router_name || prev.name || ''),
-          ip_address: prev.ip_address.trim() ? prev.ip_address : String(suggestions.router_ip_or_host || prev.ip_address || ''),
+          ip_address: prev.ip_address.trim() ? prev.ip_address : (suggestedIpOrHost || String(prev.ip_address || '')),
           api_port: String(suggestions.api_port || prev.api_port || '8728'),
         }))
 
@@ -946,6 +948,10 @@ const MikroTikManagement: React.FC = () => {
           setBthUserName(importedBthUser)
         }
 
+        if (Boolean(suggestions.router_management_ip_required) && !routerForm.ip_address.trim() && !suggestedIpOrHost) {
+          addToast('info', 'Perfil BTH detectado: ingresa la IP de gestion del MikroTik en "IP o DNS".')
+        }
+
         addToast('success', sourceKind === 'qr' ? `QR importado: ${payload.source_file || archiveFile.name}` : `WireGuard importado: ${payload.source_file || archiveFile.name}`)
       } catch (error) {
         console.error('Error importing WireGuard archive:', error)
@@ -954,7 +960,7 @@ const MikroTikManagement: React.FC = () => {
         setWireGuardImporting(false)
       }
     },
-    [addToast, apiFetch, appendWireGuardSourceToFormData, bthPrivateKey, bthUserName, safeJson]
+    [addToast, apiFetch, appendWireGuardSourceToFormData, bthPrivateKey, bthUserName, routerForm.ip_address, safeJson]
   )
 
   const onboardRouterFromWireGuardArchive = useCallback(

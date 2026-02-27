@@ -34,6 +34,25 @@ def _build_wireguard_archive(
     return archive_buffer
 
 
+def _build_bth_qr_config_text(
+    endpoint_host: str = 'bbab0a75794c.vpn.mynetname.net',
+    endpoint_port: int = 44161,
+) -> str:
+    return '\n'.join(
+        [
+            '[Interface]',
+            'PrivateKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=',
+            'Address = 192.168.216.4/32',
+            '',
+            '[Peer]',
+            'PublicKey = UkoIc1YP0iCZ0b/NGp39zhaLU02HfKI8aU+C2jp591M=',
+            f'Endpoint = {endpoint_host}:{endpoint_port}',
+            'AllowedIPs = 0.0.0.0/0, ::/0',
+            'PersistentKeepalive = 25',
+        ]
+    )
+
+
 def _admin_headers(client, app):
     with app.app_context():
         user = User(email='mk-admin@test.local', role='admin', name='MK Admin')
@@ -969,6 +988,25 @@ def test_wireguard_import_supports_qr_config_text_payload(client, app):
     assert payload['suggestions']['router_ip_or_host'] == '10.250.8.2'
 
 
+def test_wireguard_import_marks_bth_profile_as_management_ip_required(client, app):
+    headers = _admin_headers(client, app)
+    response = client.post(
+        '/api/mikrotik/wireguard/import',
+        data={
+            'source_name': 'bth-qr.txt',
+            'config_text': _build_bth_qr_config_text(),
+        },
+        headers=headers,
+        content_type='multipart/form-data',
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['success'] is True
+    assert payload['suggestions']['router_management_ip_required'] is True
+    assert payload['suggestions']['router_ip_or_host'] == ''
+    assert payload['suggestions']['router_tunnel_ip'] == '192.168.216.4'
+
+
 def test_wireguard_zip_import_requires_archive_file(client, app):
     headers = _admin_headers(client, app)
     response = client.post(
@@ -1196,6 +1234,84 @@ def test_wireguard_onboard_auto_links_vps_from_config_without_api(client, app, m
     assert payload['vps_sync']['success'] is True
     assert payload['wireguard_router_identity']['success'] is True
     assert trace['allowed_ip'] == '10.250.8.2/32'
+
+
+def test_wireguard_onboard_bth_profile_requires_management_ip(client, app, monkeypatch):
+    headers = _admin_headers(client, app)
+    monkeypatch.setattr(mikrotik_routes, 'MikroTikService', _DummyMikrotikOnboardNoApiService)
+
+    response = client.post(
+        '/api/mikrotik/wireguard/onboard',
+        data={
+            'source_name': 'bth-qr.txt',
+            'config_text': _build_bth_qr_config_text(),
+            'username': 'api-admin',
+            'password': 'router-pass',
+            'api_port': '8728',
+            'auto_vps_link': 'true',
+        },
+        headers=headers,
+        content_type='multipart/form-data',
+    )
+    assert response.status_code == 400
+    assert 'IP de gestion del router' in str(response.get_json().get('error', ''))
+
+
+def test_wireguard_onboard_bth_profile_returns_manual_vps_profile_command(client, app, monkeypatch):
+    headers = _admin_headers(client, app)
+    monkeypatch.setattr(mikrotik_routes, 'MikroTikService', _DummyMikrotikOnboardNoApiService)
+    monkeypatch.setattr(
+        mikrotik_routes,
+        '_build_router_readiness_payload',
+        lambda _service, run_write_probe=False: {
+            'score': 15,
+            'checks': [{'id': 'api_connectivity', 'ok': False, 'severity': 'critical'}],
+            'blockers': [{'id': 'api_connectivity', 'detail': 'unreachable'}],
+            'recommendations': [],
+            'runtime': {'reachable': False},
+            'write_probe_enabled': bool(run_write_probe),
+        },
+    )
+    monkeypatch.setattr(
+        mikrotik_routes,
+        '_resolve_wg_sync_runtime',
+        lambda _payload: {
+            'mode': 'manual',
+            'vps_interface': 'wg0',
+            'persist': True,
+            'ssh_host': '',
+            'ssh_user': '',
+            'ssh_password': '',
+            'ssh_key_path': '',
+            'ssh_port': 22,
+            'ssh_timeout_seconds': 8,
+            'ssh_use_sudo': True,
+        },
+    )
+
+    response = client.post(
+        '/api/mikrotik/wireguard/onboard',
+        data={
+            'source_name': 'bth-qr.txt',
+            'config_text': _build_bth_qr_config_text(),
+            'ip_address': '172.16.0.1',
+            'username': 'api-admin',
+            'password': 'router-pass',
+            'api_port': '8728',
+            'auto_vps_link': 'true',
+            'write_probe': 'false',
+        },
+        headers=headers,
+        content_type='multipart/form-data',
+    )
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload['success'] is True
+    assert payload['router']['ip_address'] == '172.16.0.1'
+    assert payload['vps_sync']['success'] is False
+    assert payload['vps_sync']['mode'] == 'manual'
+    assert payload['vps_sync']['manual_required'] is True
+    assert 'wg-quick up wg-bth-r' in str(payload['vps_sync']['manual_command'])
 
 
 def test_wireguard_onboard_returns_conflict_if_router_exists_and_update_disabled(client, app):
