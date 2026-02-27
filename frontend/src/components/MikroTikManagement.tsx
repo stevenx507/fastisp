@@ -323,47 +323,6 @@ interface WireGuardOnboardResponse {
   vps_sync?: RouterWireGuardRegisterVpsSync
 }
 
-interface WireGuardVpsSyncProfile {
-  mode: 'auto' | 'local' | 'ssh' | 'manual'
-  vps_interface: string
-  persist: boolean
-  ssh_host: string
-  ssh_user: string
-  ssh_port: number
-  ssh_key_path: string
-  ssh_timeout_seconds: number
-  ssh_use_sudo: boolean
-  ssh_password_set?: boolean
-  updated_at?: string | null
-}
-
-interface WireGuardVpsSyncProfileResponse {
-  success?: boolean
-  profile?: WireGuardVpsSyncProfile
-  warnings?: string[]
-  error?: string
-}
-
-interface WireGuardVpsSyncProbeCheck {
-  id: string
-  ok: boolean
-  detail?: string
-}
-
-interface WireGuardVpsSyncProbePayload {
-  success?: boolean
-  mode?: string
-  message?: string
-  warnings?: string[]
-  checks?: WireGuardVpsSyncProbeCheck[]
-}
-
-interface WireGuardVpsSyncProbeResponse {
-  success?: boolean
-  probe?: WireGuardVpsSyncProbePayload
-  error?: string
-}
-
 interface RouterFormState {
   name: string
   ip_address: string
@@ -401,20 +360,6 @@ const copyToClipboard = async (value: string): Promise<boolean> => {
     return copied
   }
 }
-
-const defaultVpsSyncProfile = (): WireGuardVpsSyncProfile => ({
-  mode: 'auto',
-  vps_interface: 'wg0',
-  persist: true,
-  ssh_host: '',
-  ssh_user: '',
-  ssh_port: 22,
-  ssh_key_path: '',
-  ssh_timeout_seconds: 8,
-  ssh_use_sudo: true,
-  ssh_password_set: false,
-  updated_at: null,
-})
 
 const isQrImageFile = (file: File): boolean => {
   const loweredName = String(file.name || '').toLowerCase()
@@ -516,12 +461,6 @@ const MikroTikManagement: React.FC = () => {
   const [enterpriseChangeLog, setEnterpriseChangeLog] = useState<EnterpriseChangeLogEntry[]>([])
   const [wireGuardImporting, setWireGuardImporting] = useState(false)
   const [wireGuardImportSummary, setWireGuardImportSummary] = useState<WireGuardImportResponse | null>(null)
-  const [vpsSyncProfile, setVpsSyncProfile] = useState<WireGuardVpsSyncProfile>(defaultVpsSyncProfile)
-  const [vpsSyncLoading, setVpsSyncLoading] = useState(false)
-  const [vpsSyncSaving, setVpsSyncSaving] = useState(false)
-  const [vpsSyncTesting, setVpsSyncTesting] = useState(false)
-  const [vpsSyncPassword, setVpsSyncPassword] = useState('')
-  const [vpsSyncClearPassword, setVpsSyncClearPassword] = useState(false)
   const token = useAuthStore((state) => state.token)
   const tenantContextId = useAuthStore((state) => state.tenantContextId)
   const logout = useAuthStore((state) => state.logout)
@@ -735,135 +674,9 @@ const MikroTikManagement: React.FC = () => {
     [apiFetch, safeJson]
   )
 
-  const loadVpsSyncProfile = useCallback(async () => {
-    setVpsSyncLoading(true)
-    try {
-      const response = await apiFetch('/api/mikrotik/wireguard/vps-sync-profile')
-      const payload = (await safeJson(response)) as WireGuardVpsSyncProfileResponse | null
-      if (response.ok && payload?.success && payload.profile) {
-        const base = defaultVpsSyncProfile()
-        setVpsSyncProfile({
-          ...base,
-          ...payload.profile,
-          mode: (payload.profile.mode || base.mode) as WireGuardVpsSyncProfile['mode'],
-          ssh_port: Number(payload.profile.ssh_port || base.ssh_port),
-          ssh_timeout_seconds: Number(payload.profile.ssh_timeout_seconds || base.ssh_timeout_seconds),
-          persist: Boolean(payload.profile.persist),
-          ssh_use_sudo: Boolean(payload.profile.ssh_use_sudo),
-          ssh_password_set: Boolean(payload.profile.ssh_password_set),
-        })
-        return
-      }
-      setVpsSyncProfile(defaultVpsSyncProfile())
-    } catch (error) {
-      console.error('Error loading WG VPS sync profile:', error)
-      setVpsSyncProfile(defaultVpsSyncProfile())
-    } finally {
-      setVpsSyncLoading(false)
-    }
-  }, [apiFetch, safeJson])
-
-  const saveVpsSyncProfile = useCallback(async () => {
-    setVpsSyncSaving(true)
-    try {
-      const payloadBody: Record<string, unknown> = {
-        mode: vpsSyncProfile.mode,
-        vps_interface: vpsSyncProfile.vps_interface,
-        persist: vpsSyncProfile.persist,
-        ssh_host: vpsSyncProfile.ssh_host,
-        ssh_user: vpsSyncProfile.ssh_user,
-        ssh_port: Number(vpsSyncProfile.ssh_port || 22),
-        ssh_key_path: vpsSyncProfile.ssh_key_path,
-        ssh_timeout_seconds: Number(vpsSyncProfile.ssh_timeout_seconds || 8),
-        ssh_use_sudo: vpsSyncProfile.ssh_use_sudo,
-        clear_ssh_password: vpsSyncClearPassword,
-      }
-      if (vpsSyncPassword.trim()) payloadBody.ssh_password = vpsSyncPassword.trim()
-      const response = await apiFetch('/api/mikrotik/wireguard/vps-sync-profile', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payloadBody),
-      })
-      const payload = (await safeJson(response)) as WireGuardVpsSyncProfileResponse | null
-      if (!response.ok || !payload?.success || !payload.profile) {
-        addToast('error', payload?.error || 'No se pudo guardar perfil VPS sync')
-        return
-      }
-      const base = defaultVpsSyncProfile()
-      setVpsSyncProfile({
-        ...base,
-        ...payload.profile,
-        mode: (payload.profile.mode || base.mode) as WireGuardVpsSyncProfile['mode'],
-        ssh_port: Number(payload.profile.ssh_port || base.ssh_port),
-        ssh_timeout_seconds: Number(payload.profile.ssh_timeout_seconds || base.ssh_timeout_seconds),
-        persist: Boolean(payload.profile.persist),
-        ssh_use_sudo: Boolean(payload.profile.ssh_use_sudo),
-        ssh_password_set: Boolean(payload.profile.ssh_password_set),
-      })
-      setVpsSyncPassword('')
-      setVpsSyncClearPassword(false)
-      addToast('success', 'Perfil VPS sync guardado')
-      for (const warning of payload.warnings || []) {
-        addToast('info', warning)
-      }
-    } catch (error) {
-      console.error('Error saving WG VPS sync profile:', error)
-      addToast('error', normalizeUiError(error, 'Error guardando perfil VPS sync'))
-    } finally {
-      setVpsSyncSaving(false)
-    }
-  }, [addToast, apiFetch, safeJson, vpsSyncClearPassword, vpsSyncPassword, vpsSyncProfile])
-
-  const testVpsSyncProfile = useCallback(async () => {
-    setVpsSyncTesting(true)
-    try {
-      const payloadBody: Record<string, unknown> = {
-        mode: vpsSyncProfile.mode,
-        vps_interface: vpsSyncProfile.vps_interface,
-        persist: vpsSyncProfile.persist,
-        ssh_host: vpsSyncProfile.ssh_host,
-        ssh_user: vpsSyncProfile.ssh_user,
-        ssh_port: Number(vpsSyncProfile.ssh_port || 22),
-        ssh_key_path: vpsSyncProfile.ssh_key_path,
-        ssh_timeout_seconds: Number(vpsSyncProfile.ssh_timeout_seconds || 8),
-        ssh_use_sudo: vpsSyncProfile.ssh_use_sudo,
-      }
-      if (vpsSyncPassword.trim()) payloadBody.ssh_password = vpsSyncPassword.trim()
-
-      const response = await apiFetch('/api/mikrotik/wireguard/vps-sync-profile/test', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payloadBody),
-      })
-      const payload = (await safeJson(response)) as WireGuardVpsSyncProbeResponse | null
-      if (!response.ok || !payload?.probe) {
-        addToast('error', payload?.error || 'No se pudo probar VPS sync')
-        return
-      }
-
-      if (payload.success) {
-        addToast('success', payload.probe.message || 'VPS sync listo')
-      } else {
-        addToast('error', payload.probe.message || 'VPS sync no listo')
-      }
-      for (const warning of payload.probe.warnings || []) {
-        addToast('info', warning)
-      }
-      for (const check of payload.probe.checks || []) {
-        if (!check.ok && check.detail) addToast('info', `${check.id}: ${check.detail}`)
-      }
-    } catch (error) {
-      console.error('Error testing WG VPS sync profile:', error)
-      addToast('error', normalizeUiError(error, 'Error probando VPS sync'))
-    } finally {
-      setVpsSyncTesting(false)
-    }
-  }, [addToast, apiFetch, safeJson, vpsSyncPassword, vpsSyncProfile])
-
   useEffect(() => {
     loadRouters()
-    loadVpsSyncProfile()
-  }, [loadRouters, loadVpsSyncProfile])
+  }, [loadRouters])
 
   useEffect(() => {
     if (!selectedRouter) return
@@ -1807,153 +1620,6 @@ const MikroTikManagement: React.FC = () => {
           />
           Preflight validado para ejecutar cambios en vivo
         </label>
-      </div>
-
-      <div className="rounded-xl border border-indigo-200 bg-indigo-50 p-4 shadow-sm">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <p className="text-xs font-semibold uppercase tracking-wide text-indigo-800">Perfil VPS Sync (WireGuard)</p>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => void loadVpsSyncProfile()}
-              disabled={vpsSyncLoading || vpsSyncSaving}
-              className="rounded bg-slate-700 px-2 py-1 text-xs font-semibold text-white hover:bg-slate-800 disabled:opacity-60"
-            >
-              {vpsSyncLoading ? 'Cargando...' : 'Refrescar'}
-            </button>
-            <button
-              onClick={() => void saveVpsSyncProfile()}
-              disabled={vpsSyncLoading || vpsSyncSaving || vpsSyncTesting}
-              className="rounded bg-indigo-600 px-2 py-1 text-xs font-semibold text-white hover:bg-indigo-700 disabled:opacity-60"
-            >
-              {vpsSyncSaving ? 'Guardando...' : 'Guardar'}
-            </button>
-            <button
-              onClick={() => void testVpsSyncProfile()}
-              disabled={vpsSyncLoading || vpsSyncSaving || vpsSyncTesting}
-              className="rounded bg-emerald-600 px-2 py-1 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-60"
-            >
-              {vpsSyncTesting ? 'Probando...' : 'Probar SSH'}
-            </button>
-          </div>
-        </div>
-        <p className="mt-1 text-xs text-indigo-800">
-          Recomendado: `sync_mode=ssh` para automatizar enlazado VPS sin comandos manuales.
-        </p>
-        <div className="mt-3 grid grid-cols-1 gap-2 md:grid-cols-4">
-          <label className="text-xs text-indigo-900">
-            Modo
-            <select
-              value={vpsSyncProfile.mode}
-              onChange={(e) => setVpsSyncProfile((prev) => ({ ...prev, mode: e.target.value as WireGuardVpsSyncProfile['mode'] }))}
-              className="mt-1 w-full rounded border border-indigo-300 bg-white px-2 py-1 text-xs text-gray-900"
-            >
-              <option value="auto">auto</option>
-              <option value="ssh">ssh</option>
-              <option value="local">local</option>
-              <option value="manual">manual</option>
-            </select>
-          </label>
-          <label className="text-xs text-indigo-900">
-            Interfaz VPS
-            <input
-              value={vpsSyncProfile.vps_interface}
-              onChange={(e) => setVpsSyncProfile((prev) => ({ ...prev, vps_interface: e.target.value }))}
-              className="mt-1 w-full rounded border border-indigo-300 bg-white px-2 py-1 text-xs text-gray-900"
-              placeholder="wg0"
-            />
-          </label>
-          <label className="text-xs text-indigo-900">
-            SSH host
-            <input
-              value={vpsSyncProfile.ssh_host}
-              onChange={(e) => setVpsSyncProfile((prev) => ({ ...prev, ssh_host: e.target.value }))}
-              className="mt-1 w-full rounded border border-indigo-300 bg-white px-2 py-1 text-xs text-gray-900"
-              placeholder="127.0.0.1"
-            />
-          </label>
-          <label className="text-xs text-indigo-900">
-            SSH user
-            <input
-              value={vpsSyncProfile.ssh_user}
-              onChange={(e) => setVpsSyncProfile((prev) => ({ ...prev, ssh_user: e.target.value }))}
-              className="mt-1 w-full rounded border border-indigo-300 bg-white px-2 py-1 text-xs text-gray-900"
-              placeholder="root"
-            />
-          </label>
-        </div>
-        <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-4">
-          <label className="text-xs text-indigo-900">
-            SSH puerto
-            <input
-              value={String(vpsSyncProfile.ssh_port || 22)}
-              onChange={(e) => setVpsSyncProfile((prev) => ({ ...prev, ssh_port: Number(e.target.value || 22) }))}
-              className="mt-1 w-full rounded border border-indigo-300 bg-white px-2 py-1 text-xs text-gray-900"
-              placeholder="22"
-            />
-          </label>
-          <label className="text-xs text-indigo-900">
-            Timeout SSH (s)
-            <input
-              value={String(vpsSyncProfile.ssh_timeout_seconds || 8)}
-              onChange={(e) => setVpsSyncProfile((prev) => ({ ...prev, ssh_timeout_seconds: Number(e.target.value || 8) }))}
-              className="mt-1 w-full rounded border border-indigo-300 bg-white px-2 py-1 text-xs text-gray-900"
-              placeholder="8"
-            />
-          </label>
-          <label className="text-xs text-indigo-900 md:col-span-2">
-            SSH key path (opcional)
-            <input
-              value={vpsSyncProfile.ssh_key_path}
-              onChange={(e) => setVpsSyncProfile((prev) => ({ ...prev, ssh_key_path: e.target.value }))}
-              className="mt-1 w-full rounded border border-indigo-300 bg-white px-2 py-1 text-xs text-gray-900"
-              placeholder="/home/ispmax/.ssh/id_rsa"
-            />
-          </label>
-        </div>
-        <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-2">
-          <label className="text-xs text-indigo-900">
-            SSH password (opcional)
-            <input
-              type="password"
-              value={vpsSyncPassword}
-              onChange={(e) => setVpsSyncPassword(e.target.value)}
-              className="mt-1 w-full rounded border border-indigo-300 bg-white px-2 py-1 text-xs text-gray-900"
-              placeholder={vpsSyncProfile.ssh_password_set ? '*** guardado (deja vacio para mantener)' : 'password SSH'}
-            />
-          </label>
-          <label className="mt-6 flex items-center gap-2 text-xs text-indigo-900">
-            <input
-              type="checkbox"
-              checked={vpsSyncClearPassword}
-              onChange={(e) => setVpsSyncClearPassword(e.target.checked)}
-              className="h-4 w-4"
-            />
-            Limpiar password guardado
-          </label>
-        </div>
-        <div className="mt-2 flex flex-wrap items-center gap-4 text-xs text-indigo-900">
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={vpsSyncProfile.persist}
-              onChange={(e) => setVpsSyncProfile((prev) => ({ ...prev, persist: e.target.checked }))}
-              className="h-4 w-4"
-            />
-            Persistir cambios WG
-          </label>
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={vpsSyncProfile.ssh_use_sudo}
-              onChange={(e) => setVpsSyncProfile((prev) => ({ ...prev, ssh_use_sudo: e.target.checked }))}
-              className="h-4 w-4"
-            />
-            Ejecutar con sudo
-          </label>
-          <span className="rounded bg-indigo-100 px-2 py-1 font-semibold text-indigo-800">
-            password guardado: {vpsSyncProfile.ssh_password_set ? 'si' : 'no'}
-          </span>
-        </div>
       </div>
 
       <div className="rounded-xl border border-gray-200 bg-white p-4 shadow">
